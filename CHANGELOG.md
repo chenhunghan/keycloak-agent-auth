@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/chenhunghan/keycloak-agent-auth/compare/keycloak-agent-auth-v0.2.0...keycloak-agent-auth-v0.2.1) (2026-04-05)
+
+
+### Documentation
+
+* note release automation ([a1033ac](https://github.com/chenhunghan/keycloak-agent-auth/commit/a1033ac294e13f191da103ad5ad35cf4538f278c))
+
 ## [0.2.0](https://github.com/chenhunghan/keycloak-agent-auth/compare/keycloak-agent-auth-v0.1.0...keycloak-agent-auth-v0.2.0) (2026-04-05)
 
 
