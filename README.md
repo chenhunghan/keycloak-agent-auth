@@ -170,6 +170,8 @@ This repository uses Conventional Commits.
 
 The hook rejects commit subjects that do not match formats like `feat: ...` or `fix(scope): ...`.
 
+Release automation is handled by release-please.
+
 ### Local development with Docker Compose
 
 ```bash
