@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Java
+        uses: actions/setup-java@v5.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build jar
+        run: mvn -DskipTests package
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2.6.1
+        with:
+          files: target/keycloak-agent-auth-*.jar
