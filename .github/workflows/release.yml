@@ -48,7 +48,19 @@ jobs:
       - name: Build jar
         run: mvn -DskipTests package
 
+      - name: Generate checksums
+        run: |
+          shopt -s nullglob
+          jars=(target/*.jar)
+          if [ ${#jars[@]} -eq 0 ]; then
+            echo "No jar artifacts found in target/" >&2
+            exit 1
+          fi
+          sha256sum "${jars[@]}" > target/checksums.txt
+
       - name: Upload jar to release
         uses: softprops/action-gh-release@v2.6.1
         with:
-          files: target/keycloak-agent-auth-*.jar
+          files: |
+            target/*.jar
+            target/checksums.txt
