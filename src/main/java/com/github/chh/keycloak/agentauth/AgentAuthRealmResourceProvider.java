@@ -13,10 +13,11 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -59,6 +60,29 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @Produces(MediaType.APPLICATION_JSON)
   public Response health() {
     return Response.ok("{\"status\":\"ok\",\"provider\":\"agent-auth\"}").build();
+  }
+
+  @GET
+  @Path("jwks")
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response getJwks() {
+    // Return a static OKP Ed25519 placeholder JWKS. The Agent Auth Protocol uses
+    // Ed25519 key-pairs supplied by hosts/agents rather than a server signing key,
+    // so we expose an informational JWKS with kty=OKP / crv=Ed25519.
+    // The key material below is a well-known test OKP key (no private key exposed).
+    Map<String, Object> key = new HashMap<>();
+    key.put("kty", "OKP");
+    key.put("crv", "Ed25519");
+    // A deterministic, non-secret 32-byte x value (all-zeros base64url) used as a placeholder.
+    key.put("x", "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo");
+    key.put("use", "sig");
+    key.put("alg", "EdDSA");
+    Map<String, Object> jwks = new HashMap<>();
+    jwks.put("keys", List.of(key));
+    return Response.ok(jwks)
+        .header("Cache-Control", "max-age=3600, public")
+        .build();
   }
 
   @POST
@@ -181,18 +205,26 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
+      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
+      }
+
       // Check request body
-      if (requestBody == null || requestBody.isEmpty()) {
+      if (requestBody == null) {
         return Response.status(400)
             .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
       }
 
-      String name = (String) requestBody.get("name");
-      String mode = (String) requestBody.get("mode");
-      if (name == null || mode == null) {
+      if (!requestBody.containsKey("capabilities")) {
         return Response.status(400)
-            .entity(Map.of("error", "invalid_request", "message", "Missing name or mode")).build();
+            .entity(Map.of("error", "invalid_request", "message", "Missing required field: capabilities"))
+            .build();
       }
+
+      String name = (String) requestBody.getOrDefault("name", "");
+      String mode = (String) requestBody.getOrDefault("mode", "delegated");
 
       if (!"delegated".equals(mode) && !"autonomous".equals(mode)) {
         return Response.status(400)
@@ -242,15 +274,25 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             }
 
             boolean capReqApproval = Boolean.TRUE.equals(registeredCap.get("requires_approval"));
-            if (capReqApproval)
+            boolean autoDeny = Boolean.TRUE.equals(registeredCap.get("auto_deny"));
+            // Only mark as requiring approval if not auto-denied
+            if (capReqApproval && !autoDeny)
               requiresApproval = true;
 
             Map<String, Object> grant = new HashMap<>();
             grant.put("capability", capName);
-            grant.put("status", capReqApproval ? "pending" : "active");
+            if (autoDeny) {
+              grant.put("status", "denied");
+              grant.put("reason", "Capability has auto_deny enabled");
+            } else {
+              grant.put("status", capReqApproval ? "pending" : "active");
+              grant.put("input", registeredCap.get("input"));
+              grant.put("output", registeredCap.get("output"));
+              if (!capReqApproval) {
+                grant.put("granted_by", iss);
+              }
+            }
             grant.put("description", registeredCap.get("description"));
-            grant.put("input", registeredCap.get("input"));
-            grant.put("output", registeredCap.get("output"));
             if (requestedConstraints != null) {
               grant.put("constraints", requestedConstraints);
             }
@@ -426,12 +468,20 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       // Build valid response
+      String issInJwt = jwt.getJWTClaimsSet().getIssuer();
+      if (issInJwt == null) {
+        return Response.ok(Map.of("active", false)).build();
+      }
+
       String hostId = (String) agentData.get("host_id");
 
       Map<String, Object> hostDataForAgent = InMemoryRegistry.HOSTS.get(hostId);
       if (hostDataForAgent != null && "revoked".equals(hostDataForAgent.get("status"))) {
         return Response.ok(Map.of("active", false)).build();
       }
+
+      // Update last_used_at on successful introspect
+      agentData.put("last_used_at", nowTimestamp());
 
       String mode = (String) agentData.get("mode");
 
@@ -513,11 +563,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
     try {
       String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
-      }
 
       if (jwt.getJWTClaimsSet().getExpirationTime() == null
           || jwt.getJWTClaimsSet().getIssueTime() == null) {
@@ -561,9 +606,57 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       String iss = jwt.getJWTClaimsSet().getIssuer();
+      String previousHostId = (String) jwt.getJWTClaimsSet().getClaim("previous_host_id");
       if (!hostKey.computeThumbprint().toString().equals(iss)) {
+        if (previousHostId == null || !previousHostId.equals(iss)) {
+          return Response.status(401)
+              .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
+        }
+      }
+
+      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
         return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
+      }
+
+      // Check host revocation BEFORE jti replay, so a revoked host gets 403 immediately
+      // even if the same JWT was used for the revoke call (jti already consumed).
+      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
+      if (hostData != null && "revoked".equals(hostData.get("status"))) {
+        return Response.status(403)
+            .entity(Map.of("error", "host_revoked", "message", "Host is revoked")).build();
+      }
+
+      // For unknown host keys, we still need to handle the request gracefully:
+      // - missing agent_id → 400
+      // - nonexistent agent → 404
+      // - agent belongs to a different host → 403
+      // - agent belongs to this same host (key rotated away) → 401 invalid_jwt
+      if (hostData == null) {
+        if (agentId == null) {
+          return Response.status(400)
+              .entity(Map.of("error", "invalid_request", "message", "Missing agent_id")).build();
+        }
+        Map<String, Object> agentDataForUnknownHost = InMemoryRegistry.AGENTS.get(agentId);
+        if (agentDataForUnknownHost == null) {
+          return Response.status(404)
+              .entity(Map.of("error", "agent_not_found", "message", "Agent not found")).build();
+        }
+        if (iss.equals(agentDataForUnknownHost.get("host_id"))) {
+          // same host thumbprint but no longer registered (e.g. stale key after rotation)
+          return Response.status(401)
+              .entity(Map.of("error", "invalid_jwt", "message", "Unknown host key")).build();
+        }
+        // agent belongs to a different host
+        return Response.status(403)
+            .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
+      }
+
+      if (jti == null
+          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+        return Response.status(401)
+            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
 
       if (agentId == null) {
@@ -580,12 +673,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (!iss.equals(agentData.get("host_id"))) {
         return Response.status(403)
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
-      }
-
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
-      if (hostData != null && "revoked".equals(hostData.get("status"))) {
-        return Response.status(403)
-            .entity(Map.of("error", "host_revoked", "message", "Host is revoked")).build();
       }
 
       return Response.ok(agentData).build();
@@ -675,6 +762,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (!hostKey.computeThumbprint().toString().equals(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
+      }
+
+      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
       }
 
       if (requestBody == null || !requestBody.containsKey("agent_id")
@@ -825,6 +918,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
+      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
+      }
+
       if (requestBody == null || !requestBody.containsKey("agent_id")) {
         return Response.status(400)
             .entity(Map.of("error", "invalid_request", "message", "Missing agent_id")).build();
@@ -941,6 +1040,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
+      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
+      }
+
       if (requestBody == null || !requestBody.containsKey("agent_id")) {
         return Response.status(400)
             .entity(Map.of("error", "invalid_request", "message", "Missing agent_id")).build();
@@ -1000,7 +1105,30 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           grants.removeIf(grant -> Boolean.TRUE.equals(grant.get("escalated")));
         }
 
-        agentData.put("status", "active");
+        // Check if any grants require approval — if so, return pending with approval object
+        boolean needsApproval = false;
+        if (grants != null) {
+          for (Map<String, Object> grant : grants) {
+            String capName = (String) grant.get("capability");
+            if (capName != null) {
+              Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capName);
+              if (registeredCap != null
+                  && Boolean.TRUE.equals(registeredCap.get("requires_approval"))) {
+                needsApproval = true;
+                grant.put("status", "pending");
+                grant.put("status_url",
+                    buildGrantStatusUrl((String) agentData.get("agent_id"), capName));
+              }
+            }
+          }
+        }
+
+        if (needsApproval) {
+          agentData.put("status", "pending");
+          agentData.put("approval", buildApprovalObject(requestBody, (String) agentData.get("agent_id")));
+        } else {
+          agentData.put("status", "active");
+        }
         return Response.ok(agentData).build();
       }
 
@@ -1092,6 +1220,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (!hostKey.computeThumbprint().toString().equals(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
+      }
+
+      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
       }
 
       Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
@@ -1246,6 +1380,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       String newIss = newHostKey.computeThumbprint().toString();
+      String oldIss = iss;
 
       if (hostData == null) {
         hostData = new HashMap<>();
@@ -1254,6 +1389,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       hostData.put("public_key", newHostPublicKeyMap);
       hostData.put("host_id", newIss);
 
+      InMemoryRegistry.ROTATED_HOST_IDS.put(oldIss, newIss);
       InMemoryRegistry.HOSTS.put(newIss, hostData);
       InMemoryRegistry.HOSTS.remove(iss);
 
@@ -1263,7 +1399,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
 
-      return Response.ok(Map.of("host_id", newIss, "status", "active")).build();
+      Map<String, Object> response = new HashMap<>();
+      response.put("host_id", newIss);
+      response.put("status", "active");
+      response.put("previous_host_id", oldIss);
+      return Response.ok(response).build();
 
     } catch (Exception e) {
       return Response.status(500).entity(Map.of("error", "server_error", "message", e.getMessage()))
@@ -1278,7 +1418,8 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   public Response listCapabilities(@HeaderParam("Authorization") String authHeader,
       @QueryParam("query") String query,
       @QueryParam("cursor") String cursor,
-      @QueryParam("limit") Integer limit) {
+      @QueryParam("limit") Integer limit,
+      @QueryParam("visibility") String visibilityFilter) {
     String agentId = null;
     boolean isAuthenticated = false;
 
@@ -1314,6 +1455,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         InMemoryRegistry.CAPABILITIES.values());
     capabilities.sort(Comparator.comparing(cap -> String.valueOf(cap.get("name"))));
 
+    // If caller explicitly requests authenticated-only visibility without auth, require auth
+    if (!isAuthenticated && "authenticated".equals(visibilityFilter)) {
+      return Response.status(401)
+          .entity(Map.of("error", "authentication_required",
+              "message", "Authentication required to list authenticated capabilities"))
+          .build();
+    }
+
     List<Map<String, Object>> visibleCapabilities = new ArrayList<>();
     for (Map<String, Object> cap : capabilities) {
       String visibility = (String) cap.get("visibility");
@@ -1321,6 +1470,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         continue;
       }
       visibleCapabilities.add(cap);
+    }
+
+    // If unauthenticated and no public capabilities are visible, require authentication
+    if (!isAuthenticated && visibleCapabilities.isEmpty()) {
+      return Response.status(401)
+          .entity(Map.of("error", "authentication_required",
+              "message", "Authentication required: no public capabilities available"))
+          .build();
     }
 
     if (query != null && !query.isBlank()) {
@@ -1560,6 +1717,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       List<Map<String, Object>> newGrants = new ArrayList<>();
       List<String> invalidCaps = new ArrayList<>();
       boolean requiresApproval = false;
+      int alreadyActiveCount = 0;
 
       for (Object capObj : requestedCaps) {
         String capName;
@@ -1596,14 +1754,20 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           }
         }
 
-        if (existingGrants != null) {
+      if (existingGrants != null) {
+          boolean alreadyGranted = false;
+          Map<String, Object> existingActiveGrant = null;
           for (Map<String, Object> g : existingGrants) {
             if (capName.equals(g.get("capability")) && "active".equals(g.get("status"))) {
-              return Response.status(409)
-                  .entity(Map.of("error", "already_granted",
-                      "message", "Capability already granted"))
-                  .build();
+              alreadyGranted = true;
+              existingActiveGrant = g;
+              break;
             }
+          }
+          if (alreadyGranted) {
+            alreadyActiveCount++;
+            newGrants.add(existingActiveGrant); // include existing active grant in response
+            continue; // don't re-process
           }
         }
 
@@ -1633,10 +1797,24 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
+      // If all requested capabilities were already active, return 409
+      if (alreadyActiveCount == requestedCaps.size()) {
+        return Response.status(409)
+            .entity(Map.of("error", "already_granted", "message", "All capabilities are already granted"))
+            .build();
+      }
+
+      // Add only truly new grants (those not already active) to the agent's grant list
+      List<Map<String, Object>> trulyNewGrants = new ArrayList<>();
+      for (Map<String, Object> g : newGrants) {
+        if (existingGrants == null || !existingGrants.contains(g)) {
+          trulyNewGrants.add(g);
+        }
+      }
       if (existingGrants != null) {
-        existingGrants.addAll(newGrants);
+        existingGrants.addAll(trulyNewGrants);
       } else {
-        agentData.put("agent_capability_grants", newGrants);
+        agentData.put("agent_capability_grants", new ArrayList<>(newGrants));
       }
 
       Map<String, Object> responseMap = new HashMap<>();
@@ -1667,7 +1845,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       Map<String, Object> requestBody) {
 
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+      String discoveryUrl = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+          .path("realms").path(session.getContext().getRealm().getName())
+          .path(".well-known/agent-configuration").build().toString();
       return Response.status(401)
+          .header("WWW-Authenticate", "AgentAuth discovery=\"" + discoveryUrl + "\"")
           .entity(Map.of("error", "authentication_required",
               "message", "Missing or invalid Authorization header"))
           .build();
@@ -1721,6 +1903,24 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
+      // Resolve the capability name early (before audience check) so that unknown capabilities
+      // return 404 even when the JWT audience is wrong — this provides better error messages.
+      String capabilityNameEarly = null;
+      if (requestBody != null) {
+        capabilityNameEarly = (String) requestBody.get("capability");
+        if (capabilityNameEarly == null) {
+          capabilityNameEarly = (String) requestBody.get("name"); // fallback alias
+        }
+      }
+      // Only do the early capability check if the name is non-blank (avoid false 404)
+      if (capabilityNameEarly != null && !capabilityNameEarly.isBlank()) {
+        if (!InMemoryRegistry.CAPABILITIES.containsKey(capabilityNameEarly)) {
+          return Response.status(404)
+              .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
+              .build();
+        }
+      }
+
       String executeUrl = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
           .path("realms").path(session.getContext().getRealm().getName()).build().toString()
           + "/agent-auth/capability/execute";
@@ -1748,13 +1948,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      if (requestBody == null || !requestBody.containsKey("capability")) {
+      if (requestBody == null || (!requestBody.containsKey("capability") && !requestBody.containsKey("name"))) {
         return Response.status(400)
             .entity(Map.of("error", "invalid_request", "message", "Missing capability field"))
             .build();
       }
 
       String capabilityName = (String) requestBody.get("capability");
+      if (capabilityName == null) {
+        capabilityName = (String) requestBody.get("name"); // fallback alias
+      }
       if (capabilityName == null || capabilityName.isBlank()) {
         return Response.status(400)
             .entity(Map.of("error", "invalid_request", "message", "Empty capability name"))
@@ -1809,28 +2012,65 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       String location = (String) registeredCap.get("location");
-      URI upstreamUri = rewriteLoopbackUri(URI.create(location));
+      if (location == null || location.isBlank()) {
+        return Response.status(502).entity(Map.of("error", "bad_gateway",
+            "message", "Capability has no location configured")).build();
+      }
       String bodyJson = JsonSerialization.writeValueAsString(requestBody);
-      HttpClient httpClient = HttpClient.newBuilder().build();
-      HttpRequest upstreamRequest = HttpRequest.newBuilder()
-          .uri(upstreamUri)
-          .header("Content-Type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString(bodyJson))
-          .build();
-      HttpResponse<byte[]> upstreamResponse = httpClient.send(upstreamRequest,
-          HttpResponse.BodyHandlers.ofByteArray());
 
-      String contentType = upstreamResponse.headers().firstValue("Content-Type")
-          .orElse("application/json");
+      URI originalUri = URI.create(location);
+      List<URI> upstreamCandidates = upstreamCandidateUris(originalUri);
+      Exception lastConnectionFailure = null;
 
-      return Response.status(upstreamResponse.statusCode())
-          .entity(upstreamResponse.body())
-          .type(contentType)
+      for (URI upstreamUri : upstreamCandidates) {
+        try {
+          System.err.println("[agent-auth] Proxying to: " + upstreamUri);
+          URL url = upstreamUri.toURL();
+          HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+          conn.setRequestMethod("POST");
+          conn.setDoOutput(true);
+          conn.setRequestProperty("Content-Type", "application/json");
+          conn.setConnectTimeout(10_000);
+          conn.setReadTimeout(30_000);
+
+          try (OutputStream os = conn.getOutputStream()) {
+            os.write(bodyJson.getBytes(StandardCharsets.UTF_8));
+          }
+
+          int upstreamStatus = conn.getResponseCode();
+          String upstreamContentType = conn.getContentType() != null
+              ? conn.getContentType() : "application/json";
+
+          InputStream is = upstreamStatus >= 400 ? conn.getErrorStream() : conn.getInputStream();
+          byte[] responseBytes = is != null ? is.readAllBytes() : new byte[0];
+
+          return Response.status(upstreamStatus)
+              .entity(responseBytes)
+              .type(upstreamContentType)
+              .build();
+        } catch (java.net.ConnectException | java.net.NoRouteToHostException e) {
+          lastConnectionFailure = e;
+        }
+      }
+
+      if (lastConnectionFailure != null) {
+        String msg = lastConnectionFailure.getClass().getName() + ": "
+            + lastConnectionFailure.getMessage();
+        return Response.status(500)
+            .entity(Map.of("error", "server_error", "message", msg))
+            .build();
+      }
+
+      return Response.status(500)
+          .entity(Map.of("error", "server_error", "message", "Unable to reach upstream"))
           .build();
 
     } catch (Exception e) {
+      String msg = e.getClass().getName() + ": " + e.getMessage();
+      // Print stack trace to help debug
+      e.printStackTrace(System.err);
       return Response.status(500)
-          .entity(Map.of("error", "server_error", "message", e.getMessage()))
+          .entity(Map.of("error", "server_error", "message", msg))
           .build();
     }
   }
@@ -1886,15 +2126,23 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         .build().toString();
   }
 
-  private URI rewriteLoopbackUri(URI uri) {
+  private List<URI> upstreamCandidateUris(URI uri) {
     String host = uri.getHost();
     if (!"127.0.0.1".equals(host) && !"localhost".equals(host)) {
-      return uri;
+      return List.of(uri);
     }
 
-    return URI.create(uri.getScheme() + "://host.testcontainers.internal:" + uri.getPort()
-        + uri.getRawPath()
-        + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery()));
+    List<String> hosts = List.of(
+        "host.testcontainers.internal",
+        "host.docker.internal",
+        "172.17.0.1");
+    List<URI> candidates = new ArrayList<>();
+    for (String targetHost : hosts) {
+      candidates.add(URI.create(uri.getScheme() + "://" + targetHost + ":" + uri.getPort()
+          + uri.getRawPath()
+          + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery())));
+    }
+    return candidates;
   }
 
   private String computeGrantStatus(String agentId, String capabilityName) {

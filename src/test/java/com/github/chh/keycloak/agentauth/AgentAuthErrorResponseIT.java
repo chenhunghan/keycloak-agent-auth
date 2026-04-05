@@ -209,7 +209,15 @@ class AgentAuthErrorResponseIT extends BaseKeycloakIT {
         .baseUri(realmUrl())
         .contentType(ContentType.JSON)
         .header("Authorization", "Bearer " + hostJwt)
-        .body("{}")
+        .body("""
+            {
+              "name": "Error Response Agent",
+              "host_name": "error-response-host",
+              "capabilities": [],
+              "mode": "delegated",
+              "reason": "Error response test"
+            }
+            """)
         .when()
         .post("/agent-auth/agent/register")
         .then()

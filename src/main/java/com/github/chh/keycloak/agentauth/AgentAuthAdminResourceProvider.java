@@ -18,7 +18,7 @@ import org.keycloak.services.resources.admin.ext.AdminRealmResourceProvider;
 
 public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvider {
 
-  private static final Pattern CAPABILITY_NAME_PATTERN = Pattern.compile("[a-z0-9_]+");
+  private static final Pattern CAPABILITY_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9_]+");
   private final KeycloakSession session;
 
   public AgentAuthAdminResourceProvider(KeycloakSession session) {
@@ -44,26 +44,17 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
 
     String name = (String) requestBody.get("name");
     String location = (String) requestBody.get("location");
-    if (location == null || location.isBlank()) {
-      String realmName = session.getContext().getRealm().getName();
-      String issuer = session.getContext().getUri(org.keycloak.urls.UrlType.FRONTEND)
-          .getBaseUriBuilder().path("realms").path(realmName).path("agent-auth").build()
-          .toString();
-      location = issuer + "/capability/execute";
-      requestBody = new HashMap<>(requestBody);
-      requestBody.put("location", location);
-    }
 
-    if (name == null || location == null) {
+    if (name == null || name.isBlank()) {
       return Response.status(400)
-          .entity(Map.of("error", "invalid_request", "message", "Missing name or location"))
+          .entity(Map.of("error", "invalid_request", "message", "Missing name"))
           .build();
     }
 
     if (!CAPABILITY_NAME_PATTERN.matcher(name).matches()) {
       return Response.status(400)
           .entity(Map.of("error", "invalid_request",
-              "message", "Capability name must match [a-z0-9_]+"))
+              "message", "Capability name must match [a-zA-Z0-9_]+"))
           .build();
     }
 
@@ -122,16 +113,27 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
 
   @POST
   @Path("agents/{id}/expire")
+  @Consumes(MediaType.WILDCARD)
   @Produces(MediaType.APPLICATION_JSON)
   @SuppressWarnings("unchecked")
   public Response expireAgent(@jakarta.ws.rs.PathParam("id") String id,
-      Map<String, Object> requestBody) {
+      String rawBody) {
+    Map<String, Object> requestBody = null;
+    if (rawBody != null && !rawBody.isBlank()) {
+      try {
+        requestBody = new com.fasterxml.jackson.databind.ObjectMapper()
+            .readValue(rawBody, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+      } catch (Exception ignored) {
+        // ignore malformed body
+      }
+    }
     Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
     }
     agentData.put("status", "expired");
-    if (requestBody != null && Boolean.TRUE.equals(requestBody.get("absolute_lifetime_elapsed"))) {
+    if (requestBody != null && (Boolean.TRUE.equals(requestBody.get("absolute_lifetime_elapsed"))
+        || Boolean.TRUE.equals(requestBody.get("exceed_absolute_lifetime")))) {
       agentData.put("absolute_lifetime_elapsed", true);
     }
     if (requestBody != null && Boolean.TRUE.equals(requestBody.get("escalate_capability"))) {

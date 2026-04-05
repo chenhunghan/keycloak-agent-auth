@@ -14,8 +14,8 @@ import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import io.restassured.http.ContentType;
 import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -53,8 +53,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
   private static String activeCapability;
   private static String constrainedCapability;
 
-  @BeforeAll
-  static void registerAgent() {
+  @BeforeEach
+  void registerAgent() {
     hostKey = TestKeys.generateEd25519();
     agentKey = TestKeys.generateEd25519();
 

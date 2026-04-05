@@ -160,6 +160,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${maven-surefire-plugin.version}</version>
                 <configuration>
+                    <reuseForks>false</reuseForks>
                     <environmentVariables>
                         <DOCKER_HOST>unix://${user.home}/.docker/run/docker.sock</DOCKER_HOST>
                         <DOCKER_API_VERSION>1.54</DOCKER_API_VERSION>
@@ -190,8 +191,9 @@
                             <goal>integration-test</goal>
                             <goal>verify</goal>
                         </goals>
-                        <configuration>
-                            <environmentVariables>
+                            <configuration>
+                                <reuseForks>false</reuseForks>
+                                <environmentVariables>
                                 <DOCKER_HOST>unix://${user.home}/.docker/run/docker.sock</DOCKER_HOST>
                                 <DOCKER_API_VERSION>1.54</DOCKER_API_VERSION>
                                 <TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE>${user.home}/.docker/run/docker.sock</TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE>

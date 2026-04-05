@@ -18,14 +18,14 @@ public class AgentAuthWellKnownProvider implements WellKnownProvider {
   @Override
   public Object getConfig() {
     String realmName = session.getContext().getRealm().getName();
-    String issuer = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-        .path("realms").path(realmName).build().toString();
+    String agentAuthBase = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(realmName).path("agent-auth").build().toString();
 
     Map<String, Object> config = new HashMap<>();
     config.put("version", "1.0-draft");
     config.put("provider_name", "keycloak-agent-auth");
     config.put("description", "Agent Auth Protocol Extension for Keycloak");
-    config.put("issuer", issuer);
+    config.put("issuer", agentAuthBase);
     config.put("algorithms", List.of("Ed25519"));
     config.put("modes", List.of("delegated", "autonomous"));
     config.put("approval_methods", List.of("device_authorization", "ciba"));
@@ -45,8 +45,8 @@ public class AgentAuthWellKnownProvider implements WellKnownProvider {
     endpoints.put("introspect", "/agent/introspect");
     config.put("endpoints", endpoints);
 
-    config.put("default_location", issuer + "/agent-auth");
-    config.put("jwks_uri", issuer + "/protocol/openid-connect/certs");
+    config.put("default_location", agentAuthBase + "/capability/execute");
+    config.put("jwks_uri", agentAuthBase + "/jwks");
     return config;
   }
 

@@ -4,6 +4,7 @@ import static io.restassured.RestAssured.given;
 
 import dasniko.testcontainers.keycloak.KeycloakContainer;
 import io.restassured.http.ContentType;
+import org.junit.jupiter.api.AfterAll;
 
 /**
  * Shared Keycloak container for all integration tests. Uses the singleton container pattern to
@@ -17,14 +18,11 @@ public abstract class BaseKeycloakIT {
   protected static final String REALM = "master";
 
   @SuppressWarnings("resource")
-  protected static final KeycloakContainer KEYCLOAK = TestcontainersSupport.newKeycloakContainer();
-
-  static {
-    KEYCLOAK.start();
-  }
+  protected static KeycloakContainer KEYCLOAK;
 
   /** Base URL for realm-scoped requests, e.g. http://localhost:PORT/realms/master */
   protected static String realmUrl() {
+    ensureStarted();
     return KEYCLOAK.getAuthServerUrl() + "/realms/" + REALM;
   }
 
@@ -38,11 +36,13 @@ public abstract class BaseKeycloakIT {
    * http://localhost:PORT/admin/realms/master/agent-auth
    */
   protected static String adminApiUrl() {
+    ensureStarted();
     return KEYCLOAK.getAuthServerUrl() + "/admin/realms/" + REALM + "/agent-auth";
   }
 
   /** Fetches an admin access token for Keycloak's admin REST API. */
   protected static String adminAccessToken() {
+    ensureStarted();
     return given()
         .baseUri(realmUrl())
         .contentType(ContentType.URLENC)
@@ -56,5 +56,22 @@ public abstract class BaseKeycloakIT {
         .statusCode(200)
         .extract()
         .path("access_token");
+  }
+
+  private static synchronized void ensureStarted() {
+    if (KEYCLOAK == null) {
+      KEYCLOAK = TestcontainersSupport.newKeycloakContainer();
+    }
+    if (!KEYCLOAK.isRunning()) {
+      KEYCLOAK.start();
+    }
+  }
+
+  @AfterAll
+  static synchronized void stopContainer() {
+    if (KEYCLOAK != null) {
+      KEYCLOAK.stop();
+      KEYCLOAK = null;
+    }
   }
 }
