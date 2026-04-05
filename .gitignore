@@ -1,0 +1,24 @@
+target/
+*.class
+*.jar
+*.log
+
+# IDE
+.idea/
+.pruner/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Maven
+dependency-reduced-pom.xml
+
+# Eclipse annotation processor
+.factorypath
