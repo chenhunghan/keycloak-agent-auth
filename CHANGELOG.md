@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/chenhunghan/keycloak-agent-auth/compare/keycloak-agent-auth-v0.3.0...keycloak-agent-auth-v0.3.1) (2026-04-05)
+
+
+### Bug Fixes
+
+* fix ci build error ([3dde74c](https://github.com/chenhunghan/keycloak-agent-auth/commit/3dde74ccc0dd3be9b7818e9ba791f66bdf8e3a90))
+
 ## [0.3.0](https://github.com/chenhunghan/keycloak-agent-auth/compare/keycloak-agent-auth-v0.2.1...keycloak-agent-auth-v0.3.0) (2026-04-05)
 
 
