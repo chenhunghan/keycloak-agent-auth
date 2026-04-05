@@ -160,6 +160,16 @@ mvn test                      # unit tests only
 mvn verify                    # unit + integration tests (starts Keycloak in Docker)
 ```
 
+### Commit Messages
+
+This repository uses Conventional Commits.
+
+```bash
+./scripts/install-hooks.sh
+```
+
+The hook rejects commit subjects that do not match formats like `feat: ...` or `fix(scope): ...`.
+
 ### Local development with Docker Compose
 
 ```bash
