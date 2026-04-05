@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-  release:
-    types:
-      - published
 
 permissions:
   contents: write
@@ -14,7 +11,6 @@ permissions:
 
 jobs:
   release-please:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -30,14 +26,15 @@ jobs:
           skip-labeling: true
 
   build-and-upload:
-    if: github.event_name == 'release'
+    if: needs.release-please.outputs.release_created == 'true'
+    needs: release-please
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out release tag
         uses: actions/checkout@v6.0.2
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Set up Java
         uses: actions/setup-java@v5.2.0
