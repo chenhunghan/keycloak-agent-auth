@@ -23,7 +23,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json
-          skip-labeling: true
+          skip-labeling: false
 
   build-and-upload:
     if: needs.release-please.outputs.releases_created == 'true'
@@ -59,6 +59,7 @@ jobs:
       - name: Upload jar to release
         uses: softprops/action-gh-release@v2.6.1
         with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
           files: |
             target/*.jar
             target/checksums.txt
