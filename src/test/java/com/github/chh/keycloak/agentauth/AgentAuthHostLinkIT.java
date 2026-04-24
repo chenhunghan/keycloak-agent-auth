@@ -169,6 +169,32 @@ class AgentAuthHostLinkIT extends BaseKeycloakIT {
   }
 
   @Test
+  void registerDelegatedAgentUnderLinkedHost_inheritsUserId() {
+    // §3.2: agent.user_id is "set from the host's user_id or session auth". For a delegated
+    // agent registered AFTER the host is linked, the host's user_id must propagate to the
+    // new agent at registration time — not just to agents that already existed at link time.
+    String userId = createTestUser("propagate-" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair firstAgentKey = TestKeys.generateEd25519();
+    String cap = registerAutoCapability("propagate");
+
+    // First registration creates the (unlinked) host.
+    registerDelegatedAgent(hostKey, firstAgentKey, cap);
+    String hostId = TestKeys.thumbprint(hostKey);
+
+    // Link host to user.
+    linkHostRaw(hostId, userId).then().statusCode(200);
+
+    // A brand-new delegated agent registered under the now-linked host must inherit user_id.
+    OctetKeyPair secondAgentKey = TestKeys.generateEd25519();
+    String secondAgentId = registerDelegatedAgent(hostKey, secondAgentKey, cap);
+
+    assertThat(agentStatusField(secondAgentId, hostKey, "user_id"))
+        .as("§3.2: delegated agent registered under linked host inherits host.user_id")
+        .isEqualTo(userId);
+  }
+
+  @Test
   void unlinkNotLinkedHost_returns204Idempotent() {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();

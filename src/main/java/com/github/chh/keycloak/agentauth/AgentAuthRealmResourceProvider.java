@@ -457,6 +457,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       hostData.put("last_used_at", nowTs);
       storage().putHost(hostId, hostData);
 
+      // §3.2: agent.user_id is "set from the host's user_id or session auth." Delegated agents
+      // registered under an already-linked host inherit the host's user_id at creation time,
+      // matching the cascade the admin link handler performs for pre-existing agents.
+      if ("delegated".equals(mode) && hostData.get("user_id") != null) {
+        agentData.put("user_id", hostData.get("user_id"));
+      }
+
       storage().putAgent(agentId, agentData);
 
       return Response.ok(agentData).build();
