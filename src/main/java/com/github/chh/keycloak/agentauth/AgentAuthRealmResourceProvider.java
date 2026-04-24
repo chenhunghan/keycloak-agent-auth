@@ -432,11 +432,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
 
       if ("pending".equals(status)) {
-        // AAP §7.1: delegated registration on an unlinked host goes through device-authorization
-        // approval. Admin-mediated approval remains available for other pending paths (e.g.
-        // capability-request against an already-linked host).
+        // §7 chooses approval method from {device_authorization, ciba, admin} per approval
+        // context. Linked host → CIBA (we already know the user; §7.3 "prefer CIBA when a
+        // browser-controlling agent might be present"). Unlinked delegated host → device_auth.
+        // Anything else falls back to the admin extension method.
         boolean hostLinked = hostData != null && hostData.get("user_id") != null;
-        if ("delegated".equals(mode) && !hostLinked) {
+        if ("delegated".equals(mode) && hostLinked) {
+          String bindingMessage = requestBody.get("binding_message") instanceof String bm
+              ? bm
+              : null;
+          agentData.put("approval", buildCibaApprovalObject(agentId, bindingMessage));
+        } else if ("delegated".equals(mode)) {
           String userCode = generateUserCode();
           agentData.put("user_code", userCode);
           agentData.put("approval", buildDeviceAuthApprovalObject(agentId, userCode));
@@ -2736,20 +2742,40 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .build();
     }
 
-    if (requestBody == null || !(requestBody.get("user_code") instanceof String rawCode)
-        || ((String) requestBody.get("user_code")).isBlank()) {
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = null;
+    if (requestBody != null) {
+      Object rawCode = requestBody.get("user_code");
+      Object rawAgentId = requestBody.get("agent_id");
+      if (rawCode instanceof String uc && !uc.isBlank()) {
+        agentData = storage.findAgentByUserCode(normalizeUserCode(uc));
+      } else if (rawAgentId instanceof String aid && !aid.isBlank()) {
+        // §7.2 CIBA path: the user found the pending approval through /inbox and submits the
+        // agent_id directly rather than a user_code.
+        agentData = storage.getAgent(aid);
+        if (agentData != null && !isApprovingUserOwner(auth, agentData, storage)) {
+          // An agent_id lookup bypasses user_code secrecy; enforce that the caller actually
+          // owns the host the agent is registered under.
+          return Response.status(403)
+              .entity(Map.of("error", "not_approver",
+                  "message", "Only the linked user may approve via agent_id"))
+              .build();
+        }
+      } else {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request",
+                "message", "Missing user_code or agent_id"))
+            .build();
+      }
+    } else {
       return Response.status(400)
-          .entity(Map.of("error", "invalid_request", "message", "Missing user_code"))
+          .entity(Map.of("error", "invalid_request", "message", "Missing user_code or agent_id"))
           .build();
     }
-    String userCode = normalizeUserCode(rawCode);
-
-    AgentAuthStorage storage = storage();
-    Map<String, Object> agentData = storage.findAgentByUserCode(userCode);
     if (agentData == null) {
       return Response.status(404)
           .entity(Map.of("error", "unknown_user_code",
-              "message", "No pending approval for that user_code"))
+              "message", "No pending approval for that identifier"))
           .build();
     }
 
@@ -2938,6 +2964,62 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     return false;
   }
 
+  /**
+   * For the §7.2 CIBA / agent_id lookup path: confirm the authenticated caller owns the host that
+   * the agent is registered under. Prevents a random realm user from approving another user's
+   * pending agents by guessing agent_id.
+   */
+  private static boolean isApprovingUserOwner(
+      org.keycloak.services.managers.AuthenticationManager.AuthResult auth,
+      Map<String, Object> agentData, AgentAuthStorage storage) {
+    if (auth == null || agentData == null) {
+      return false;
+    }
+    String callerId = auth.user().getId();
+    String hostId = (String) agentData.get("host_id");
+    if (hostId == null) {
+      return false;
+    }
+    Map<String, Object> hostData = storage.getHost(hostId);
+    return hostData != null && callerId.equals(hostData.get("user_id"));
+  }
+
+  /**
+   * AAP §7.2 in-Keycloak approval inbox. Authenticated realm users can list pending approvals for
+   * any host linked to them (via {@code host.user_id}). Used as the stand-in for a real push
+   * channel — users poll this endpoint to discover CIBA-routed approvals.
+   */
+  @GET
+  @Path("inbox")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response inbox() {
+    org.keycloak.services.managers.AuthenticationManager.AuthResult auth = new org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator(
+        session)
+        .authenticate();
+    if (auth == null) {
+      return Response.status(401)
+          .entity(Map.of("error", "authentication_required",
+              "message", "Realm user access token required"))
+          .build();
+    }
+    String userId = auth.user().getId();
+    AgentAuthStorage storage = storage();
+    List<Map<String, Object>> hosts = storage.findHostsByUser(userId);
+    List<Map<String, Object>> pending = new ArrayList<>();
+    for (Map<String, Object> host : hosts) {
+      String hostId = (String) host.get("host_id");
+      if (hostId == null) {
+        continue;
+      }
+      for (Map<String, Object> agent : storage.findAgentsByHost(hostId)) {
+        if ("pending".equals(agent.get("status")) || hasPendingGrants(agent)) {
+          pending.add(agent);
+        }
+      }
+    }
+    return Response.ok(Map.of("pending_approvals", pending)).build();
+  }
+
   private static Response htmlPage(int status, String heading, String body) {
     String html = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         + "<title>Agent Auth</title>"
@@ -3033,6 +3115,27 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
             .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
             .path("agent").path("status").queryParam("agent_id", agentId).build().toString());
+    return approval;
+  }
+
+  /**
+   * §7.2 CIBA approval object. No {@code user_code}/{@code verification_uri} — the agent polls
+   * {@code /agent/status} and the linked user discovers the pending approval via the in-Keycloak
+   * inbox ({@code GET /agent-auth/inbox}). {@code binding_message} is optional and echoed back if
+   * the register request supplied one.
+   */
+  private Map<String, Object> buildCibaApprovalObject(String agentId, String bindingMessage) {
+    String statusUrl = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
+        .path("agent").path("status").queryParam("agent_id", agentId).build().toString();
+    Map<String, Object> approval = new HashMap<>();
+    approval.put("method", "ciba");
+    approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
+    approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
+    approval.put("status_url", statusUrl);
+    if (bindingMessage != null && !bindingMessage.isBlank()) {
+      approval.put("binding_message", bindingMessage);
+    }
     return approval;
   }
 
