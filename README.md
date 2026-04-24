@@ -4,7 +4,7 @@ A Keycloak extension implementing the [Agent Auth Protocol](https://agent-auth-p
 
 ## Why Keycloak?
 
-Keycloak is a natural fit for Agent Auth because it already manages users, sessions, tokens, approvals, and audit logging. This extension adds agent-specific concepts (hosts, agents, capability grants) while reusing Keycloak's existing infrastructure for user identity, admin-mediated approval, and audit events. Native device-flow and CIBA integration is planned but not yet implemented.
+Keycloak is a natural fit for Agent Auth because it already manages users, sessions, tokens, approvals, and audit logging. This extension adds agent-specific concepts (hosts, agents, capability grants) while reusing Keycloak's existing infrastructure for user identity, user-driven approval, and audit events. Device-authorization approval (AAP §7.1) is implemented on top of Keycloak user sessions; CIBA is still planned.
 
 ## Architecture
 
@@ -43,6 +43,8 @@ Solid edges always happen; dashed edges are mode-specific (gateway vs direct exe
 | Capability listing | `GET /capability/list` | List available capabilities |
 | Capability detail | `GET /capability/describe` | Get full capability schema |
 | Capability execution (gateway) | `POST /capability/execute` | Keycloak introspects the agent JWT, runs constraint checks, and proxies to `<capability.location>` |
+| Device-auth approve | `POST /verify/approve` | Authenticated realm user approves a pending agent via their `user_code` (AAP §7.1). Activates the agent and links the host to the approving user. |
+| Device-auth deny | `POST /verify/deny` | Authenticated realm user denies a pending agent; terminal (subsequent approve attempts return 410). |
 | **Admin:** capability CRUD | `POST / PUT / DELETE /admin/.../agent-auth/capabilities[/{name}]` | Register, update, and delete capabilities |
 | **Admin:** approve grant | `POST /admin/.../agent-auth/agents/{id}/capabilities/{capability}/approve` | Approve a pending capability grant |
 | **Admin:** reject / expire agent | `POST /admin/.../agent-auth/agents/{id}/{reject\|expire}` | Reject a pending agent or force-expire an active one |
@@ -78,7 +80,7 @@ Five actors show up in the spec; this extension only implements one of them (Ser
 | **Host** (§2.7) | Persistent identity of the client environment (Ed25519 keypair + metadata). Not an actor — a principal the client holds. | Stored in this extension's `AGENT_AUTH_HOST` table. |
 | **Server** (§1.5) | Authorization server: discovery, registration, approvals, grants, introspection, gateway execution. | **This extension + Keycloak core.** |
 | **Resource Server** (§2.15) | Host of the capability's business logic, addressed by `capability.location`. Validates agent JWTs either locally or via `/agent/introspect`. | Yours — any language. Use gateway mode if you don't want to implement introspection. |
-| **User** (implicit) | Human who approves delegated flows. | A Keycloak user, bound to hosts via admin API linking (§2.9, §2.10). Interactive approval methods (device-flow, CIBA) are still planned — today a Keycloak admin approves grants via the admin API. |
+| **User** (implicit) | Human who approves delegated flows. | A Keycloak realm user. Hosts are bound to users either by the admin API (`/admin/.../hosts/{id}/link`, §2.9, §2.10) or implicitly on device-authorization approval: the user authenticates to Keycloak and POSTs their `user_code` to `/verify/approve`, which activates the agent and links the host (AAP §7.1). CIBA is still planned. |
 
 For the full protocol architecture diagram, end-to-end sequence walkthrough, extension internals, and per-concept mapping to source files, see [docs/architecture.md](docs/architecture.md).
 
@@ -141,7 +143,7 @@ This extension does not sign protocol responses today, so discovery does not pub
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on KC classpath, high-level API, well-audited |
 | Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; writes land in Keycloak's main persistence unit (H2 in dev, any KC-supported RDBMS in prod) | Survives Keycloak restarts and scales across replicas; selected by default via the `AgentAuthStorage` SPI (`kc.spi.agent-auth-storage.provider=in-memory` switches back to the process-local map for tests) |
 | Scoping | Global env toggle + per-realm attribute override (planned) | Start simple, add granularity later |
-| Approval flows | Admin-mediated HTTP approval (device flow + CIBA planned) | Matches the implementation today while leaving native KC approval-flow integration for a later design |
+| Approval flows | Device-authorization (AAP §7.1) over Keycloak user sessions, plus admin-mediated HTTP approval; CIBA planned | Device-flow reuses KC's realm user auth to back the `user_code` approval step; admin path stays for headless setups |
 | Capabilities | Centralized in KC | Single source of truth; resource servers just execute |
 
 ## Protocol Reference

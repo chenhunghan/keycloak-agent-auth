@@ -57,7 +57,7 @@ Solid edges happen in every session; dashed edges are one of two execution-mode 
 - **execute (gateway)** — `POST /capability/execute` with `agent+jwt`; server validates, runs constraint checks, proxies to `<capability.location>`. Resource server never sees an agent+jwt.
 - **execute (direct)** — `POST <capability.location>` with `agent+jwt` straight from the client.
 - **introspect** — `POST /agent/introspect` server-to-server from the resource server; only used in direct mode.
-- **approval** — the approval method advertised in `/.well-known/agent-configuration` (`device_authorization`, `ciba`, or `admin`).
+- **approval** — the approval method advertised in `/.well-known/agent-configuration`. Currently `device_authorization` and `admin`; `ciba` is on the roadmap.
 
 Gateway is the simpler integration (resource server doesn't implement any auth); direct gives the resource server ownership of the auth decision and saves one hop.
 
@@ -112,12 +112,12 @@ sequenceDiagram
 A few nuances worth calling out:
 
 - **Host+jwt vs agent+jwt boundary.** Host+jwt signs *host-scoped* operations (register, status, revoke, reactivate, rotate-key). Agent+jwt signs *agent-scoped* operations (execute, introspect target). The spec requires `aud` on the agent+jwt to match the endpoint it's sent to — `/capability/execute` for gateway, `<capability.location>` for direct. That's enforced in `AgentAuthRealmResourceProvider.executeCapability` and mirrored by resource-server implementations.
-- **Approval method selection.** Driven by what the server advertises in `/.well-known/agent-configuration` under `approval_methods`. Today we publish `["admin"]`, so step 6 is a human admin calling `/admin/.../agents/{id}/capabilities/{cap}/approve`; `device_authorization` and `ciba` are on the roadmap.
+- **Approval method selection.** Driven by what the server advertises in `/.well-known/agent-configuration` under `approval_methods`. Today we publish `["device_authorization", "admin"]`. For `device_authorization` (AAP §7.1), the server returns a `user_code`, `verification_uri`, and `status_url` in the approval object; the user authenticates to the realm and POSTs the code to `/verify/approve` or `/verify/deny`. Approval also links the host to the approving user per §2.9. For `admin`, the flow in step 6 is a Keycloak admin calling `/admin/.../agents/{id}/capabilities/{cap}/approve`. CIBA is on the roadmap.
 - **Async / streaming execution.** Gateway-mode `/capability/execute` can return `202 + status_url` for async or an SSE stream for streaming. `AgentAuthRealmResourceProvider.executeCapability` proxies all three response shapes; see `AgentAuthCapabilityExecuteIT` for the exercised contracts.
 
 ## Host linking flow
 
-Host linking is the spec's mechanism for binding a host (machine identity) to a user (human identity). §2.9 says linking is implementation-specific and lists "admin API" as one of the allowed mechanisms; this extension ships that admin API today. Interactive user-driven linking via device-flow or CIBA is still planned.
+Host linking is the spec's mechanism for binding a host (machine identity) to a user (human identity). §2.9 says linking is implementation-specific; this extension ships two paths today: the admin API (`POST/DELETE /admin/.../hosts/{id}/link`) and implicit linking on device-authorization approval (`/verify/approve` links the host to the approving realm user, AAP §7.1). CIBA-driven linking is still planned.
 
 ```mermaid
 sequenceDiagram
@@ -235,6 +235,7 @@ Both paths converge in the same verification logic; the choice is per-identity, 
 | §2.13 Constraints | `ConstraintValidator`, `ConstraintViolation` |
 | §2.8 Pre-registration | `AgentAuthAdminResourceProvider.preRegisterHost` / `.getHost` |
 | §2.9 / §2.10 / §3.2 Host linking + claiming + user_id propagation | `AgentAuthAdminResourceProvider.linkHost` / `.unlinkHost` |
+| §7.1 Device-authorization approval | `AgentAuthRealmResourceProvider.verifyApprove` / `.verifyDeny` — approves or denies a pending agent by `user_code`; approval implicitly links the host to the approving user |
 | Admin capability CRUD | `AgentAuthAdminResourceProvider.registerCapability` / `.updateCapability` / `.deleteCapability` |
 | Admin grant approve / reject / expire | `AgentAuthAdminResourceProvider.approveCapability` / `.rejectAgent` / `.expireAgent` |
 | Storage | `storage/AgentAuthStorage` + `storage/jpa/*` + `storage/InMemoryStorage` |
@@ -248,10 +249,10 @@ The spec is intentionally implementation-agnostic in several places. Here's wher
 
 | Spec concept | What we did | Why |
 |--------------|-------------|-----|
-| `approval_methods` | `["admin"]` only | `device_authorization` and `ciba` still require the user-facing orchestration on top of Keycloak's native OIDC flows — on the roadmap. Today a Keycloak admin approves via `POST /admin/.../agents/{id}/capabilities/{cap}/approve`. |
-| Host state on dynamic registration | `active` (spec prescribes `pending`) | Pre-existing simplification to keep the initial implementation compact. Pre-registration now gives admins a hook to gate this properly. Revisit alongside device-flow. |
+| `approval_methods` | `["device_authorization", "admin"]` | `device_authorization` (AAP §7.1) is implemented on top of Keycloak user sessions: the client receives a `user_code`, the approving realm user posts it to `/verify/approve` (or `/verify/deny`), and the host is linked to that user per §2.9. `admin` remains available for headless setups (`POST /admin/.../agents/{id}/capabilities/{cap}/approve`). `ciba` is still planned. |
+| Host state on dynamic registration | `active` (spec prescribes `pending`) | Pre-existing simplification. Approval gating happens at the agent/grant level — for delegated mode with approval-required capabilities, the agent JWT is not usable until a device-flow or admin approval lands, so the user-visible behavior still requires a human. Revisit if we need to enforce host-pending state distinctly from agent-pending. |
 | Pre-registration endpoint shape | `POST /admin/.../agent-auth/hosts` with inline JWK | Spec explicitly defers this to "server's dashboard, admin API, or any other server-specific mechanism" (§2.8). We matched the shape of the existing admin API. |
-| `user_id` linking on hosts (§2.9) | **Implemented** as admin API: `POST/DELETE /admin/.../agent-auth/hosts/{id}/link` | §2.9 explicitly allows "admin API" as a linking mechanism. Interactive user-driven linking (via device-flow / CIBA) is still pending. |
+| `user_id` linking on hosts (§2.9) | **Implemented** via two paths: admin API (`POST/DELETE /admin/.../agent-auth/hosts/{id}/link`) and implicit on device-flow approval (`/verify/approve` links the host to the approving user). | §2.9 allows both "admin API" and "after successful device authorization" as linking mechanisms. CIBA-driven linking is still pending. |
 | Autonomous-agent `claimed` transition on host link (§2.10) | **Implemented** — link cascade claims autonomous agents, revokes their grants, propagates `user_id` to delegated agents (§3.2) | The normative consequences of linking are MUST-level in the spec; the admin endpoint enforces them and `AgentAuthHostLinkIT` covers each one. |
 | `jwks_uri` in discovery | omitted | Extension doesn't sign server responses — nothing to publish. Host/agent JWKS support is separate and fully implemented. |
 | JWKS HTTPS enforcement | stricter than spec (HTTPS required except for localhost and container-test hostnames) | Avoid accidentally fetching JWKS over cleartext in production. Dev/test exceptions are scoped narrowly. |
