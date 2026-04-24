@@ -22,3 +22,4 @@ dependency-reduced-pom.xml
 
 # Eclipse annotation processor
 .factorypath
+.research/

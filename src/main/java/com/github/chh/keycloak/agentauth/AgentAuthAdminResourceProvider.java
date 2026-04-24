@@ -1,5 +1,6 @@
 package com.github.chh.keycloak.agentauth;
 
+import com.github.chh.keycloak.agentauth.storage.AgentAuthStorage;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.PUT;
@@ -25,16 +26,22 @@ import org.keycloak.services.resources.admin.fgap.AdminPermissionEvaluator;
 public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvider {
 
   private static final Pattern CAPABILITY_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9_]+");
+  private KeycloakSession session;
   private AdminPermissionEvaluator auth;
   private AdminEventBuilder adminEvent;
 
   public AgentAuthAdminResourceProvider(KeycloakSession session) {
-    // session parameter required by AdminRealmResourceProviderFactory contract
+    this.session = session;
+  }
+
+  private AgentAuthStorage storage() {
+    return session.getProvider(AgentAuthStorage.class);
   }
 
   @Override
   public Object getResource(KeycloakSession session, RealmModel realm,
       AdminPermissionEvaluator auth, AdminEventBuilder adminEvent) {
+    this.session = session;
     this.auth = auth;
     this.adminEvent = adminEvent;
     return this;
@@ -72,7 +79,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .entity(Map.of("error", "invalid_request", "message", "Invalid visibility")).build();
     }
 
-    if (InMemoryRegistry.CAPABILITIES.putIfAbsent(name, requestBody) != null) {
+    if (storage().putCapabilityIfAbsent(name, requestBody) != null) {
       return Response.status(409)
           .entity(Map.of("error", "capability_exists", "message", "Capability already exists"))
           .build();
@@ -94,7 +101,8 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
     }
 
-    Map<String, Object> existingCapability = InMemoryRegistry.CAPABILITIES.get(name);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> existingCapability = storage.getCapability(name);
     if (existingCapability == null) {
       return Response.status(404)
           .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
@@ -103,7 +111,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
 
     Map<String, Object> updatedCapability = new HashMap<>(requestBody);
     updatedCapability.put("name", name);
-    InMemoryRegistry.CAPABILITIES.put(name, updatedCapability);
+    storage.putCapability(name, updatedCapability);
 
     emitAdminEvent("agent-auth/capability/" + name, OperationType.UPDATE, updatedCapability);
     return Response.ok(updatedCapability).build();
@@ -113,12 +121,14 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Path("capabilities/{name}")
   public Response deleteCapability(@PathParam("name") String name) {
     requireManageRealm();
-    Map<String, Object> removedCapability = InMemoryRegistry.CAPABILITIES.remove(name);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> removedCapability = storage.getCapability(name);
     if (removedCapability == null) {
       return Response.status(404)
           .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
           .build();
     }
+    storage.removeCapability(name);
 
     emitAdminEvent("agent-auth/capability/" + name, OperationType.DELETE, removedCapability);
     return Response.noContent().build();
@@ -142,7 +152,8 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
         // ignore malformed body
       }
     }
-    Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = storage.getAgent(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
     }
@@ -162,6 +173,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
         grants.add(newGrant);
       }
     }
+    storage.putAgent(id, agentData);
     emitAdminEvent("agent-auth/agent/" + id + "/expire", OperationType.ACTION, agentData);
     return Response.ok(agentData).build();
   }
@@ -173,7 +185,8 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @SuppressWarnings("unchecked")
   public Response rejectAgent(@PathParam("id") String id, String rawBody) {
     requireManageRealm();
-    Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = storage.getAgent(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
     }
@@ -208,6 +221,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
         }
       }
     }
+    storage.putAgent(id, agentData);
     emitAdminEvent("agent-auth/agent/" + id + "/reject", OperationType.ACTION, agentData);
     return Response.ok(agentData).build();
   }
@@ -220,12 +234,13 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   public Response approveCapability(@PathParam("id") String id,
       @PathParam("capability") String capability) {
     requireManageRealm();
-    Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = storage.getAgent(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
     }
 
-    Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capability);
+    Map<String, Object> registeredCap = storage.getCapability(capability);
     if (registeredCap == null) {
       return Response.status(404).entity(Map.of("error", "capability_not_found")).build();
     }
@@ -271,6 +286,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       agentData.remove("approval");
     }
     agentData.put("updated_at", Instant.now().toString());
+    storage.putAgent(id, agentData);
     emitAdminEvent("agent-auth/agent/" + id + "/capability/" + capability + "/approve",
         OperationType.ACTION, targetGrant);
     return Response.ok(targetGrant).build();

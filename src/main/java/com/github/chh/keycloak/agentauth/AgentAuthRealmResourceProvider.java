@@ -1,4 +1,6 @@
 package com.github.chh.keycloak.agentauth;
+
+import com.github.chh.keycloak.agentauth.storage.AgentAuthStorage;
 import com.nimbusds.jose.JWSVerifier;
 import com.nimbusds.jose.crypto.Ed25519Verifier;
 import com.nimbusds.jose.jwk.OctetKeyPair;
@@ -30,6 +32,7 @@ import java.util.Map;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.services.resource.RealmResourceProvider;
 import org.keycloak.urls.UrlType;
@@ -52,10 +55,15 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   private static final Set<String> SUPPORTED_CONSTRAINT_OPERATORS = Set.of("max", "min", "in",
       "not_in");
   private static final JwksCache JWKS_CACHE = new JwksCache();
+  private static final Map<String, Map<String, Object>> RATE_LIMITS = new ConcurrentHashMap<>();
   private final KeycloakSession session; // NOPMD: will be used by protocol endpoints
 
   public AgentAuthRealmResourceProvider(KeycloakSession session) {
     this.session = session;
+  }
+
+  private AgentAuthStorage storage() {
+    return session.getProvider(AgentAuthStorage.class);
   }
 
   @Override
@@ -240,7 +248,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
@@ -323,7 +331,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               .build();
         }
 
-        Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capName);
+        Map<String, Object> registeredCap = storage().getCapability(capName);
         if (registeredCap == null) {
           invalidCaps.add(capName);
         } else {
@@ -371,7 +379,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       // Prevent duplicate active agents
       String agentKeyThumb = OctetKeyPair.parse(agentPublicKeyMap).computeThumbprint().toString();
       String hostId = iss;
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(hostId);
+      Map<String, Object> hostData = storage().getHost(hostId);
       if (hostData != null) {
         String hostStatus = (String) hostData.get("status");
         if ("revoked".equals(hostStatus)) {
@@ -384,21 +392,20 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
 
-      for (Map<String, Object> agent : InMemoryRegistry.AGENTS.values()) {
-        if (agentKeyThumb.equals(agent.get("agent_key_thumbprint"))
-            && hostId.equals(agent.get("host_id"))) {
-          if ("active".equals(agent.get("status"))) {
-            return Response.status(409)
-                .entity(Map.of("error", "agent_exists", "message", "Agent already exists")).build();
-          } else if ("pending".equals(agent.get("status"))) {
-            return Response.ok(agent).build(); // Return existing pending agent
-          } else if ("revoked".equals(agent.get("status")) || "rejected".equals(agent.get("status"))
-              || "claimed".equals(agent.get("status"))) {
-            return Response.status(409)
-                .entity(Map.of("error", "agent_exists", "message",
-                    "Agent already exists in a terminal state"))
-                .build();
-          }
+      Map<String, Object> existingAgent = storage().findAgentByKeyAndHost(agentKeyThumb, hostId);
+      if (existingAgent != null) {
+        String existingStatus = (String) existingAgent.get("status");
+        if ("active".equals(existingStatus)) {
+          return Response.status(409)
+              .entity(Map.of("error", "agent_exists", "message", "Agent already exists")).build();
+        } else if ("pending".equals(existingStatus)) {
+          return Response.ok(existingAgent).build(); // Return existing pending agent
+        } else if ("revoked".equals(existingStatus) || "rejected".equals(existingStatus)
+            || "claimed".equals(existingStatus)) {
+          return Response.status(409)
+              .entity(Map.of("error", "agent_exists", "message",
+                  "Agent already exists in a terminal state"))
+              .build();
         }
       }
 
@@ -448,9 +455,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
       hostData.put("updated_at", nowTs);
       hostData.put("last_used_at", nowTs);
-      InMemoryRegistry.HOSTS.put(hostId, hostData);
+      storage().putHost(hostId, hostData);
 
-      InMemoryRegistry.AGENTS.put(agentId, agentData);
+      storage().putAgent(agentId, agentData);
 
       return Response.ok(agentData).build();
 
@@ -508,7 +515,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null || !"active".equals(agentData.get("status"))) {
         return Response.ok(Map.of("active", false)).build();
       }
@@ -563,13 +570,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
-      Map<String, Object> hostDataForAgent = InMemoryRegistry.HOSTS.get(hostId);
+      Map<String, Object> hostDataForAgent = storage().getHost(hostId);
       if (hostDataForAgent == null || !"active".equals(hostDataForAgent.get("status"))) {
         return Response.ok(Map.of("active", false)).build();
       }
 
       // Update last_used_at on successful introspect
       agentData.put("last_used_at", nowTimestamp());
+      storage().putAgent(agentId, agentData);
 
       String mode = (String) agentData.get("mode");
 
@@ -755,7 +763,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
-      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
@@ -763,7 +771,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       // Check host revocation BEFORE jti replay, so a revoked host gets 403 immediately
       // even if the same JWT was used for the revoke call (jti already consumed).
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
+      Map<String, Object> hostData = storage().getHost(iss);
       if (hostData != null && "revoked".equals(hostData.get("status"))) {
         return Response.status(403)
             .entity(Map.of("error", "host_revoked", "message", "Host is revoked")).build();
@@ -779,7 +787,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           return Response.status(400)
               .entity(Map.of("error", "invalid_request", "message", "Missing agent_id")).build();
         }
-        Map<String, Object> agentDataForUnknownHost = InMemoryRegistry.AGENTS.get(agentId);
+        Map<String, Object> agentDataForUnknownHost = storage().getAgent(agentId);
         if (agentDataForUnknownHost == null) {
           return Response.status(404)
               .entity(Map.of("error", "agent_not_found", "message", "Agent not found")).build();
@@ -804,7 +812,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_request", "message", "Missing agent_id")).build();
       }
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(404)
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found")).build();
@@ -904,7 +912,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
-      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
@@ -943,7 +951,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(404)
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found")).build();
@@ -968,6 +976,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       agentData.put("agent_public_key", newAgentPublicKeyMap);
       agentData.put("agent_key_thumbprint", newAgentKey.computeThumbprint().toString());
+      storage().putAgent(agentId, agentData);
 
       return Response.ok(agentData).build();
     } catch (Exception e) {
@@ -1058,7 +1067,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
-      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
@@ -1071,7 +1080,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       String agentId = (String) requestBody.get("agent_id");
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(404)
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found")).build();
@@ -1082,7 +1091,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
+      Map<String, Object> hostData = storage().getHost(iss);
       if (hostData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Unknown host key"))
@@ -1107,6 +1116,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (requestBody.containsKey("reason")) {
         agentData.put("revocation_reason", requestBody.get("reason"));
       }
+      storage().putAgent(agentId, agentData);
 
       return Response.ok(agentData).build();
     } catch (Exception e) {
@@ -1197,7 +1207,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
-      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
@@ -1209,7 +1219,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       String agentId = (String) requestBody.get("agent_id");
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(404)
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found")).build();
@@ -1220,7 +1230,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
+      Map<String, Object> hostData = storage().getHost(iss);
       if (hostData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Unknown host key"))
@@ -1263,6 +1273,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         if (Boolean.TRUE.equals(agentData.get("absolute_lifetime_elapsed"))) {
           agentData.put("status", "revoked");
           agentData.put("updated_at", nowTimestamp());
+          storage().putAgent(agentId, agentData);
           return Response.status(403)
               .entity(Map.of("error", "absolute_lifetime_exceeded", "message",
                   "Absolute lifetime has elapsed"))
@@ -1296,6 +1307,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           agentData.put("status", "active");
           agentData.remove("approval");
         }
+        storage().putAgent(agentId, agentData);
         return Response.ok(agentData).build();
       }
 
@@ -1389,13 +1401,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
-      if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
       }
 
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
+      Map<String, Object> hostData = storage().getHost(iss);
       if (hostData != null && "revoked".equals(hostData.get("status"))) {
         return Response.status(409)
             .entity(Map.of("error", "already_revoked", "message", "Host already revoked")).build();
@@ -1409,12 +1421,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       hostData.put("status", "revoked");
       hostData.put("host_id", iss);
       hostData.put("updated_at", nowTimestamp());
+      storage().putHost(iss, hostData);
 
       int agentsRevoked = 0;
-      for (Map<String, Object> agentData : InMemoryRegistry.AGENTS.values()) {
-        if (iss.equals(agentData.get("host_id")) && !"revoked".equals(agentData.get("status"))) {
+      for (Map<String, Object> agentData : storage().findAgentsByHost(iss)) {
+        if (!"revoked".equals(agentData.get("status"))) {
           agentData.put("status", "revoked");
           agentData.put("updated_at", nowTimestamp());
+          storage().putAgent((String) agentData.get("agent_id"), agentData);
           agentsRevoked++;
         }
       }
@@ -1511,7 +1525,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(iss);
+      Map<String, Object> hostData = storage().getHost(iss);
       if (hostData != null && "revoked".equals(hostData.get("status"))) {
         return Response.status(403)
             .entity(Map.of("error", "host_revoked", "message", "Host already revoked")).build();
@@ -1557,14 +1571,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       hostData.put("public_key", newHostPublicKeyMap);
       hostData.put("host_id", newIss);
 
-      InMemoryRegistry.ROTATED_HOST_IDS.put(oldIss, newIss);
-      InMemoryRegistry.HOSTS.put(newIss, hostData);
-      InMemoryRegistry.HOSTS.remove(iss);
+      storage().recordHostRotation(oldIss, newIss);
+      storage().putHost(newIss, hostData);
+      storage().removeHost(iss);
 
-      for (Map<String, Object> agentData : InMemoryRegistry.AGENTS.values()) {
-        if (iss.equals(agentData.get("host_id"))) {
-          agentData.put("host_id", newIss);
-        }
+      for (Map<String, Object> agentData : storage().findAgentsByHost(iss)) {
+        agentData.put("host_id", newIss);
+        storage().putAgent((String) agentData.get("agent_id"), agentData);
       }
 
       Map<String, Object> response = new HashMap<>();
@@ -1601,7 +1614,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         if ("agent+jwt".equals(jwtType)) {
           String sub = jwt.getJWTClaimsSet().getSubject();
           if (sub != null) {
-            Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(sub);
+            Map<String, Object> agentData = storage().getAgent(sub);
             if (agentData != null) {
               Map<String, Object> keyMap = resolveAgentPublicKeyMap(agentData, jwt);
               OctetKeyPair agentKey = OctetKeyPair.parse(keyMap);
@@ -1621,7 +1634,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
 
     List<Map<String, Object>> capabilities = new ArrayList<>(
-        InMemoryRegistry.CAPABILITIES.values());
+        storage().listCapabilities());
     capabilities.sort(Comparator.comparing(cap -> String.valueOf(cap.get("name"))));
 
     // If caller explicitly requests authenticated-only visibility without auth, require auth
@@ -1730,7 +1743,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .build();
     }
 
-    Map<String, Object> cap = InMemoryRegistry.CAPABILITIES.get(name);
+    Map<String, Object> cap = storage().getCapability(name);
     if (cap == null) {
       return Response.status(404)
           .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
@@ -1749,7 +1762,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         if ("agent+jwt".equals(jwtType)) {
           String sub = jwt.getJWTClaimsSet().getSubject();
           if (sub != null) {
-            Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(sub);
+            Map<String, Object> agentData = storage().getAgent(sub);
             if (agentData != null) {
               Map<String, Object> keyMap = resolveAgentPublicKeyMap(agentData, jwt);
               OctetKeyPair agentKey = OctetKeyPair.parse(keyMap);
@@ -1868,7 +1881,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Agent not found"))
@@ -1881,7 +1894,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(hostId);
+      Map<String, Object> hostData = storage().getHost(hostId);
       if (hostData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host not found"))
@@ -1998,7 +2011,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               .build();
         }
 
-        Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capName);
+        Map<String, Object> registeredCap = storage().getCapability(capName);
         if (registeredCap == null) {
           invalidCaps.add(capName);
           continue;
@@ -2095,6 +2108,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
       agentData.put("updated_at", nowTimestamp());
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
+      storage().putAgent(agentId, agentData);
 
       return Response.ok(responseMap).build();
 
@@ -2188,7 +2202,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Agent not found"))
@@ -2201,7 +2215,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> hostData = InMemoryRegistry.HOSTS.get(hostId);
+      Map<String, Object> hostData = storage().getHost(hostId);
       if (hostData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host not found"))
@@ -2314,7 +2328,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
 
-      Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capabilityName);
+      Map<String, Object> registeredCap = storage().getCapability(capabilityName);
       if (registeredCap == null && activeGrant != null) {
         return Response.status(403)
             .entity(Map.of("error", "capability_not_granted",
@@ -2362,6 +2376,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       agentData.put("last_used_at", nowTimestamp());
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
+      storage().putAgent(agentId, agentData);
 
       String location = (String) registeredCap.get("location");
       if (location == null || location.isBlank()) {
@@ -2482,7 +2497,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+      Map<String, Object> agentData = storage().getAgent(agentId);
       if (agentData == null) {
         return Response.status(404)
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found"))
@@ -2617,7 +2632,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   }
 
   private String computeGrantStatus(String agentId, String capabilityName) {
-    Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(agentId);
+    Map<String, Object> agentData = storage().getAgent(agentId);
     if (agentData == null) {
       return "not_granted";
     }
@@ -2666,7 +2681,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         continue;
       }
 
-      Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capName);
+      Map<String, Object> registeredCap = storage().getCapability(capName);
       if (registeredCap == null) {
         continue;
       }
@@ -2723,7 +2738,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
   private static Response enforceRateLimit(String key, int limit, long windowMs) {
     long now = System.currentTimeMillis();
-    Map<String, Object> bucket = InMemoryRegistry.RATE_LIMITS.computeIfAbsent(key, ignored -> {
+    Map<String, Object> bucket = RATE_LIMITS.computeIfAbsent(key, ignored -> {
       Map<String, Object> created = new HashMap<>();
       created.put("window_start", now);
       created.put("count", 0);
