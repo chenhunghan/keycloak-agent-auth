@@ -432,23 +432,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
 
       if ("pending".equals(status)) {
-        // §7 chooses approval method from {device_authorization, ciba, admin} per approval
-        // context. Linked host → CIBA (we already know the user; §7.3 "prefer CIBA when a
-        // browser-controlling agent might be present"). Unlinked delegated host → device_auth.
-        // Anything else falls back to the admin extension method.
-        boolean hostLinked = hostData != null && hostData.get("user_id") != null;
-        if ("delegated".equals(mode) && hostLinked) {
-          String bindingMessage = requestBody.get("binding_message") instanceof String bm
-              ? bm
-              : null;
-          agentData.put("approval", buildCibaApprovalObject(agentId, bindingMessage));
-        } else if ("delegated".equals(mode)) {
-          String userCode = generateUserCode();
-          agentData.put("user_code", userCode);
-          agentData.put("approval", buildDeviceAuthApprovalObject(agentId, userCode));
-        } else {
-          agentData.put("approval", buildApprovalObject(agentId));
-        }
+        String bindingMessage = requestBody.get("binding_message") instanceof String bm
+            ? bm
+            : null;
+        agentData.put("approval",
+            selectApprovalObject(agentId, agentData, hostData, mode, bindingMessage));
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
             grant.put("status_url", buildGrantStatusUrl(agentId, (String) grant.get("capability")));
@@ -1325,10 +1313,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
         if (needsApproval) {
           agentData.put("status", "pending");
-          String userCode = generateUserCode();
-          agentData.put("user_code", userCode);
-          agentData.put("approval", buildDeviceAuthApprovalObject(
-              (String) agentData.get("agent_id"), userCode));
+          agentData.put("approval", selectApprovalObject(
+              (String) agentData.get("agent_id"), agentData, hostData,
+              (String) agentData.get("mode"), null));
         } else {
           agentData.put("status", "active");
           agentData.remove("approval");
@@ -2130,9 +2117,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       responseMap.put("agent_id", agentId);
       responseMap.put("agent_capability_grants", newGrants);
       if (requiresApproval) {
-        String userCode = generateUserCode();
-        agentData.put("user_code", userCode);
-        responseMap.put("approval", buildDeviceAuthApprovalObject(agentId, userCode));
+        Map<String, Object> hostDataForApproval = storage().getHost(hostId);
+        String bindingMessage = requestBody.get("binding_message") instanceof String bm
+            ? bm
+            : null;
+        responseMap.put("approval", selectApprovalObject(agentId, agentData,
+            hostDataForApproval, (String) agentData.get("mode"), bindingMessage));
       }
       agentData.put("updated_at", nowTimestamp());
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
@@ -2447,7 +2437,8 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               .entity(responseBytes)
               .type(upstreamContentType)
               .build();
-        } catch (java.net.ConnectException | java.net.NoRouteToHostException e) {
+        } catch (java.net.ConnectException | java.net.NoRouteToHostException
+            | java.net.UnknownHostException e) {
           lastConnectionFailure = e;
         }
       }
@@ -3116,6 +3107,34 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
             .path("agent").path("status").queryParam("agent_id", agentId).build().toString());
     return approval;
+  }
+
+  /**
+   * §7 approval-method selection shared by the register, capability-request, and reactivate
+   * handlers so the three paths emit a consistent shape:
+   *
+   * <ul>
+   * <li>Delegated + linked host → CIBA (§7.3 "prefer CIBA when a browser-controlling agent may be
+   * present"; once the host is linked the user is known and the inbox delivers the prompt).</li>
+   * <li>Delegated + unlinked host → device_authorization.</li>
+   * <li>Autonomous or admin-mediated paths → legacy "admin" extension object.</li>
+   * </ul>
+   *
+   * Side effect: writes a {@code user_code} into {@code agentData} when emitting device_auth.
+   */
+  private Map<String, Object> selectApprovalObject(String agentId,
+      Map<String, Object> agentData, Map<String, Object> hostData, String mode,
+      String bindingMessage) {
+    boolean hostLinked = hostData != null && hostData.get("user_id") != null;
+    if ("delegated".equals(mode) && hostLinked) {
+      return buildCibaApprovalObject(agentId, bindingMessage);
+    }
+    if ("delegated".equals(mode)) {
+      String userCode = generateUserCode();
+      agentData.put("user_code", userCode);
+      return buildDeviceAuthApprovalObject(agentId, userCode);
+    }
+    return buildApprovalObject(agentId);
   }
 
   /**

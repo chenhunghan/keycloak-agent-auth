@@ -3,6 +3,12 @@ services:
     build: .
     ports:
       - "28080:8080"
+    extra_hosts:
+      # Lets the extension reach a service running on the host (for capabilities
+      # whose `location` is http://localhost:N). The host-gateway alias is a
+      # Docker standard that resolves to the Docker host's IP from inside the
+      # container.
+      - "host.docker.internal:host-gateway"
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
