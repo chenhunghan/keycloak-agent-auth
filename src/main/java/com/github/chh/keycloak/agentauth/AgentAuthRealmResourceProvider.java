@@ -424,7 +424,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
 
       if ("pending".equals(status)) {
-        agentData.put("approval", buildApprovalObject(requestBody, agentId));
+        agentData.put("approval", buildApprovalObject(agentId));
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
             grant.put("status_url", buildGrantStatusUrl(agentId, (String) grant.get("capability")));
@@ -749,11 +749,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       String iss = jwt.getJWTClaimsSet().getIssuer();
       String previousHostId = (String) jwt.getJWTClaimsSet().getClaim("previous_host_id");
-      if (!hostKey.computeThumbprint().toString().equals(iss)) {
-        if (previousHostId == null || !previousHostId.equals(iss)) {
-          return Response.status(401)
-              .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-        }
+      if (!hostKey.computeThumbprint().toString().equals(iss)
+          && (previousHostId == null || !previousHostId.equals(iss))) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
       }
 
       if (InMemoryRegistry.ROTATED_HOST_IDS.containsKey(iss)) {
@@ -1292,7 +1291,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         if (needsApproval) {
           agentData.put("status", "pending");
           agentData.put("approval",
-              buildApprovalObject(requestBody, (String) agentData.get("agent_id")));
+              buildApprovalObject((String) agentData.get("agent_id")));
         } else {
           agentData.put("status", "active");
           agentData.remove("approval");
@@ -2092,7 +2091,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       responseMap.put("agent_id", agentId);
       responseMap.put("agent_capability_grants", newGrants);
       if (requiresApproval) {
-        responseMap.put("approval", buildApprovalObject(requestBody, agentId));
+        responseMap.put("approval", buildApprovalObject(agentId));
       }
       agentData.put("updated_at", nowTimestamp());
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
@@ -2287,14 +2286,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       Object restrictedCapabilities = jwt.getJWTClaimsSet().getClaim("capabilities");
-      if (restrictedCapabilities != null) {
-        if (!(restrictedCapabilities instanceof List<?> restrictedList)
-            || !restrictedList.contains(capabilityName)) {
-          return Response.status(403)
-              .entity(Map.of("error", "capability_not_granted",
-                  "message", "JWT is not scoped for this capability"))
-              .build();
-        }
+      if (restrictedCapabilities != null
+          && (!(restrictedCapabilities instanceof List<?> restrictedList)
+              || !restrictedList.contains(capabilityName))) {
+        return Response.status(403)
+            .entity(Map.of("error", "capability_not_granted",
+                "message", "JWT is not scoped for this capability"))
+            .build();
       }
 
       Object rawArguments = requestBody.get("arguments");
@@ -2579,7 +2577,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         + "/agent-auth";
   }
 
-  private Map<String, Object> buildApprovalObject(Map<String, Object> requestBody, String agentId) {
+  private Map<String, Object> buildApprovalObject(String agentId) {
     Map<String, Object> approval = new HashMap<>();
     approval.put("method", "admin");
     approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
@@ -2598,6 +2596,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         .build().toString();
   }
 
+  @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
   private List<URI> upstreamCandidateUris(URI uri) {
     String host = uri.getHost();
     if (!"127.0.0.1".equals(host) && !"localhost".equals(host)) {

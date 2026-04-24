@@ -17,6 +17,7 @@ import java.util.regex.Pattern;
 import org.keycloak.events.admin.OperationType;
 import org.keycloak.events.admin.ResourceType;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
 import org.keycloak.services.resources.admin.AdminEventBuilder;
 import org.keycloak.services.resources.admin.ext.AdminRealmResourceProvider;
 import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
@@ -24,18 +25,16 @@ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluato
 public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvider {
 
   private static final Pattern CAPABILITY_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9_]+");
-  private final KeycloakSession session;
   private AdminPermissionEvaluator auth;
   private AdminEventBuilder adminEvent;
 
   public AgentAuthAdminResourceProvider(KeycloakSession session) {
-    this.session = session;
+    // session parameter required by AdminRealmResourceProviderFactory contract
   }
 
   @Override
-  public Object getResource(KeycloakSession session, org.keycloak.models.RealmModel realm,
-      org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator auth,
-      org.keycloak.services.resources.admin.AdminEventBuilder adminEvent) {
+  public Object getResource(KeycloakSession session, RealmModel realm,
+      AdminPermissionEvaluator auth, AdminEventBuilder adminEvent) {
     this.auth = auth;
     this.adminEvent = adminEvent;
     return this;
@@ -53,7 +52,6 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
 
     String name = (String) requestBody.get("name");
-    String location = (String) requestBody.get("location");
 
     if (name == null || name.isBlank()) {
       return Response.status(400)
@@ -131,8 +129,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Consumes(MediaType.WILDCARD)
   @Produces(MediaType.APPLICATION_JSON)
   @SuppressWarnings("unchecked")
-  public Response expireAgent(@jakarta.ws.rs.PathParam("id") String id,
-      String rawBody) {
+  public Response expireAgent(@PathParam("id") String id, String rawBody) {
     requireManageRealm();
     Map<String, Object> requestBody = null;
     if (rawBody != null && !rawBody.isBlank()) {

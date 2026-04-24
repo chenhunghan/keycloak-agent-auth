@@ -125,6 +125,7 @@ final class JwksCache {
     }
   }
 
+  @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
   private static boolean isLocalJwksUri(URI uri) {
     if (!"http".equalsIgnoreCase(uri.getScheme())) {
       return false;
