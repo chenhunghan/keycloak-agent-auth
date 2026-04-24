@@ -6,6 +6,7 @@ import com.nimbusds.jose.crypto.Ed25519Verifier;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import com.nimbusds.jwt.SignedJWT;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.FormParam;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
@@ -2560,6 +2561,133 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   }
 
   /**
+   * AAP §5.3 / §7.1 HTML verification page. Browser-facing landing URL published as
+   * {@code verification_uri} in the approval object. Renders minimal inline HTML (no FreeMarker
+   * theme yet) showing the {@code user_code} and an approval form.
+   */
+  @GET
+  @Path("verify")
+  @Produces(MediaType.TEXT_HTML)
+  public Response verifyPage(@QueryParam("user_code") String userCode) {
+    String normalized = normalizeUserCode(userCode);
+    Map<String, Object> pendingAgent = normalized == null
+        ? null
+        : storage().findAgentByUserCode(normalized);
+    String name = pendingAgent == null ? null : (String) pendingAgent.get("name");
+    String hostId = pendingAgent == null ? null : (String) pendingAgent.get("host_id");
+    String status = pendingAgent == null ? null : (String) pendingAgent.get("status");
+
+    StringBuilder html = new StringBuilder();
+    html.append("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">")
+        .append("<title>Agent Auth — Approve registration</title>")
+        .append("<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;")
+        .append("margin:2rem auto;padding:0 1rem;color:#222}")
+        .append(
+            "h1{font-size:1.4rem}code{background:#f4f4f4;padding:.1rem .3rem;border-radius:3px}")
+        .append("form{margin-top:1.5rem}input[type=text],input[type=password]{width:100%;")
+        .append("padding:.5rem;margin:.25rem 0 .75rem;border:1px solid #ccc;border-radius:4px;")
+        .append("box-sizing:border-box;font-family:inherit}")
+        .append("button{padding:.55rem 1.1rem;border:0;border-radius:4px;font-weight:600;")
+        .append("cursor:pointer;margin-right:.5rem}")
+        .append(".approve{background:#1a7f37;color:#fff}.deny{background:#cf222e;color:#fff}")
+        .append(
+            ".err{background:#fff0f0;border:1px solid #cf222e;padding:.75rem;border-radius:4px}")
+        .append("label{font-size:.9rem;color:#555}</style></head><body>");
+    html.append("<h1>Agent Auth — Approve registration</h1>");
+    if (normalized == null || normalized.isBlank()) {
+      html.append("<p>Enter the <code>user_code</code> your agent gave you:</p>")
+          .append("<form method=\"get\" action=\"\">")
+          .append("<label for=\"user_code\">user_code</label>")
+          .append("<input type=\"text\" id=\"user_code\" name=\"user_code\" ")
+          .append("placeholder=\"ABCD-EFGH\" autofocus required>")
+          .append("<button type=\"submit\" class=\"approve\">Look up</button>")
+          .append("</form>");
+    } else if (pendingAgent == null) {
+      html.append("<div class=\"err\">No pending approval found for code <code>")
+          .append(htmlEscape(displayUserCode(normalized)))
+          .append("</code>. It may have expired or already been used.</div>");
+    } else if ("rejected".equals(status) || "revoked".equals(status) || "claimed".equals(status)) {
+      html.append("<div class=\"err\">This approval is no longer pending (status: <code>")
+          .append(htmlEscape(status)).append("</code>). Your agent must start a new flow.</div>");
+    } else {
+      html.append("<p>Host <code>").append(htmlEscape(hostId == null ? "?" : hostId))
+          .append("</code> is requesting to register agent <code>")
+          .append(htmlEscape(name == null ? "(unnamed)" : name)).append("</code>.</p>");
+      html.append("<p>Paste a Keycloak access token for the user whose account should own this ")
+          .append("agent, then choose <em>Approve</em> or <em>Deny</em>. See ")
+          .append("<a href=\"https://www.rfc-editor.org/rfc/rfc8628\">RFC 8628</a> for the ")
+          .append("device-authorization flow this implements.</p>");
+      html.append("<form method=\"post\" action=\"verify\">")
+          .append("<input type=\"hidden\" name=\"user_code\" value=\"")
+          .append(htmlEscape(displayUserCode(normalized))).append("\">")
+          .append("<label for=\"access_token\">Keycloak access token</label>")
+          .append("<input type=\"password\" id=\"access_token\" name=\"access_token\" ")
+          .append("placeholder=\"eyJhbGciOi...\" required>")
+          .append("<button type=\"submit\" name=\"decision\" value=\"approve\" class=\"approve\">")
+          .append("Approve</button>")
+          .append("<button type=\"submit\" name=\"decision\" value=\"deny\" class=\"deny\">")
+          .append("Deny</button>")
+          .append("</form>");
+    }
+    html.append("</body></html>");
+    return Response.ok(html.toString()).build();
+  }
+
+  /**
+   * Form-encoded companion to {@link #verifyApprove(Map) /verify/approve} and
+   * {@link #verifyDeny(Map) /verify/deny}. Browser form submissions land here with
+   * {@code user_code + decision + access_token} (or an {@code Authorization: Bearer} header).
+   * Returns an HTML success/failure page rather than JSON.
+   */
+  @POST
+  @Path("verify")
+  @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+  @Produces(MediaType.TEXT_HTML)
+  public Response verifyFormSubmit(
+      @FormParam("user_code") String userCode,
+      @FormParam("decision") String decision,
+      @FormParam("access_token") String accessTokenFormField,
+      @HeaderParam("Authorization") String authHeader) {
+    if (userCode == null || userCode.isBlank() || decision == null) {
+      return htmlPage(400, "Missing user_code or decision",
+          "Please go back to the approval page and fill in both fields.");
+    }
+    if (!"approve".equals(decision) && !"deny".equals(decision)) {
+      return htmlPage(400, "Invalid decision",
+          "Decision must be <code>approve</code> or <code>deny</code>.");
+    }
+    String explicitToken = null;
+    if ((authHeader == null || authHeader.isBlank())
+        && accessTokenFormField != null && !accessTokenFormField.isBlank()) {
+      explicitToken = accessTokenFormField;
+    }
+    Map<String, Object> body = new HashMap<>();
+    body.put("user_code", userCode);
+    Response jsonResponse = transitionPendingAgent(body, "approve".equals(decision),
+        explicitToken);
+    int status = jsonResponse.getStatus();
+    if (status == 200) {
+      return htmlPage(200, "approve".equals(decision) ? "Approved" : "Denied",
+          "approve".equals(decision)
+              ? "Agent has been activated. You may close this window."
+              : "Agent registration was denied. You may close this window.");
+    }
+    if (status == 401) {
+      return htmlPage(401, "Authentication required",
+          "The access token is missing, invalid, or expired. Please obtain a fresh token.");
+    }
+    if (status == 404) {
+      return htmlPage(404, "Not found",
+          "No pending approval matched that user_code.");
+    }
+    if (status == 410) {
+      return htmlPage(410, "Approval closed",
+          "This registration has already been denied. The client must retry with a new code.");
+    }
+    return htmlPage(status, "Approval failed", "Server returned status " + status + ".");
+  }
+
+  /**
    * AAP §7.1 device-authorization approval. The user whose registration is being approved
    * authenticates to Keycloak as a realm user and posts their {@code user_code} here. The endpoint
    * activates the agent and links the host to the approving user per §2.9.
@@ -2569,7 +2697,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public Response verifyApprove(Map<String, Object> requestBody) {
-    return transitionPendingAgent(requestBody, /* approve= */ true);
+    return transitionPendingAgent(requestBody, /* approve= */ true, null);
   }
 
   /**
@@ -2582,13 +2710,18 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public Response verifyDeny(Map<String, Object> requestBody) {
-    return transitionPendingAgent(requestBody, /* approve= */ false);
+    return transitionPendingAgent(requestBody, /* approve= */ false, null);
   }
 
   @SuppressWarnings("unchecked")
-  private Response transitionPendingAgent(Map<String, Object> requestBody, boolean approve) {
-    org.keycloak.services.managers.AuthenticationManager.AuthResult auth = new org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator(
-        session)
+  private Response transitionPendingAgent(Map<String, Object> requestBody, boolean approve,
+      String explicitToken) {
+    org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator authenticator = new org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator(
+        session);
+    if (explicitToken != null && !explicitToken.isBlank()) {
+      authenticator.setTokenString(explicitToken);
+    }
+    org.keycloak.services.managers.AuthenticationManager.AuthResult auth = authenticator
         .authenticate();
     if (auth == null) {
       return Response.status(401)
@@ -2734,6 +2867,23 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
 
     return Response.ok(agentData).build();
+  }
+
+  private static Response htmlPage(int status, String heading, String body) {
+    String html = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        + "<title>Agent Auth</title>"
+        + "<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;"
+        + "margin:2rem auto;padding:0 1rem;color:#222}h1{font-size:1.4rem}</style></head>"
+        + "<body><h1>" + htmlEscape(heading) + "</h1><p>" + body + "</p></body></html>";
+    return Response.status(status).type(MediaType.TEXT_HTML).entity(html).build();
+  }
+
+  private static String htmlEscape(String raw) {
+    if (raw == null) {
+      return "";
+    }
+    return raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\"", "&quot;").replace("'", "&#x27;");
   }
 
   @SuppressWarnings("unchecked")

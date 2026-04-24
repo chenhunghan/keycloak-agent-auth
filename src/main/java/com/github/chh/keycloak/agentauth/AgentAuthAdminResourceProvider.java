@@ -362,6 +362,19 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     return Response.ok(hostData).build();
   }
 
+  @GET
+  @Path("agents/{id}")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getAgent(@PathParam("id") String id) {
+    requireManageRealm();
+    Map<String, Object> agentData = storage().getAgent(id);
+    if (agentData == null) {
+      return Response.status(404).entity(Map.of("error", "agent_not_found",
+          "message", "Agent not found")).build();
+    }
+    return Response.ok(agentData).build();
+  }
+
   /**
    * AAP §7.1: "Servers SHOULD periodically clean up agents that remain in pending state beyond a
    * server-defined threshold ... Cleaned-up pending agents are deleted, not revoked — they never
