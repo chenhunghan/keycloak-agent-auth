@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.1.xsd">
+
+    <changeSet author="agent-auth" id="agent-auth-1.0.0-initial-schema">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="AGENT_AUTH_HOST"/></not>
+        </preConditions>
+
+        <createTable tableName="AGENT_AUTH_HOST">
+            <column name="ID" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true"
+                             primaryKeyName="PK_AGENT_AUTH_HOST"/>
+            </column>
+            <column name="STATUS" type="VARCHAR(32)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PAYLOAD" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <createTable tableName="AGENT_AUTH_AGENT">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false" primaryKey="true"
+                             primaryKeyName="PK_AGENT_AUTH_AGENT"/>
+            </column>
+            <column name="HOST_ID" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="KEY_THUMBPRINT" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="STATUS" type="VARCHAR(32)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="PAYLOAD" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <createIndex indexName="IDX_AGENT_AUTH_AGENT_HOST"
+                     tableName="AGENT_AUTH_AGENT">
+            <column name="HOST_ID"/>
+        </createIndex>
+        <createIndex indexName="IDX_AGENT_AUTH_AGENT_HOST_KEY"
+                     tableName="AGENT_AUTH_AGENT">
+            <column name="HOST_ID"/>
+            <column name="KEY_THUMBPRINT"/>
+        </createIndex>
+
+        <createTable tableName="AGENT_AUTH_CAPABILITY">
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="false" primaryKey="true"
+                             primaryKeyName="PK_AGENT_AUTH_CAPABILITY"/>
+            </column>
+            <column name="PAYLOAD" type="TEXT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <createTable tableName="AGENT_AUTH_ROTATED_HOST">
+            <column name="OLD_HOST_ID" type="VARCHAR(64)">
+                <constraints nullable="false" primaryKey="true"
+                             primaryKeyName="PK_AGENT_AUTH_ROTATED_HOST"/>
+            </column>
+            <column name="NEW_HOST_ID" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ROTATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+</databaseChangeLog>

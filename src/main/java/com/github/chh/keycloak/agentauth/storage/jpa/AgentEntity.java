@@ -1,0 +1,100 @@
+package com.github.chh.keycloak.agentauth.storage.jpa;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
+import jakarta.persistence.Index;
+import jakarta.persistence.NamedQueries;
+import jakarta.persistence.NamedQuery;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "AGENT_AUTH_AGENT", indexes = {
+    @Index(name = "IDX_AGENT_AUTH_AGENT_HOST", columnList = "HOST_ID"),
+    @Index(name = "IDX_AGENT_AUTH_AGENT_HOST_KEY", columnList = "HOST_ID,KEY_THUMBPRINT")
+})
+@NamedQueries({
+    @NamedQuery(name = "AgentEntity.findByHost", query = "select a from AgentEntity a where a.hostId = :hostId"),
+    @NamedQuery(name = "AgentEntity.findByKeyAndHost", query = "select a from AgentEntity a "
+        + "where a.hostId = :hostId and a.keyThumbprint = :keyThumbprint")
+})
+public class AgentEntity {
+
+  @Id
+  @Column(name = "ID", length = 36)
+  private String id;
+
+  @Column(name = "HOST_ID", length = 64, nullable = false)
+  private String hostId;
+
+  @Column(name = "KEY_THUMBPRINT", length = 64, nullable = false)
+  private String keyThumbprint;
+
+  @Column(name = "STATUS", length = 32, nullable = false)
+  private String status;
+
+  @Column(name = "PAYLOAD", columnDefinition = "TEXT", nullable = false)
+  private String payload;
+
+  @Column(name = "CREATED_AT", nullable = false)
+  private long createdAt;
+
+  @Column(name = "UPDATED_AT", nullable = false)
+  private long updatedAt;
+
+  public String getId() {
+    return id;
+  }
+
+  public void setId(String id) {
+    this.id = id;
+  }
+
+  public String getHostId() {
+    return hostId;
+  }
+
+  public void setHostId(String hostId) {
+    this.hostId = hostId;
+  }
+
+  public String getKeyThumbprint() {
+    return keyThumbprint;
+  }
+
+  public void setKeyThumbprint(String keyThumbprint) {
+    this.keyThumbprint = keyThumbprint;
+  }
+
+  public String getStatus() {
+    return status;
+  }
+
+  public void setStatus(String status) {
+    this.status = status;
+  }
+
+  public String getPayload() {
+    return payload;
+  }
+
+  public void setPayload(String payload) {
+    this.payload = payload;
+  }
+
+  public long getCreatedAt() {
+    return createdAt;
+  }
+
+  public void setCreatedAt(long createdAt) {
+    this.createdAt = createdAt;
+  }
+
+  public long getUpdatedAt() {
+    return updatedAt;
+  }
+
+  public void setUpdatedAt(long updatedAt) {
+    this.updatedAt = updatedAt;
+  }
+}

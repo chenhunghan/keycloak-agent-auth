@@ -84,6 +84,11 @@
             <artifactId>keycloak-services</artifactId>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-model-jpa</artifactId>
+            <scope>provided</scope>
+        </dependency>
 
         <!-- Jakarta EE APIs (provided by Keycloak/Quarkus runtime) -->
         <dependency>
