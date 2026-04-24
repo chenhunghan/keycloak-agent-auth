@@ -92,4 +92,41 @@
             </column>
         </createTable>
     </changeSet>
+
+    <!--
+        Adds a queryable USER_ID column on hosts and agents to support AAP §2.6 (cascade revocation
+        on Keycloak user deletion) without scanning the JSON payload. Intentionally additive and
+        split from 1.0.0-initial-schema so Liquibase checksums on already-deployed databases remain
+        valid. Nullable — not every host is linked. Preconditions guard against re-running on any
+        environment that already ran this change under a different checksum lineage.
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.1.0-user-id">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_HOST" columnName="USER_ID"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_HOST">
+            <column name="USER_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <createIndex indexName="IDX_AGENT_AUTH_HOST_USER"
+                     tableName="AGENT_AUTH_HOST">
+            <column name="USER_ID"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet author="agent-auth" id="agent-auth-1.1.0-agent-user-id">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_AGENT" columnName="USER_ID"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_AGENT">
+            <column name="USER_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <createIndex indexName="IDX_AGENT_AUTH_AGENT_USER"
+                     tableName="AGENT_AUTH_AGENT">
+            <column name="USER_ID"/>
+        </createIndex>
+    </changeSet>
 </databaseChangeLog>

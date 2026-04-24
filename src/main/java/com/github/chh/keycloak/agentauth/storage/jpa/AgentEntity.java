@@ -11,7 +11,8 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "AGENT_AUTH_AGENT", indexes = {
     @Index(name = "IDX_AGENT_AUTH_AGENT_HOST", columnList = "HOST_ID"),
-    @Index(name = "IDX_AGENT_AUTH_AGENT_HOST_KEY", columnList = "HOST_ID,KEY_THUMBPRINT")
+    @Index(name = "IDX_AGENT_AUTH_AGENT_HOST_KEY", columnList = "HOST_ID,KEY_THUMBPRINT"),
+    @Index(name = "IDX_AGENT_AUTH_AGENT_USER", columnList = "USER_ID")
 })
 @NamedQueries({
     @NamedQuery(name = "AgentEntity.findByHost", query = "select a from AgentEntity a where a.hostId = :hostId"),
@@ -41,6 +42,14 @@ public class AgentEntity {
 
   @Column(name = "UPDATED_AT", nullable = false)
   private long updatedAt;
+
+  /**
+   * Queryable mirror of {@code payload.user_id}. For delegated agents this inherits from
+   * {@code host.user_id} (AAP §3.2); for autonomous agents it is populated on claim (§2.10). Null
+   * when unset. Written in lock-step with the payload by {@code JpaStorage.putAgent}.
+   */
+  @Column(name = "USER_ID", length = 36)
+  private String userId;
 
   public String getId() {
     return id;
@@ -96,5 +105,13 @@ public class AgentEntity {
 
   public void setUpdatedAt(long updatedAt) {
     this.updatedAt = updatedAt;
+  }
+
+  public String getUserId() {
+    return userId;
+  }
+
+  public void setUserId(String userId) {
+    this.userId = userId;
   }
 }

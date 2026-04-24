@@ -65,6 +65,20 @@ public class InMemoryStorage implements AgentAuthStorage {
   }
 
   @Override
+  public List<Map<String, Object>> findHostsByUser(String userId) {
+    List<Map<String, Object>> matches = new ArrayList<>();
+    if (userId == null) {
+      return matches;
+    }
+    for (Map<String, Object> host : HOSTS.values()) {
+      if (userId.equals(host.get("user_id"))) {
+        matches.add(host);
+      }
+    }
+    return matches;
+  }
+
+  @Override
   public Map<String, Object> getCapability(String name) {
     return CAPABILITIES.get(name);
   }

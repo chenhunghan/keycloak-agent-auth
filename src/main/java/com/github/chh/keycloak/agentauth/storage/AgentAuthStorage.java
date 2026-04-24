@@ -36,6 +36,12 @@ public interface AgentAuthStorage extends Provider {
   /** All agents belonging to {@code hostId}, regardless of status. */
   List<Map<String, Object>> findAgentsByHost(String hostId);
 
+  /**
+   * All hosts whose {@code user_id} payload field equals {@code userId}. Used by the AAP §2.6
+   * user-deletion cascade; returns an empty list when no host is linked to the given user.
+   */
+  List<Map<String, Object>> findHostsByUser(String userId);
+
   // --- Capabilities (keyed by name) ---
 
   Map<String, Object> getCapability(String name);

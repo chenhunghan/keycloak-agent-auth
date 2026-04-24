@@ -47,17 +47,20 @@ public class JpaStorage implements AgentAuthStorage {
     long now = System.currentTimeMillis();
     String json = serialize(host);
     String status = (String) host.get("status");
+    String userId = stringField(host, "user_id");
     if (entity == null) {
       entity = new HostEntity();
       entity.setId(hostId);
       entity.setCreatedAt(now);
       entity.setStatus(status);
       entity.setPayload(json);
+      entity.setUserId(userId);
       entity.setUpdatedAt(now);
       em.persist(entity);
     } else {
       entity.setStatus(status);
       entity.setPayload(json);
+      entity.setUserId(userId);
       entity.setUpdatedAt(now);
     }
   }
@@ -88,6 +91,7 @@ public class JpaStorage implements AgentAuthStorage {
     String hostId = (String) agent.get("host_id");
     String thumbprint = (String) agent.get("agent_key_thumbprint");
     String status = (String) agent.get("status");
+    String userId = stringField(agent, "user_id");
     if (entity == null) {
       entity = new AgentEntity();
       entity.setId(agentId);
@@ -96,6 +100,7 @@ public class JpaStorage implements AgentAuthStorage {
       entity.setKeyThumbprint(thumbprint);
       entity.setStatus(status);
       entity.setPayload(json);
+      entity.setUserId(userId);
       entity.setUpdatedAt(now);
       em.persist(entity);
     } else {
@@ -103,6 +108,7 @@ public class JpaStorage implements AgentAuthStorage {
       entity.setKeyThumbprint(thumbprint);
       entity.setStatus(status);
       entity.setPayload(json);
+      entity.setUserId(userId);
       entity.setUpdatedAt(now);
     }
   }
@@ -126,6 +132,22 @@ public class JpaStorage implements AgentAuthStorage {
         .getResultList();
     List<Map<String, Object>> out = new ArrayList<>(results.size());
     for (AgentEntity e : results) {
+      out.add(deserialize(e.getPayload()));
+    }
+    return out;
+  }
+
+  @Override
+  public List<Map<String, Object>> findHostsByUser(String userId) {
+    if (userId == null) {
+      return new ArrayList<>();
+    }
+    List<HostEntity> results = em()
+        .createNamedQuery("HostEntity.findByUserId", HostEntity.class)
+        .setParameter("userId", userId)
+        .getResultList();
+    List<Map<String, Object>> out = new ArrayList<>(results.size());
+    for (HostEntity e : results) {
       out.add(deserialize(e.getPayload()));
     }
     return out;
@@ -220,6 +242,16 @@ public class JpaStorage implements AgentAuthStorage {
   }
 
   // --- JSON helpers ---
+
+  /**
+   * Extracts a string field from a payload map. Returns {@code null} when the key is missing, the
+   * value is {@code null}, or the value is not a {@link String}. Used to keep the queryable entity
+   * columns in sync with the JSON payload for fields like {@code user_id}.
+   */
+  private static String stringField(Map<String, Object> map, String key) {
+    Object value = map == null ? null : map.get(key);
+    return value instanceof String ? (String) value : null;
+  }
 
   private static String serialize(Map<String, Object> value) {
     try {
