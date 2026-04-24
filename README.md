@@ -137,7 +137,7 @@ This extension does not sign protocol responses today, so discovery does not pub
 | Architecture | Hybrid (KC auth + external execution) | Avoids building a parallel auth system inside KC; lets KC do what it's good at |
 | Discovery | `/realms/{realm}/.well-known/agent-configuration` via WellKnownProvider SPI | Follows KC's own OpenID discovery pattern |
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on KC classpath, high-level API, well-audited |
-| Storage | In-process registry today; JPA entities + Liquibase planned | Current implementation is pre-release and dev/test oriented; persistent storage should use `JpaEntityProvider` in KC 26.x |
+| Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; writes land in Keycloak's main persistence unit (H2 in dev, any KC-supported RDBMS in prod) | Survives Keycloak restarts and scales across replicas; selected by default via the `AgentAuthStorage` SPI (`kc.spi.agent-auth-storage.provider=in-memory` switches back to the process-local map for tests) |
 | Scoping | Global env toggle + per-realm attribute override (planned) | Start simple, add granularity later |
 | Approval flows | Admin-mediated HTTP approval (device flow + CIBA planned) | Matches the implementation today while leaving native KC approval-flow integration for a later design |
 | Capabilities | Centralized in KC | Single source of truth; resource servers just execute |
@@ -207,11 +207,31 @@ src/main/java/.../agentauth/
   ConstraintValidator.java                   # Capability constraint enforcement
   ConstraintViolation.java                   # Violation record
   JwksCache.java                             # JWKS URL cache + kid-miss refetch handling
-  InMemoryRegistry.java                      # In-process storage (dev/test only)
+  storage/
+    AgentAuthStorage.java                    # Storage SPI (provider interface)
+    AgentAuthStorageProviderFactory.java     # Provider factory SPI
+    AgentAuthStorageSpi.java                 # SPI registration
+    InMemoryStorage.java                     # Process-local map impl (test fallback)
+    InMemoryStorageFactory.java              # Factory for the in-memory impl
+    jpa/
+      AgentAuthJpaEntityProvider.java        # Registers entities + changelog with KC
+      AgentAuthJpaEntityProviderFactory.java # JpaEntityProvider factory
+      HostEntity.java                        # AGENT_AUTH_HOST row
+      AgentEntity.java                       # AGENT_AUTH_AGENT row
+      CapabilityEntity.java                  # AGENT_AUTH_CAPABILITY row
+      RotatedHostEntity.java                 # AGENT_AUTH_ROTATED_HOST row
+      JpaStorage.java                        # AgentAuthStorage backed by EntityManager
+      JpaStorageFactory.java                 # Default AgentAuthStorage factory (order=100)
+
+src/main/resources/META-INF/
+  agent-auth-changelog.xml                   # Liquibase changelog for AGENT_AUTH_* tables
+  services/                                  # KC provider SPI descriptors
 
 src/test/java/.../agentauth/
   support/
-    BaseKeycloakIT.java                      # Shared Testcontainers Keycloak singleton
+    BaseKeycloakIT.java                      # Shared Testcontainers Keycloak singleton (H2)
+    BasePostgresE2E.java                     # Postgres-backed KC for E2Es
+    PostgresSupport.java                     # Postgres container + KC wiring
     TestKeys.java                            # Ed25519 key generation helpers
     TestJwts.java                            # host+jwt / agent+jwt builders
     TestcontainersSupport.java               # Testcontainers configuration
@@ -225,6 +245,8 @@ src/test/java/.../agentauth/
   AgentAuthErrorResponseIT.java              # §5.13–§5.14 Error format + WWW-Authenticate
   AgentAuthAdminCapabilityRegistrationIT.java# Admin capability CRUD
   AgentAuthKeycloakIT.java                   # Sanity check (Keycloak starts, extension loads)
+  AgentAuthFullJourneyE2E.java               # Full delegated/autonomous journey (Postgres-backed)
+  AgentAuthRestartSurvivalE2E.java           # State survives Keycloak restart (Postgres)
   ConstraintValidatorTest.java               # Constraint validation unit tests (no Docker)
   AgentAuthRealmResourceProviderFactoryTest.java # Factory unit tests (no Docker)
 ```

@@ -4,7 +4,7 @@ import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
-import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
+import com.github.chh.keycloak.agentauth.support.BasePostgresE2E;
 import com.github.chh.keycloak.agentauth.support.TestJwts;
 import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
@@ -37,7 +37,7 @@ import org.testcontainers.Testcontainers;
  * Unlike the per-endpoint ITs, each test runs the full sequence; a failure at any step aborts the
  * rest, and AssertJ descriptions identify which step broke.
  */
-class AgentAuthFullJourneyE2E extends BaseKeycloakIT {
+class AgentAuthFullJourneyE2E extends BasePostgresE2E {
 
   private static HttpServer backend;
   private static int backendPort;
