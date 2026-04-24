@@ -17,23 +17,31 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- Keycloak -->
-        <keycloak.version>26.1.4</keycloak.version>
+        <keycloak.version>26.6.1</keycloak.version>
 
-        <!-- Testing -->
+        <!-- Testing
+             NOTE: testcontainers pinned at 1.20.4 / testcontainers-keycloak 3.6.0 on purpose.
+             Newer testcontainers (1.21+ and 2.x) ship `testcontainers/sshd:1.3.0` as the
+             host-port-forwarding helper, which fails on Lima/containerd setups with
+             "mount callback failed … /etc/resolv.conf: read-only file system" and breaks any
+             IT that calls `Testcontainers.exposeHostPorts()`. Keeping the older pair avoids
+             the helper image regression. Bumping testcontainers-keycloak to 4.x would also
+             transitively require JUnit Jupiter 6 — staying on 5.x matches the current test
+             code. -->
         <junit.version>5.11.4</junit.version>
         <testcontainers.version>1.20.4</testcontainers.version>
         <testcontainers-keycloak.version>3.6.0</testcontainers-keycloak.version>
         <assertj.version>3.27.3</assertj.version>
         <rest-assured.version>5.5.1</rest-assured.version>
-        <tink.version>1.13.0</tink.version>
+        <tink.version>1.21.0</tink.version>
 
         <!-- Plugins -->
-        <maven-compiler-plugin.version>3.14.0</maven-compiler-plugin.version>
-        <maven-surefire-plugin.version>3.5.2</maven-surefire-plugin.version>
-        <maven-failsafe-plugin.version>3.5.2</maven-failsafe-plugin.version>
-        <maven-dependency-plugin.version>3.8.1</maven-dependency-plugin.version>
-        <maven-enforcer-plugin.version>3.5.0</maven-enforcer-plugin.version>
-        <spotless.version>2.44.3</spotless.version>
+        <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>3.5.5</maven-surefire-plugin.version>
+        <maven-failsafe-plugin.version>3.5.5</maven-failsafe-plugin.version>
+        <maven-dependency-plugin.version>3.10.0</maven-dependency-plugin.version>
+        <maven-enforcer-plugin.version>3.6.2</maven-enforcer-plugin.version>
+        <spotless.version>3.4.0</spotless.version>
     </properties>
 
     <dependencyManagement>

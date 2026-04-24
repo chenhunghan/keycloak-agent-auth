@@ -9,7 +9,7 @@ import java.util.stream.Stream;
 
 public final class TestcontainersSupport {
 
-  private static final String KEYCLOAK_IMAGE = "quay.io/keycloak/keycloak:26.1.4";
+  private static final String KEYCLOAK_IMAGE = "quay.io/keycloak/keycloak:26.6.1";
   private static final String DOCKER_API_VERSION = "1.54";
   private static final String PROVIDER_LIBS_DIR = "target/provider-libs";
   private static final String TEST_REALM_IMPORT = "realms/agent-auth-test-realm.json";

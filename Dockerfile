@@ -10,7 +10,7 @@ RUN mvn -B -e dependency:go-offline
 COPY src ./src
 RUN mvn -B -e -Pquick package
 
-FROM quay.io/keycloak/keycloak:26.1.4
+FROM quay.io/keycloak/keycloak:26.6.1
 
 COPY --from=build /build/target/keycloak-agent-auth-*.jar /opt/keycloak/providers/
 COPY --from=build /build/target/provider-libs/*.jar /opt/keycloak/providers/
