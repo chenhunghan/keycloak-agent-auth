@@ -7,11 +7,12 @@ The README gives the high-level picture; this doc is the deep reference.
 ## Contents
 
 1. [Protocol actors](#protocol-actors)
-2. [Spec data-flow diagram](#spec-data-flow-diagram)
+2. [Spec architecture](#spec-architecture)
 3. [Canonical happy-path sequence](#canonical-happy-path-sequence)
-4. [Extension internals](#extension-internals)
-5. [Spec ↔ source file map](#spec--source-file-map)
-6. [Deliberate deviations and choices](#deliberate-deviations-and-choices)
+4. [Host linking flow](#host-linking-flow)
+5. [Extension internals](#extension-internals)
+6. [Spec ↔ source file map](#spec--source-file-map)
+7. [Deliberate deviations and choices](#deliberate-deviations-and-choices)
 
 ---
 
@@ -24,55 +25,33 @@ The README gives the high-level picture; this doc is the deep reference.
 | **Host** | principal | "The persistent identity of the client environment where agents run... represented as a registered keypair plus metadata." (§2.7) |
 | **Server** | service | "The service's authorization server. It manages discovery, host and agent registrations, approvals, capability grants, and JWT verification." (§1.5) |
 | **Resource Server** | service | Implicit in §2.15 and §5.11. The service hosting a capability's business logic at `capability.location`. Validates agent JWTs locally or via introspection. |
-| **User** | human | End user who approves delegated registrations and capability grants (§2.2.1, §2.9). |
+| **User** | human | End user who approves delegated registrations and capability grants (§2.2.1, §2.9). Linked to hosts through the server's implementation-specific linking mechanism (§2.9). |
 
 Key property: **Client and Host are different things.** The client is the process (Claude Code CLI, a background worker, etc.); the host is the identity that client holds (one Ed25519 keypair + record on the server). Migrating a client install to a different machine but carrying the key = same host; reinstalling with a fresh key = different host.
 
-## Spec data-flow diagram
+## Spec architecture
 
-```
-  ┌──────────── Client environment (the host principal) ────────────┐
-  │                                                                  │
-  │    ┌─────────┐        protocol tools          ┌──────────┐       │
-  │    │  Agent  │ ◀─────── (MCP / SDK) ─────────▶│  Client  │       │
-  │    │  (LLM)  │                                 │ holds H  │       │
-  │    └─────────┘                                 │ keypair, │       │
-  │                                                 │ signs JWT│       │
-  │                                                 └────┬─────┘       │
-  └────────────────────────────────────────────────────── │ ────────────┘
-                                                          │ HTTPS
-                             ┌────────────────────────────┤
-                             │                            │
-                             │ host+jwt OR agent+jwt      │ agent+jwt
-                             │ (server endpoints)         │ (direct-mode
-                             ▼                            ▼  RS only)
-        ┌────────────────────────────────────┐   ┌──────────────────────────┐
-        │ Server (authz)                     │   │ Resource Server           │
-        │                                    │   │   (capability.location)    │
-        │  GET /.well-known/                 │   │                            │
-        │       agent-configuration          │   │  POST <location>           │
-        │  GET /capability/{list,describe}   │   │   Authorization:           │
-        │  POST /agent/register              │   │     Bearer <agent+jwt>     │
-        │       /agent/request-capability    │   │                            │
-        │       /agent/{status,revoke,       │   │  runs business logic       │
-        │        reactivate,rotate-key}      │   │                            │
-        │       /host/{revoke,rotate-key}    │◀──┤ POST /agent/introspect     │
-        │       /agent/introspect            │   │   { "token": "..." }       │
-        │       /capability/execute          │   │   (server-to-server)       │
-        │         (gateway mode —            │   │                            │
-        │          proxies to                │   └──────────────────────────┘
-        │          capability.location)      │
-        └──────────────────┬─────────────────┘
-                           │ approval flow
-                           │  (device_authorization / CIBA / admin UI)
-                           ▼
-                       ┌────────┐
-                       │  User  │
-                       │ (human)│
-                       └────────┘
+```mermaid
+flowchart LR
+    subgraph CE["Client environment (= host)"]
+        direction LR
+        A["Agent<br/>(runtime LLM)"]
+        C["Client<br/>holds host keypair,<br/>signs JWTs"]
+        A <-->|"protocol tools<br/>MCP / SDK"| C
+    end
+
+    S["Server<br/>(authz)"]
+    RS["Resource Server<br/>capability.location"]
+    U(("User"))
+
+    C -->|"host+jwt<br/>register · status · revoke · rotate"| S
+    C -->|"agent+jwt<br/>/capability/execute<br/>(gateway mode)"| S
+    C -.->|"agent+jwt<br/>(direct mode)"| RS
+    RS -->|"/agent/introspect<br/>server-to-server"| S
+    S -->|"approval prompt<br/>device_auth / CIBA / admin UI"| U
 ```
 
-The two capability-execution paths meet in the same picture:
+Two capability-execution paths share the same picture:
 
 - **Gateway** — client sends agent+jwt to `/capability/execute`; server validates, runs constraint checks, proxies to `<capability.location>`. The resource server never sees an agent+jwt directly.
 - **Direct** — client sends agent+jwt to `<capability.location>` directly; the resource server calls `/agent/introspect` to validate.
@@ -81,123 +60,154 @@ Gateway is the simpler integration (resource server doesn't implement any auth);
 
 ## Canonical happy-path sequence
 
-Delegated-mode registration → approval → execution → introspection → revocation. Numbers label the hops.
+Delegated-mode registration → approval → execution → introspection → revocation.
 
-```
- [Agent]        [Client]               [Server]               [User]       [RS]
-    │               │                      │                    │           │
-    │─1. connect───▶│                      │                    │           │
-    │               │                      │                    │           │
-    │               │─2. GET /.well-known─▶│                    │           │
-    │               │◀────discovery doc────│                    │           │
-    │               │                      │                    │           │
-    │               │─3. POST /agent/register [host+jwt]────────▶│           │
-    │               │                      │ create host(pending│           │
-    │               │                      │        or active), │           │
-    │               │                      │ agent, grants      │           │
-    │               │◀──4. approval object─│                    │           │
-    │               │                      │                    │           │
-    │               │                      │─5. approval prompt─▶│           │
-    │               │                      │  (device / CIBA /  │           │
-    │               │                      │   admin UI)        │           │
-    │               │                      │◀──6. approved──────│           │
-    │               │                      │                    │           │
-    │               │─7. GET /agent/status─▶│                    │           │
-    │               │◀─8. status=active────│                    │           │
-    │               │                      │                    │           │
-    │  — agent now usable —                │                    │           │
-    │               │                      │                    │           │
-    │◀─9. ok to work│                      │                    │           │
-    │               │                      │                    │           │
-    │10. execute_capability                │                    │           │
-    │──────────────▶│                      │                    │           │
-    │               │  — GATEWAY MODE —    │                    │           │
-    │               │─11g. POST /capability/execute [agent+jwt]─▶│          │
-    │               │                      │  introspect+       │           │
-    │               │                      │  constraints+      │           │
-    │               │                      │  proxy internally ─┼──────────▶│
-    │               │                      │                    │  run      │
-    │               │                      │◀───────────────────┼──────────┤
-    │               │◀──12g. result────────│                    │           │
-    │               │                      │                    │           │
-    │               │  — DIRECT MODE —     │                    │           │
-    │               │─11d. POST <location> [agent+jwt]──────────┼──────────▶│
-    │               │                      │                    │           │
-    │               │                      │◀─12d. POST /agent/introspect──┤
-    │               │                      │──────────────────── ─ ─ ─ ─ ─▶│
-    │               │◀────13d. result──────┼────────────────────┼──────────│
-    │               │                      │                    │           │
-    │◀──14. answer─│                      │                    │           │
-    │               │                      │                    │           │
-    │  — later, teardown —                 │                    │           │
-    │               │─15. POST /agent/revoke [host+jwt]─────────▶│          │
-    │               │◀──16. status=revoked─│                    │           │
-    │               │                      │                    │           │
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Agent
+    participant Client
+    participant Server
+    participant RS as Resource Server
+
+    Agent->>Client: connect
+    Client->>Server: GET /.well-known/agent-configuration
+    Server-->>Client: discovery doc
+
+    Client->>Server: POST /agent/register  [host+jwt]
+    Server-->>Client: 200 + approval object
+
+    Note over Server,User: spec §7 approval flow<br/>(device_auth / CIBA / admin UI)
+    Server->>User: verification prompt
+    User->>Server: authenticate + approve
+
+    loop poll
+        Client->>Server: GET /agent/status  [host+jwt]
+    end
+    Server-->>Client: status = active
+
+    Agent->>Client: execute capability
+
+    alt Gateway mode
+        Client->>Server: POST /capability/execute  [agent+jwt]
+        Server->>RS: proxy
+        RS-->>Server: result
+        Server-->>Client: result
+    else Direct mode
+        Client->>RS: POST <capability.location>  [agent+jwt]
+        RS->>Server: POST /agent/introspect
+        Server-->>RS: active + grants
+        RS-->>Client: result
+    end
+    Client-->>Agent: answer
+
+    Note over Client,Server: teardown
+    Client->>Server: POST /agent/revoke  [host+jwt]
+    Server-->>Client: status = revoked
 ```
 
 A few nuances worth calling out:
 
 - **Host+jwt vs agent+jwt boundary.** Host+jwt signs *host-scoped* operations (register, status, revoke, reactivate, rotate-key). Agent+jwt signs *agent-scoped* operations (execute, introspect target). The spec requires `aud` on the agent+jwt to match the endpoint it's sent to — `/capability/execute` for gateway, `<capability.location>` for direct. That's enforced in `AgentAuthRealmResourceProvider.executeCapability` and mirrored by resource-server implementations.
-- **Approval method selection.** Driven by what the server advertises in `/.well-known/agent-configuration` under `approval_methods`. Today we publish `["admin"]`, so step 5 is a human admin calling `/admin/.../agents/{id}/capabilities/{cap}/approve`; `device_authorization` and `ciba` are on the roadmap.
-- **Async / streaming execution.** Gateway-mode `/capability/execute` can return `202 + status_url` for async or an SSE stream for streaming. Our `AgentAuthRealmResourceProvider.executeCapability` proxies all three response shapes; see `AgentAuthCapabilityExecuteIT` for the exercised contracts.
+- **Approval method selection.** Driven by what the server advertises in `/.well-known/agent-configuration` under `approval_methods`. Today we publish `["admin"]`, so step 6 is a human admin calling `/admin/.../agents/{id}/capabilities/{cap}/approve`; `device_authorization` and `ciba` are on the roadmap.
+- **Async / streaming execution.** Gateway-mode `/capability/execute` can return `202 + status_url` for async or an SSE stream for streaming. `AgentAuthRealmResourceProvider.executeCapability` proxies all three response shapes; see `AgentAuthCapabilityExecuteIT` for the exercised contracts.
+
+## Host linking flow
+
+Host linking is the spec's mechanism for binding a host (machine identity) to a user (human identity). §2.9 says linking is implementation-specific and lists "admin API" as one of the allowed mechanisms; this extension ships that admin API today. Interactive user-driven linking via device-flow or CIBA is still planned.
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Ext as AgentAuthAdminResourceProvider
+    participant KC as Keycloak (users)
+    participant Store as AgentAuthStorage
+
+    Admin->>Ext: POST /admin/.../hosts/{id}/link<br/>body: { user_id }  [admin OIDC]
+    Ext->>Store: getHost(id)
+    alt host not found
+        Ext-->>Admin: 404 host_not_found
+    end
+    Ext->>KC: users().getUserById(user_id)
+    alt user not found
+        Ext-->>Admin: 404 user_not_found
+    end
+    alt host.user_id already set<br/>and != requested
+        Ext-->>Admin: 409 host_already_linked
+    end
+
+    Ext->>Store: putHost(id, { ..., user_id })
+
+    loop each agent under host
+        alt mode = autonomous AND status not terminal
+            Ext->>Store: putAgent(agent,<br/>status=claimed,<br/>grants[].status=revoked,<br/>user_id=user)
+            Note right of Ext: §2.10 — claim
+        else mode = delegated
+            Ext->>Store: putAgent(agent, user_id=user)
+            Note right of Ext: §3.2 — propagate
+        end
+    end
+
+    Ext->>KC: emit AdminEvent<br/>agent-auth/host/{id}/link
+    Ext-->>Admin: 200 + host record
+```
+
+Unlink (`DELETE /admin/.../hosts/{id}/link`) runs the inverse cascade: all delegated agents under the host are revoked (§2.9 — their authority derived from the now-removed link). Autonomous agents were already `claimed` by the link cascade, which is a terminal state, so they stay put. The host's `user_id` is cleared and it becomes unlinked again.
+
+Coverage: `AgentAuthHostLinkIT` walks each of the spec's normative consequences (§2.9 one-user constraint, §2.10 claim cascade, §3.2 user_id propagation, §2.9 unlink revocation) against a live Keycloak container.
 
 ## Extension internals
 
-```
-  ┌──────────── Keycloak server (container) ──────────────────────────┐
-  │                                                                    │
-  │  ┌─── Keycloak core (pre-existing) ─────────────────────────────┐  │
-  │  │   • Realms / users / sessions                                │  │
-  │  │   • OIDC (admin-cli gets $TOKEN via password grant)          │  │
-  │  │   • Admin UI / admin REST (/admin/realms/{r}/...)            │  │
-  │  │   • Event framework (AdminEvent audit log)                   │  │
-  │  │   • JPA persistence unit (H2 in dev, Postgres in prod)       │  │
-  │  └──────────────────────────────────────────────────────────────┘  │
-  │                                                                    │
-  │  ┌─── This extension (keycloak-agent-auth JAR) ─────────────────┐  │
-  │  │                                                              │  │
-  │  │   WellKnownProvider SPI                                      │  │
-  │  │     └─ AgentAuthWellKnownProvider                            │  │
-  │  │         publishes /.well-known/agent-configuration           │  │
-  │  │         with modes, approval_methods=["admin"],              │  │
-  │  │         endpoints map, default_location                      │  │
-  │  │                                                              │  │
-  │  │   RealmResourceProvider SPI                                  │  │
-  │  │     └─ AgentAuthRealmResourceProvider                        │  │
-  │  │         /agent/register, /agent/introspect,                  │  │
-  │  │         /agent/status, /agent/revoke, /agent/reactivate,     │  │
-  │  │         /agent/rotate-key, /host/revoke, /host/rotate-key,   │  │
-  │  │         /agent/request-capability,                           │  │
-  │  │         /capability/{list,describe,execute},                 │  │
-  │  │         /agent/{id}/capabilities/{cap}/status, /health       │  │
-  │  │                                                              │  │
-  │  │   AdminRealmResourceProvider SPI (reuses KC admin auth)      │  │
-  │  │     └─ AgentAuthAdminResourceProvider                        │  │
-  │  │         capability CRUD,                                     │  │
-  │  │         agent approve/reject/expire,                         │  │
-  │  │         host pre-register + GET                              │  │
-  │  │                                                              │  │
-  │  │   Storage SPI (AgentAuthStorage)                             │  │
-  │  │     ├─ JpaStorage  (default, order=100)                      │  │
-  │  │     │    └─ JpaEntityProvider + Liquibase changelog →        │  │
-  │  │     │       AGENT_AUTH_{HOST,AGENT,CAPABILITY,ROTATED_HOST}  │  │
-  │  │     └─ InMemoryStorage (tests)                               │  │
-  │  │        override via kc.spi.agent-auth-storage.provider=...   │  │
-  │  │                                                              │  │
-  │  │   Support classes                                            │  │
-  │  │     ├─ JwksCache (5-min TTL, kid-miss rate-limited)          │  │
-  │  │     ├─ ConstraintValidator (max/min/in/not_in/exact)         │  │
-  │  │     └─ AgentAuthDiscoveryCacheFilter                         │  │
-  │  └──────────────────────────────────────────────────────────────┘  │
-  └────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph KC["Keycloak server (container)"]
+        direction TB
+        subgraph CORE["Keycloak core (pre-existing)"]
+            direction LR
+            C1["Realms / users /<br/>sessions"]
+            C2["OIDC<br/>(admin-cli for TOKEN)"]
+            C3["Admin UI + REST"]
+            C4["Event framework<br/>(AdminEvents)"]
+            C5["JPA persistence unit<br/>(H2 dev · Postgres prod)"]
+        end
 
-  External to the extension (you plug these in):
-    • Client software    — your host process, any language
-    • Agent runtime      — your LLM / app, any runtime
-    • Resource server    — your product backend, any language
-                           (register its URL as capability.location)
-    • Keycloak admin user — the human who approves delegated grants
-                           via the admin API until CIBA / device-flow land
+        subgraph EXT["This extension (keycloak-agent-auth JAR)"]
+            direction TB
+            subgraph PROV["SPI providers"]
+                direction LR
+                P1["WellKnownProvider<br/>AgentAuthWellKnownProvider"]
+                P2["RealmResourceProvider<br/>AgentAuthRealmResourceProvider"]
+                P3["AdminRealmResourceProvider<br/>AgentAuthAdminResourceProvider"]
+            end
+
+            subgraph STOR["Storage SPI · AgentAuthStorage"]
+                direction LR
+                S1["JpaStorage<br/>(default, order=100)"]
+                S2["InMemoryStorage<br/>(tests)"]
+            end
+
+            JPA["JpaEntityProvider +<br/>Liquibase changelog →<br/>AGENT_AUTH_{HOST · AGENT ·<br/>CAPABILITY · ROTATED_HOST}"]
+
+            subgraph SUP["Support"]
+                direction LR
+                U1["JwksCache"]
+                U2["ConstraintValidator"]
+                U3["DiscoveryCacheFilter"]
+            end
+        end
+    end
+
+    P2 --> S1
+    P3 --> S1
+    S1 --> JPA
+    JPA --> C5
+    P3 -.->|reuses admin<br/>OIDC auth| C3
+    P2 -.->|emits| C4
+    P3 -.->|emits| C4
+    P2 --- U1
+    P2 --- U2
+    P1 --- U3
 ```
 
 The three SPIs (WellKnownProvider, RealmResourceProvider, AdminRealmResourceProvider) are the only extension points Keycloak itself defines; everything else the extension does is either SPI registration boilerplate or ordinary Java code that those three invoke.
@@ -207,7 +217,7 @@ The three SPIs (WellKnownProvider, RealmResourceProvider, AdminRealmResourceProv
 `AgentAuthStorage` is the single interface through which every endpoint reaches state. Two implementations ship:
 
 - `JpaStorage` — default, order=100. Writes land in Keycloak's main persistence unit via `JpaEntityProvider`. One Liquibase changelog (`META-INF/agent-auth-changelog.xml`) creates the four tables. The entity shape is deliberately coarse: four tagged columns (`ID`, `STATUS`, `CREATED_AT`, `UPDATED_AT`) plus a `PAYLOAD TEXT` holding the full record as JSON. Adding optional fields to a record (name/description/metadata) is a zero-migration change — they ride along in `PAYLOAD`.
-- `InMemoryStorage` — order=0, used by tests that don't care about persistence. The existing IT suite uses it; `BasePostgresE2E` switches to JPA+Postgres for cross-restart tests.
+- `InMemoryStorage` — order=0, used by tests that don't care about persistence. Most ITs use it; `BasePostgresE2E` switches to JPA+Postgres for cross-restart tests.
 
 Providers are selected with `kc.spi.agent-auth-storage.provider=<jpa|in-memory>`.
 
@@ -244,6 +254,7 @@ Both paths converge in the same verification logic; the choice is per-identity, 
 | §4.5 JWT verification | inline in the above, shared helpers |
 | §2.13 Constraints | `ConstraintValidator`, `ConstraintViolation` |
 | §2.8 Pre-registration | `AgentAuthAdminResourceProvider.preRegisterHost` / `.getHost` |
+| §2.9 / §2.10 / §3.2 Host linking + claiming + user_id propagation | `AgentAuthAdminResourceProvider.linkHost` / `.unlinkHost` |
 | Admin capability CRUD | `AgentAuthAdminResourceProvider.registerCapability` / `.updateCapability` / `.deleteCapability` |
 | Admin grant approve / reject / expire | `AgentAuthAdminResourceProvider.approveCapability` / `.rejectAgent` / `.expireAgent` |
 | Storage | `storage/AgentAuthStorage` + `storage/jpa/*` + `storage/InMemoryStorage` |
@@ -257,12 +268,12 @@ The spec is intentionally implementation-agnostic in several places. Here's wher
 
 | Spec concept | What we did | Why |
 |--------------|-------------|-----|
-| `approval_methods` | `["admin"]` only | Device flow + CIBA are on the roadmap. Today a Keycloak admin approves via `POST /admin/.../agents/{id}/capabilities/{cap}/approve`. |
-| Host state on dynamic registration | `active` (spec prescribes `pending`) | Pre-existing simplification to keep the initial implementation compact; pre-registration now gives admins a hook to gate this properly. Revisit alongside device-flow. |
+| `approval_methods` | `["admin"]` only | `device_authorization` and `ciba` still require the user-facing orchestration on top of Keycloak's native OIDC flows — on the roadmap. Today a Keycloak admin approves via `POST /admin/.../agents/{id}/capabilities/{cap}/approve`. |
+| Host state on dynamic registration | `active` (spec prescribes `pending`) | Pre-existing simplification to keep the initial implementation compact. Pre-registration now gives admins a hook to gate this properly. Revisit alongside device-flow. |
 | Pre-registration endpoint shape | `POST /admin/.../agent-auth/hosts` with inline JWK | Spec explicitly defers this to "server's dashboard, admin API, or any other server-specific mechanism" (§2.8). We matched the shape of the existing admin API. |
-| `user_id` linking on hosts | not implemented | Waits on the user-approval flow. Today all hosts are unlinked. |
+| `user_id` linking on hosts (§2.9) | **Implemented** as admin API: `POST/DELETE /admin/.../agent-auth/hosts/{id}/link` | §2.9 explicitly allows "admin API" as a linking mechanism. Interactive user-driven linking (via device-flow / CIBA) is still pending. |
+| Autonomous-agent `claimed` transition on host link (§2.10) | **Implemented** — link cascade claims autonomous agents, revokes their grants, propagates `user_id` to delegated agents (§3.2) | The normative consequences of linking are MUST-level in the spec; the admin endpoint enforces them and `AgentAuthHostLinkIT` covers each one. |
 | `jwks_uri` in discovery | omitted | Extension doesn't sign server responses — nothing to publish. Host/agent JWKS support is separate and fully implemented. |
-| Autonomous-agent `claimed` transition on host link | not implemented | Waits on user linking. |
 | JWKS HTTPS enforcement | stricter than spec (HTTPS required except for localhost and container-test hostnames) | Avoid accidentally fetching JWKS over cleartext in production. Dev/test exceptions are scoped narrowly. |
 | Storage SPI | shipped (`AgentAuthStorage`) with JPA default | So persistence survives container restarts and scales across replicas without forcing any consumer onto a specific backend. |
 

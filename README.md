@@ -10,37 +10,18 @@ Keycloak is a natural fit for Agent Auth because it already manages users, sessi
 
 **Hybrid model** -- Keycloak handles the auth plane; resource servers handle capability execution.
 
-```
-Agent (any language)
-  |
-  | 1. Discover
-  | GET /realms/{realm}/.well-known/agent-configuration
-  v
-Keycloak (this extension)
-  |  - Discovery, agent registration, lifecycle, introspect
-  |  - Centralized capability registry
-  |  - Admin-mediated approval + audit events
-  |
-  | 2. Register
-  | POST /realms/{realm}/agent-auth/agent/register
-  | Authorization: Bearer <host+jwt>
-  v
-Keycloak
-  |  - Verifies host JWT (Ed25519)
-  |  - Creates agent record
-  |  - Triggers approval flow if needed
-  |  - Returns agent_id + capability grants
-  |
-  | 3. Execute capability
-  | POST <capability-location>
-  | Authorization: Bearer <agent+jwt>
-  v
-Resource Server (any language)
-  |  - Receives agent JWT
-  |  - Calls KC introspect to validate
-  |  - Checks grants + constraints
-  |  - Executes business logic
-  |  - Returns result to agent
+```mermaid
+flowchart TB
+    A["Agent / Client<br/>(any language)"]
+    KC["Keycloak (this extension)<br/>discovery · agent registration · lifecycle · introspect<br/>centralized capability registry<br/>admin-mediated approval + audit events"]
+    RS["Resource Server<br/>(any language)<br/>executes capability business logic"]
+
+    A -->|"1. Discover<br/>GET /realms/{realm}/.well-known/agent-configuration"| KC
+    A -->|"2. Register<br/>POST /agent/register<br/>Authorization: Bearer host+jwt"| KC
+    A -.->|"3. Execute (direct mode)<br/>POST capability.location<br/>Authorization: Bearer agent+jwt"| RS
+    A -->|"3. Execute (gateway mode)<br/>POST /capability/execute<br/>Authorization: Bearer agent+jwt"| KC
+    RS -.->|"4. Introspect (direct mode only)<br/>POST /agent/introspect"| KC
+    KC -.->|"3. Gateway proxy"| RS
 ```
 
 ### What lives in Keycloak (this extension)
@@ -67,6 +48,8 @@ Resource Server (any language)
 | **Admin:** reject / expire agent | `POST /admin/.../agent-auth/agents/{id}/{reject\|expire}` | Reject a pending agent or force-expire an active one |
 | **Admin:** pre-register host | `POST /admin/.../agent-auth/hosts` | Pre-create a host record with an inline Ed25519 JWK (spec §2.8 "Pre-registration" flow) |
 | **Admin:** fetch host | `GET /admin/.../agent-auth/hosts/{id}` | Fetch a host record by thumbprint |
+| **Admin:** link host to user | `POST /admin/.../agent-auth/hosts/{id}/link` | Bind a host to a Keycloak user (§2.9). Cascades: autonomous agents → `claimed` with grants revoked (§2.10); delegated agents inherit `user_id` (§3.2) |
+| **Admin:** unlink host | `DELETE /admin/.../agent-auth/hosts/{id}/link` | Remove the host→user binding. Revokes all delegated agents under the host (§2.9); autonomous agents stay `claimed` (terminal) |
 
 ### What lives in the resource server
 
@@ -95,7 +78,7 @@ Five actors show up in the spec; this extension only implements one of them (Ser
 | **Host** (§2.7) | Persistent identity of the client environment (Ed25519 keypair + metadata). Not an actor — a principal the client holds. | Stored in this extension's `AGENT_AUTH_HOST` table. |
 | **Server** (§1.5) | Authorization server: discovery, registration, approvals, grants, introspection, gateway execution. | **This extension + Keycloak core.** |
 | **Resource Server** (§2.15) | Host of the capability's business logic, addressed by `capability.location`. Validates agent JWTs either locally or via `/agent/introspect`. | Yours — any language. Use gateway mode if you don't want to implement introspection. |
-| **User** (implicit) | Human who approves delegated flows. | A Keycloak user today; approval happens via the admin API until device-flow/CIBA lands. |
+| **User** (implicit) | Human who approves delegated flows. | A Keycloak user, bound to hosts via admin API linking (§2.9, §2.10). Interactive approval methods (device-flow, CIBA) are still planned — today a Keycloak admin approves grants via the admin API. |
 
 For the full protocol architecture diagram, end-to-end sequence walkthrough, extension internals, and per-concept mapping to source files, see [docs/architecture.md](docs/architecture.md).
 
@@ -103,24 +86,14 @@ For the full protocol architecture diagram, end-to-end sequence walkthrough, ext
 
 Capabilities are registered in Keycloak by administrators via the admin API. This makes Keycloak the single source of truth for what capabilities exist and who has access to them.
 
-```
-Admin / Resource Server
-  |
-  | Register capabilities at deploy time
-  | POST /admin/realms/{realm}/agent-auth/capabilities
-  | {
-  |   "name": "check_balance",
-  |   "description": "Check account balance",
-  |   "location": "https://banking-api.example.com/execute",
-  |   "input": { JSON Schema },
-  |   "output": { JSON Schema }
-  | }
-  v
-Keycloak (capability registry)
-  |
-  | Agents discover capabilities here
-  | GET /capability/list
-  | GET /capability/describe?name=check_balance
+```mermaid
+flowchart TB
+    Admin["Admin / Resource Server"]
+    KC["Keycloak<br/>(capability registry)"]
+    Client["Agent / Client"]
+
+    Admin -->|"Register at deploy time<br/>POST /admin/realms/{realm}/agent-auth/capabilities<br/>{ name, description, location, input, output, ... }"| KC
+    KC -->|"Discover<br/>GET /capability/list<br/>GET /capability/describe?name=check_balance"| Client
 ```
 
 Each capability has:
