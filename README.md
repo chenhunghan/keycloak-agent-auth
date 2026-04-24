@@ -11,18 +11,18 @@ Keycloak is a natural fit for Agent Auth because it already manages users, sessi
 **Hybrid model** -- Keycloak handles the auth plane; resource servers handle capability execution.
 
 ```mermaid
-flowchart TB
-    A["Agent / Client<br/>(any language)"]
-    KC["Keycloak (this extension)<br/>discovery · agent registration · lifecycle · introspect<br/>centralized capability registry<br/>admin-mediated approval + audit events"]
-    RS["Resource Server<br/>(any language)<br/>executes capability business logic"]
+flowchart LR
+    A["Agent / Client"]
+    KC["Keycloak<br/>(this extension)"]
+    RS["Resource Server"]
 
-    A -->|"1. Discover<br/>GET /realms/{realm}/.well-known/agent-configuration"| KC
-    A -->|"2. Register<br/>POST /agent/register<br/>Authorization: Bearer host+jwt"| KC
-    A -.->|"3. Execute (direct mode)<br/>POST capability.location<br/>Authorization: Bearer agent+jwt"| RS
-    A -->|"3. Execute (gateway mode)<br/>POST /capability/execute<br/>Authorization: Bearer agent+jwt"| KC
-    RS -.->|"4. Introspect (direct mode only)<br/>POST /agent/introspect"| KC
-    KC -.->|"3. Gateway proxy"| RS
+    A -->|agent-auth protocol| KC
+    KC -.->|gateway proxy| RS
+    A -.->|direct call| RS
+    RS -.->|introspect| KC
 ```
+
+Solid edges always happen; dashed edges are mode-specific (gateway vs direct execution). Host-scoped calls (register / status / revoke / rotate) carry a `host+jwt`; agent-scoped calls (execute / introspect) carry an `agent+jwt`. Exact URLs and auth details are in the endpoint tables below; end-to-end temporal sequence is in [docs/architecture.md](docs/architecture.md).
 
 ### What lives in Keycloak (this extension)
 
@@ -87,13 +87,13 @@ For the full protocol architecture diagram, end-to-end sequence walkthrough, ext
 Capabilities are registered in Keycloak by administrators via the admin API. This makes Keycloak the single source of truth for what capabilities exist and who has access to them.
 
 ```mermaid
-flowchart TB
-    Admin["Admin / Resource Server"]
+flowchart LR
+    Admin["Admin"]
     KC["Keycloak<br/>(capability registry)"]
     Client["Agent / Client"]
 
-    Admin -->|"Register at deploy time<br/>POST /admin/realms/{realm}/agent-auth/capabilities<br/>{ name, description, location, input, output, ... }"| KC
-    KC -->|"Discover<br/>GET /capability/list<br/>GET /capability/describe?name=check_balance"| Client
+    Admin -->|register capability| KC
+    KC -->|discover| Client
 ```
 
 Each capability has:
