@@ -2647,9 +2647,24 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
         .get("agent_capability_grants");
 
+    // §5.3 partial approval: if the request body carries a `capabilities` array, treat it as
+    // the approved subset — pending grants not in the array are denied. When the array is
+    // absent the user approved the whole pending set.
+    Set<String> approvedSubset = null;
+    if (approve && requestBody.get("capabilities") instanceof List<?> list) {
+      approvedSubset = new LinkedHashSet<>();
+      for (Object entry : list) {
+        if (entry instanceof String s) {
+          approvedSubset.add(s);
+        }
+      }
+    }
+
     if (approve) {
       if (!isCapabilityRequestApproval) {
-        // Register/reactivate path: transition the agent itself.
+        // Register/reactivate path: transition the agent itself. Per §5.3 the agent becomes
+        // `active` even when every requested capability is denied — the status is driven by the
+        // user's decision to engage, not by whether any grants came through.
         agentData.put("status", "active");
         agentData.put("activated_at", nowTs);
         agentData.put("user_id", userId);
@@ -2657,20 +2672,27 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (grants != null) {
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
-            grant.put("status", "active");
-            grant.remove("status_url");
-            Map<String, Object> registeredCap = storage.getCapability(
-                (String) grant.get("capability"));
-            if (registeredCap != null) {
-              grant.put("description", registeredCap.get("description"));
-              if (registeredCap.containsKey("input")) {
-                grant.put("input", registeredCap.get("input"));
+            String capName = (String) grant.get("capability");
+            boolean grantedThis = approvedSubset == null || approvedSubset.contains(capName);
+            if (grantedThis) {
+              grant.put("status", "active");
+              grant.remove("status_url");
+              Map<String, Object> registeredCap = storage.getCapability(capName);
+              if (registeredCap != null) {
+                grant.put("description", registeredCap.get("description"));
+                if (registeredCap.containsKey("input")) {
+                  grant.put("input", registeredCap.get("input"));
+                }
+                if (registeredCap.containsKey("output")) {
+                  grant.put("output", registeredCap.get("output"));
+                }
               }
-              if (registeredCap.containsKey("output")) {
-                grant.put("output", registeredCap.get("output"));
-              }
+              grant.put("granted_by", userId);
+            } else {
+              grant.put("status", "denied");
+              grant.put("reason", "user_denied");
+              grant.remove("status_url");
             }
-            grant.put("granted_by", userId);
           }
         }
       }

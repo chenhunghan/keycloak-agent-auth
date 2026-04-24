@@ -332,6 +332,180 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  void partialApproval_subsetOfCapabilitiesApproved_restDenied() {
+    // §5.3: "When a registration requests multiple capabilities, the user MAY approve some and
+    // deny others. The server MUST reflect this in the agent_capability_grants array — each
+    // grant carries its own status."
+    String capA = registerApprovalRequiredCapability("devauth_partial_a_" + suffix());
+    String capB = registerApprovalRequiredCapability("devauth_partial_b_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+
+    Response regResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "partial agent",
+              "capabilities": ["%s", "%s"],
+              "mode": "delegated"
+            }
+            """, capA, capB))
+        .when()
+        .post("/agent/register");
+    regResp.then().statusCode(200).body("status", org.hamcrest.Matchers.equalTo("pending"));
+    String agentId = regResp.jsonPath().getString("agent_id");
+    String userCode = regResp.jsonPath().getString("approval.user_code");
+
+    String username = "partial-approver-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode, "capabilities", java.util.List.of(capA)))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    Map<String, Object> status = agentStatusBody(agentId, hostKey);
+    assertThat(status.get("status")).as("agent becomes active even on partial approval")
+        .isEqualTo("active");
+    java.util.List<Map<String, Object>> grants = (java.util.List<Map<String, Object>>) status
+        .get("agent_capability_grants");
+    Map<String, Object> grantA = grants.stream()
+        .filter(g -> capA.equals(g.get("capability"))).findFirst().orElseThrow();
+    Map<String, Object> grantB = grants.stream()
+        .filter(g -> capB.equals(g.get("capability"))).findFirst().orElseThrow();
+    assertThat(grantA.get("status")).as("selected capability approved").isEqualTo("active");
+    assertThat(grantB.get("status")).as("unselected capability denied").isEqualTo("denied");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void partialApproval_emptyCapabilitiesList_deniesAllButLeavesAgentActive() {
+    // §5.3: "A fully denied registration (all capabilities denied) sets the agent status to
+    // "active" with an empty or all-denied grants array." — this is distinct from /verify/deny
+    // which is the explicit "reject the agent entirely" path.
+    String capA = registerApprovalRequiredCapability("devauth_emptyapprove_a_" + suffix());
+    String capB = registerApprovalRequiredCapability("devauth_emptyapprove_b_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+
+    Response regResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "empty-approve agent",
+              "capabilities": ["%s", "%s"],
+              "mode": "delegated"
+            }
+            """, capA, capB))
+        .when()
+        .post("/agent/register");
+    String agentId = regResp.jsonPath().getString("agent_id");
+    String userCode = regResp.jsonPath().getString("approval.user_code");
+
+    String username = "empty-approver-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode, "capabilities", java.util.List.of()))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    Map<String, Object> status = agentStatusBody(agentId, hostKey);
+    assertThat(status.get("status")).isEqualTo("active");
+    java.util.List<Map<String, Object>> grants = (java.util.List<Map<String, Object>>) status
+        .get("agent_capability_grants");
+    assertThat(grants).allSatisfy(g -> assertThat(g.get("status")).isEqualTo("denied"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void partialApproval_onCapabilityRequest_deniesUnselectedGrantsButKeepsAgentActive() {
+    String autoCap = registerAutoCapability("devauth_capreq_partial_auto_" + suffix());
+    String approvA = registerApprovalRequiredCapability("devauth_capreq_partial_a_" + suffix());
+    String approvB = registerApprovalRequiredCapability("devauth_capreq_partial_b_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+
+    String agentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "partial cap-req agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, autoCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s", "%s"]
+            }
+            """, approvA, approvB))
+        .when()
+        .post("/agent/request-capability");
+    String userCode = reqResp.jsonPath().getString("approval.user_code");
+
+    String username = "partial-capreq-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode, "capabilities", java.util.List.of(approvA)))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    Map<String, Object> status = agentStatusBody(agentId, hostKey);
+    assertThat(status.get("status")).isEqualTo("active");
+    java.util.List<Map<String, Object>> grants = (java.util.List<Map<String, Object>>) status
+        .get("agent_capability_grants");
+    assertThat(grants.stream().filter(g -> approvA.equals(g.get("capability"))).findFirst()
+        .orElseThrow().get("status")).isEqualTo("active");
+    assertThat(grants.stream().filter(g -> approvB.equals(g.get("capability"))).findFirst()
+        .orElseThrow().get("status")).isEqualTo("denied");
+    // The originally-active auto capability must stay active.
+    assertThat(grants.stream().filter(g -> autoCap.equals(g.get("capability"))).findFirst()
+        .orElseThrow().get("status")).isEqualTo("active");
+  }
+
+  @Test
   void approveWithoutAuth_returns401() {
     given()
         .baseUri(issuerUrl())
