@@ -12,15 +12,19 @@ Keycloak is a natural fit for Agent Auth because it already manages users, sessi
 
 ```mermaid
 flowchart LR
-    A["Agent / Client"]
+    Agent["Agent<br/>(the AI)"]
+    Client["Client<br/>(your CLI / SDK)"]
     KC["Keycloak<br/>(this extension)"]
     RS["Resource Server"]
 
-    A -->|agent-auth protocol| KC
+    Agent <-->|tools| Client
+    Client -->|agent-auth protocol| KC
     KC -.->|gateway proxy| RS
-    A -.->|direct call| RS
+    Client -.->|direct call| RS
     RS -.->|introspect| KC
 ```
+
+The **Client** is the process that holds the host keypair, signs JWTs, and speaks the agent-auth protocol — your CLI, SDK, or background worker (e.g. the Claude Code CLI binary). The **Agent** is the AI reasoning loop that runs inside the Client and requests capabilities through tool calls (MCP, SDK functions); it never talks to Keycloak directly.
 
 Solid edges always happen; dashed edges are mode-specific (gateway vs direct execution). Host-scoped calls (register / status / revoke / rotate) carry a `host+jwt`; agent-scoped calls (execute / introspect) carry an `agent+jwt`. Exact URLs and auth details are in the endpoint tables below; end-to-end temporal sequence is in [docs/architecture.md](docs/architecture.md).
 
