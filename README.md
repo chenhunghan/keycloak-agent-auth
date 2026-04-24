@@ -4,7 +4,7 @@ A Keycloak extension implementing the [Agent Auth Protocol](https://agent-auth-p
 
 ## Why Keycloak?
 
-Keycloak is a natural fit for Agent Auth because it already manages users, sessions, tokens, and approval flows. This extension adds agent-specific concepts (hosts, agents, capability grants) while reusing Keycloak's existing infrastructure for user identity, device authorization, and CIBA.
+Keycloak is a natural fit for Agent Auth because it already manages users, sessions, tokens, approvals, and audit logging. This extension adds agent-specific concepts (hosts, agents, capability grants) while reusing Keycloak's existing infrastructure for user identity, admin-mediated approval, and audit events. Native device-flow and CIBA integration is planned but not yet implemented.
 
 ## Architecture
 
@@ -19,7 +19,7 @@ Agent (any language)
 Keycloak (this extension)
   |  - Discovery, agent registration, lifecycle, introspect
   |  - Centralized capability registry
-  |  - User approval via device authorization / CIBA
+  |  - Admin-mediated approval + audit events
   |
   | 2. Register
   | POST /realms/{realm}/agent-auth/agent/register
@@ -65,10 +65,10 @@ Resource Server (any language)
 
 | Concern | Description |
 |---------|-------------|
-| Capability execution | Receives forwarded requests, runs business logic |
-| JWT validation | Calls Keycloak's `/agent/introspect` to verify agent JWTs |
+| Capability execution | Receives capability requests, runs business logic |
+| JWT validation | Calls Keycloak's `/agent/introspect` to verify agent JWTs, or verifies signature/audience locally when it has the agent key material |
 
-The resource server can be written in **any language** -- it only needs to accept agent JWTs and call KC's introspect endpoint (a simple HTTP POST).
+The resource server can be written in **any language**. For each request it should verify that the JWT `aud` matches its own capability URL, call Keycloak's `/agent/introspect` with `{"token":"..."}` (or `{"token":"...","capability":"...","arguments":{...}}` when it wants Keycloak to run constraint checks), and reject the request when `active` is `false` or when `violations` is present and non-empty.
 
 ## Centralized Capability Registry
 
@@ -97,7 +97,7 @@ Keycloak (capability registry)
 Each capability has:
 - **name** -- stable identifier (e.g. `check_balance`, `transfer_money`)
 - **description** -- human-readable explanation
-- **location** -- URL where the resource server executes it
+- **location** (optional) -- URL where the resource server executes the capability. If omitted, clients fall back to the server's `default_location` from discovery (per Agent Auth Protocol v1.0-draft §2.12 and §5.1). Capabilities without `location` are accepted for discovery and grants, but this extension cannot proxy them to a backing resource server until operators set an explicit resource-server URL.
 - **input/output** -- JSON Schema for arguments and results
 - **visibility** -- who can see it (public, authenticated)
 - **requires_approval** -- whether user approval is needed before granting
@@ -120,6 +120,16 @@ Grants can carry constraints that restrict what arguments an agent can supply:
 
 Supported constraint operators: `max`, `min`, `in`, `not_in`, and exact value matching.
 
+### Host and Agent Identity
+
+Hosts and agents use Ed25519 key pairs. Registration can provide keys inline as public JWKs (`host_public_key`, `agent_public_key`) or by reference with JWKS URLs (`host_jwks_url`, `agent_jwks_url`). Inline keys and JWKS URLs are mutually exclusive for the same identity, and `agent_kid` is required when `agent_jwks_url` is used.
+
+JWKS-based identities are cached in-process for 5 minutes. If a JWT arrives with a `kid` missing from cache, Keycloak refetches the JWKS once and retries, with per-URL kid-miss refetches rate-limited to one every 10 seconds. Inline-key hosts and agents rotate through the explicit key rotation endpoints; JWKS-based identities rotate by publishing the new key at their JWKS URL.
+
+JWKS fetches require HTTPS, except for localhost and container-test hostnames used by local development and integration tests. That is intentionally stricter than the Agent Auth Protocol's URL-fetching guidance.
+
+This extension does not sign protocol responses today, so discovery does not publish a server `jwks_uri` and `/agent-auth/jwks` is not exposed. Host and agent JWKS support is separate from server response signing.
+
 ## Key Design Decisions
 
 | Decision | Choice | Rationale |
@@ -127,9 +137,9 @@ Supported constraint operators: `max`, `min`, `in`, `not_in`, and exact value ma
 | Architecture | Hybrid (KC auth + external execution) | Avoids building a parallel auth system inside KC; lets KC do what it's good at |
 | Discovery | `/realms/{realm}/.well-known/agent-configuration` via WellKnownProvider SPI | Follows KC's own OpenID discovery pattern |
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on KC classpath, high-level API, well-audited |
-| Storage | JPA entities + Liquibase via JpaEntityProvider SPI | Only supported mechanism for custom entities in KC 26.x (Map Storage SPI was removed) |
+| Storage | In-process registry today; JPA entities + Liquibase planned | Current implementation is pre-release and dev/test oriented; persistent storage should use `JpaEntityProvider` in KC 26.x |
 | Scoping | Global env toggle + per-realm attribute override (planned) | Start simple, add granularity later |
-| Approval flows | Device Authorization + CIBA | Both supported by KC natively; covers CLI and mobile agent scenarios |
+| Approval flows | Admin-mediated HTTP approval (device flow + CIBA planned) | Matches the implementation today while leaving native KC approval-flow integration for a later design |
 | Capabilities | Centralized in KC | Single source of truth; resource servers just execute |
 
 ## Protocol Reference
@@ -195,6 +205,7 @@ src/main/java/.../agentauth/
   AgentAuthWellKnownProviderFactory.java     # Keycloak WellKnownProvider SPI factory
   ConstraintValidator.java                   # Capability constraint enforcement
   ConstraintViolation.java                   # Violation record
+  JwksCache.java                             # JWKS URL cache + kid-miss refetch handling
   InMemoryRegistry.java                      # In-process storage (dev/test only)
 
 src/test/java/.../agentauth/

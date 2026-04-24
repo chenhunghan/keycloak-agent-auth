@@ -7,6 +7,7 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
 import com.github.chh.keycloak.agentauth.support.TestJwts;
@@ -610,9 +611,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
   /**
    * §5.4 specifies that when a requested capability has {@code requires_approval:true} the server
    * MUST return HTTP 200 with the grant carrying {@code status:"pending"} and an {@code approval}
-   * object containing polling instructions (e.g., {@code verification_uri}, {@code user_code}).
-   * Capability Escalation rules additionally require that escalated capabilities always go through
-   * explicit user consent regardless of host trust.
+   * object containing admin-mediated polling instructions. Capability Escalation rules additionally
+   * require that escalated capabilities always go through explicit user consent regardless of host
+   * trust.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
    *      §5.4 Request Capability — approval-required response and approval object</a>
@@ -663,7 +664,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .body("agent_capability_grants[0].capability", equalTo(approvalCap))
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("ciba"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.status_url", notNullValue());
   }
 
   // ---------------------------------------------------------------------------
@@ -834,16 +836,15 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
   }
 
   /**
-   * §5.4 allows the agent to supply a {@code preferred_method} hint (e.g.,
-   * {@code device_authorization} or {@code ciba}) for approval-required capabilities; the server
-   * SHOULD honour the hint when the method is available and reflect the chosen method in the
-   * {@code approval.method} response field.
+   * §5.4 allows the agent to supply a {@code preferred_method} hint for approval-required
+   * capabilities. This implementation only supports admin-mediated HTTP approval, so unsupported
+   * hints are accepted but the response remains {@code method:"admin"}.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
    *      §5.4 Request Capability — preferred_method hint</a>
    */
   @Test
-  void todoPreferredMethodHintIsReflectedInApprovalObject() {
+  void todoUnsupportedPreferredMethodHintFallsBackToAdminApprovalObject() {
     String prefMethodCap = "pref_method_cap_"
         + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 
@@ -885,12 +886,15 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
-        .body("approval.method", equalTo("device_authorization"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.status_url", notNullValue())
+        .body("approval.verification_uri", nullValue());
   }
 
   /**
-   * §5.4 allows the agent to supply a {@code login_hint} to identify the user who should approve
-   * the capability; the server SHOULD include this hint in the initiated approval flow.
+   * §5.4 allows the agent to supply a {@code login_hint}. Since this implementation does not start
+   * a native CIBA/device flow, it accepts the field but keeps the admin approval object free of
+   * device/CIBA-specific fields.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
    *      §5.4 Request Capability — login_hint field</a>
@@ -939,12 +943,14 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.login_hint", equalTo("user@example.com"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.login_hint", nullValue());
   }
 
   /**
    * §5.4 allows the agent to supply a {@code binding_message} for approval methods that surface it
-   * to the approver; the server MUST NOT return 400 when a valid short string is supplied.
+   * to the approver. Admin-mediated approval accepts the field but does not echo CIBA-specific
+   * metadata in the response object.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
    *      §5.4 Request Capability — binding_message field</a>
@@ -993,7 +999,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.binding_message", equalTo("Approve transfer"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.binding_message", nullValue());
   }
 
   /**
@@ -1219,8 +1226,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
 
   /**
    * §5.4 requires that when a capability has {@code requires_approval:true} the response {@code
-   * approval} object MUST contain at minimum {@code verification_uri}, {@code user_code}, and
-   * {@code expires_in} so the agent can present the approval flow to the user.
+   * approval} object MUST contain enough method-specific information for clients to poll the
+   * approval flow. For the custom admin-mediated method, that shape is {@code method},
+   * {@code expires_in}, {@code interval}, and {@code status_url}.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
    *      §5.4 Request Capability — approval object required fields</a>
@@ -1266,9 +1274,12 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/agent/request-capability")
         .then()
         .statusCode(200)
-        .body("approval.verification_uri", notNullValue())
-        .body("approval.user_code", notNullValue())
-        .body("approval.expires_in", notNullValue());
+        .body("approval.method", equalTo("admin"))
+        .body("approval.expires_in", notNullValue())
+        .body("approval.interval", notNullValue())
+        .body("approval.status_url", notNullValue())
+        .body("approval.verification_uri", nullValue())
+        .body("approval.user_code", nullValue());
   }
 
   /**

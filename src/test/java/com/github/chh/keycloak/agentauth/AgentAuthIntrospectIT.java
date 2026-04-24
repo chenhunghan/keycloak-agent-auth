@@ -700,6 +700,49 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .body("agent_capability_grants[0].description", nullValue())
         .body("agent_capability_grants[0].input", nullValue())
         .body("agent_capability_grants[0].output", nullValue());
+
+    String validArgsJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s",
+              "capability": "%s",
+              "arguments": {"amount": 100}
+            }
+            """, validArgsJwt, constrainedCap))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true))
+        .body("capability", equalTo(constrainedCap))
+        .body("grant_status", equalTo("active"))
+        .body("constraints.amount.max", equalTo(500))
+        .body("violations", hasSize(0));
+
+    String violatingArgsJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId,
+        issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s",
+              "capability": "%s",
+              "arguments": {"amount": 600}
+            }
+            """, violatingArgsJwt, constrainedCap))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true))
+        .body("violations", hasSize(1))
+        .body("violations[0].field", equalTo("amount"));
   }
 
   /**

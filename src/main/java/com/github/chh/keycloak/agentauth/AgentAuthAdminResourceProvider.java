@@ -14,13 +14,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import org.keycloak.events.admin.OperationType;
+import org.keycloak.events.admin.ResourceType;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.services.resources.admin.AdminEventBuilder;
 import org.keycloak.services.resources.admin.ext.AdminRealmResourceProvider;
+import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
 
 public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvider {
 
   private static final Pattern CAPABILITY_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9_]+");
   private final KeycloakSession session;
+  private AdminPermissionEvaluator auth;
+  private AdminEventBuilder adminEvent;
 
   public AgentAuthAdminResourceProvider(KeycloakSession session) {
     this.session = session;
@@ -30,6 +36,8 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   public Object getResource(KeycloakSession session, org.keycloak.models.RealmModel realm,
       org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator auth,
       org.keycloak.services.resources.admin.AdminEventBuilder adminEvent) {
+    this.auth = auth;
+    this.adminEvent = adminEvent;
     return this;
   }
 
@@ -38,6 +46,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public Response registerCapability(Map<String, Object> requestBody) {
+    requireManageRealm();
     if (requestBody == null) {
       return Response.status(400)
           .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
@@ -71,6 +80,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .build();
     }
 
+    emitAdminEvent("agent-auth/capability/" + name, OperationType.CREATE, requestBody);
     return Response.status(201).entity(requestBody).build();
   }
 
@@ -80,6 +90,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Produces(MediaType.APPLICATION_JSON)
   public Response updateCapability(@PathParam("name") String name,
       Map<String, Object> requestBody) {
+    requireManageRealm();
     if (requestBody == null) {
       return Response.status(400)
           .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
@@ -96,12 +107,14 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     updatedCapability.put("name", name);
     InMemoryRegistry.CAPABILITIES.put(name, updatedCapability);
 
+    emitAdminEvent("agent-auth/capability/" + name, OperationType.UPDATE, updatedCapability);
     return Response.ok(updatedCapability).build();
   }
 
   @DELETE
   @Path("capabilities/{name}")
   public Response deleteCapability(@PathParam("name") String name) {
+    requireManageRealm();
     Map<String, Object> removedCapability = InMemoryRegistry.CAPABILITIES.remove(name);
     if (removedCapability == null) {
       return Response.status(404)
@@ -109,6 +122,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .build();
     }
 
+    emitAdminEvent("agent-auth/capability/" + name, OperationType.DELETE, removedCapability);
     return Response.noContent().build();
   }
 
@@ -119,6 +133,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @SuppressWarnings("unchecked")
   public Response expireAgent(@jakarta.ws.rs.PathParam("id") String id,
       String rawBody) {
+    requireManageRealm();
     Map<String, Object> requestBody = null;
     if (rawBody != null && !rawBody.isBlank()) {
       try {
@@ -150,6 +165,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
         grants.add(newGrant);
       }
     }
+    emitAdminEvent("agent-auth/agent/" + id + "/expire", OperationType.ACTION, agentData);
     return Response.ok(agentData).build();
   }
 
@@ -159,6 +175,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Produces(MediaType.APPLICATION_JSON)
   @SuppressWarnings("unchecked")
   public Response rejectAgent(@PathParam("id") String id, String rawBody) {
+    requireManageRealm();
     Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
@@ -194,6 +211,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
         }
       }
     }
+    emitAdminEvent("agent-auth/agent/" + id + "/reject", OperationType.ACTION, agentData);
     return Response.ok(agentData).build();
   }
 
@@ -204,6 +222,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @SuppressWarnings("unchecked")
   public Response approveCapability(@PathParam("id") String id,
       @PathParam("capability") String capability) {
+    requireManageRealm();
     Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
@@ -255,7 +274,26 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       agentData.remove("approval");
     }
     agentData.put("updated_at", Instant.now().toString());
+    emitAdminEvent("agent-auth/agent/" + id + "/capability/" + capability + "/approve",
+        OperationType.ACTION, targetGrant);
     return Response.ok(targetGrant).build();
+  }
+
+  private void requireManageRealm() {
+    if (auth != null) {
+      auth.realm().requireManageRealm();
+    }
+  }
+
+  private void emitAdminEvent(String resourcePath, OperationType operation,
+      Map<String, Object> representation) {
+    if (adminEvent != null) {
+      adminEvent.resource(ResourceType.CUSTOM)
+          .resourcePath(resourcePath)
+          .operation(operation)
+          .representation(representation)
+          .success();
+    }
   }
 
   @Override

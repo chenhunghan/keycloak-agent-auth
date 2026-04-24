@@ -201,10 +201,26 @@ public final class TestJwts {
   public static String agentJwt(
       OctetKeyPair hostKey, OctetKeyPair agentKey, String agentId, String audience,
       Map<String, Object> extraClaims) {
+    return agentJwt(hostKey, agentKey, agentId, audience, extraClaims, null);
+  }
+
+  /** Builds an agent+jwt with a JOSE {@code kid} header. */
+  public static String agentJwtWithKid(
+      OctetKeyPair hostKey, OctetKeyPair agentKey, String agentId, String audience,
+      String kid) {
+    return agentJwt(hostKey, agentKey, agentId, audience, Map.of(), kid);
+  }
+
+  private static String agentJwt(
+      OctetKeyPair hostKey, OctetKeyPair agentKey, String agentId, String audience,
+      Map<String, Object> extraClaims, String kid) {
     try {
-      JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
-          .type(new JOSEObjectType("agent+jwt"))
-          .build();
+      JWSHeader.Builder headerBuilder = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
+          .type(new JOSEObjectType("agent+jwt"));
+      if (kid != null && !kid.isBlank()) {
+        headerBuilder.keyID(kid);
+      }
+      JWSHeader header = headerBuilder.build();
 
       long now = System.currentTimeMillis();
       JWTClaimsSet claims = new JWTClaimsSet.Builder()

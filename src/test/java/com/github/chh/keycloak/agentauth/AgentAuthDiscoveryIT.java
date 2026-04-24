@@ -1,7 +1,6 @@
 package com.github.chh.keycloak.agentauth;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -9,6 +8,7 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -315,15 +315,15 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
   }
 
   /**
-   * The {@code approval_methods} array MUST contain at least one of the spec-defined values
-   * ({@code "device_authorization"} or {@code "ciba"}), which are the only approval flows defined
-   * by the protocol.
+   * The {@code approval_methods} array MUST contain at least one supported method. In addition to
+   * the spec-defined device authorization and CIBA methods, §5.1 permits custom extension methods;
+   * this implementation advertises admin-mediated HTTP approval as {@code "admin"}.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
    *      Discovery — approval_methods field</a>
    * @see <a href=
    *      "https://agent-auth-protocol.com/docs/discovery#configuration-fields">Configuration Fields
-   *      — approval_methods (valid values: device_authorization, ciba)</a>
+   *      — approval_methods</a>
    */
   @Test
   void discoveryEndpointAdvertisesApprovalMethodValues() {
@@ -333,9 +333,7 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
         .get("/.well-known/agent-configuration")
         .then()
         .statusCode(200)
-        .body("approval_methods", hasItem(anyOf(
-            equalTo("device_authorization"),
-            equalTo("ciba"))));
+        .body("approval_methods", hasItem(equalTo("admin")));
   }
 
   /**
@@ -359,8 +357,9 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
   }
 
   /**
-   * The discovery response MAY include an optional {@code jwks_uri} field containing the URL of the
-   * server's JSON Web Key Set for public key retrieval.
+   * The discovery response MAY include an optional {@code jwks_uri} field for server-signed
+   * responses. This implementation does not sign responses, so it MUST NOT advertise a placeholder
+   * server JWKS.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
    *      Discovery — optional fields</a>
@@ -369,15 +368,14 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
    *      — jwks_uri (optional)</a>
    */
   @Test
-  void discoveryEndpointReturnsJwksUri() {
-    // Per spec: jwks_uri is an optional URL to the server's JWKS
+  void discoveryEndpointOmitsServerJwksUriWhenResponsesAreUnsigned() {
     given()
         .baseUri(realmUrl())
         .when()
         .get("/.well-known/agent-configuration")
         .then()
         .statusCode(200)
-        .body("jwks_uri", notNullValue());
+        .body("jwks_uri", nullValue());
   }
 
   // ---------------------------------------------------------------------------
@@ -488,9 +486,9 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
   }
 
   /**
-   * Every value in the {@code approval_methods} array MUST be one of the spec-defined strings
-   * ({@code "device_authorization"}, {@code "ciba"}); no unknown values are permitted in a
-   * conformant response.
+   * Every value in the {@code approval_methods} array MUST be either one of the spec-defined
+   * strings or a custom extension method. This implementation intentionally supports only the
+   * custom admin-mediated method.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
    *      Discovery — approval_methods valid values</a>
@@ -499,8 +497,7 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
    *      — approval_methods</a>
    */
   @Test
-  void todoApprovalMethodsArrayContainsOnlySpecDefinedValues() {
-    // Per spec: approval_methods values are restricted to "device_authorization" and "ciba".
+  void todoApprovalMethodsArrayContainsOnlySupportedValues() {
     List<String> methods = given()
         .baseUri(realmUrl())
         .when()
@@ -510,7 +507,7 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
         .extract()
         .path("approval_methods");
     for (String method : methods) {
-      assertTrue(method.equals("device_authorization") || method.equals("ciba"),
+      assertTrue(method.equals("admin"),
           "Unexpected approval_method value: " + method);
     }
   }
@@ -631,211 +628,40 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
   }
 
   // ---------------------------------------------------------------------------
-  // JWKS endpoint tests — §5.1 Discovery
+  // Server JWKS publication tests — §5.1 Discovery
   // ---------------------------------------------------------------------------
 
   /**
-   * The {@code jwks_uri} from the discovery document MUST point to a real, reachable endpoint that
-   * returns a valid JWK Set document (RFC 7517) with a non-empty {@code keys} array.
+   * Since this implementation does not sign protocol responses, §5.1 does not require a server
+   * {@code jwks_uri}. The old placeholder JWKS endpoint must remain unpublished.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
    *      Discovery — jwks_uri</a>
    */
   @Test
-  void jwksUriReturnsValidJwksDocument() {
-    // Resolve jwks_uri from the discovery document, then assert RFC 7517 JWK Set shape.
-    String jwksUri = given()
-        .baseUri(realmUrl())
-        .when()
-        .get("/.well-known/agent-configuration")
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("jwks_uri");
-
-    assertNotNull(jwksUri, "jwks_uri must be present in the discovery document");
-
-    List<?> keys = given()
-        .when()
-        .get(jwksUri)
-        .then()
-        .statusCode(200)
-        .contentType("application/json")
-        .extract()
-        .path("keys");
-
-    assertNotNull(keys, "JWKS response must contain a 'keys' array");
-    assertFalse(keys.isEmpty(), "JWKS 'keys' array must be non-empty");
-  }
-
-  /**
-   * Each key object in the JWKS MUST carry the required public-key fields ({@code kty},
-   * {@code crv}, {@code x}) and MUST NOT expose the private key material ({@code d}).
-   *
-   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
-   *      Discovery — jwks_uri key fields</a>
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  void jwksUriKeyHasRequiredFields() {
-    // Per spec: each JWK must have kty, crv, x and MUST NOT expose d (private key).
-    String jwksUri = given()
-        .baseUri(realmUrl())
-        .when()
-        .get("/.well-known/agent-configuration")
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("jwks_uri");
-
-    assertNotNull(jwksUri, "jwks_uri must be present in the discovery document");
-
-    List<Map<String, Object>> keys = given()
-        .when()
-        .get(jwksUri)
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("keys");
-
-    assertNotNull(keys, "JWKS 'keys' array must be present");
-    assertFalse(keys.isEmpty(), "JWKS 'keys' array must be non-empty");
-
-    Map<String, Object> key = keys.get(0);
-    assertNotNull(key.get("kty"), "key must have 'kty' field");
-    assertNotNull(key.get("crv"), "key must have 'crv' field");
-    assertNotNull(key.get("x"), "key must have 'x' field (public key material)");
-    assertFalse(key.containsKey("d"), "key MUST NOT expose 'd' field (private key)");
-  }
-
-  /**
-   * Per spec, the server MUST use Ed25519 for all Agent Auth signing. The JWKS key at index 0 MUST
-   * have {@code kty} = {@code "OKP"} and {@code crv} = {@code "Ed25519"}.
-   *
-   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
-   *      Discovery — algorithms MUST include Ed25519</a>
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  void jwksUriKeyAlgorithmIsEd25519() {
-    // Per spec: the server MUST use Ed25519; JWKS keys[0] must declare OKP / Ed25519.
-    String jwksUri = given()
-        .baseUri(realmUrl())
-        .when()
-        .get("/.well-known/agent-configuration")
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("jwks_uri");
-
-    assertNotNull(jwksUri, "jwks_uri must be present in the discovery document");
-
-    List<Map<String, Object>> keys = given()
-        .when()
-        .get(jwksUri)
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("keys");
-
-    assertNotNull(keys, "JWKS 'keys' array must be present");
-    assertFalse(keys.isEmpty(), "JWKS 'keys' array must be non-empty");
-
-    Map<String, Object> key = keys.get(0);
-    assertEquals("OKP", key.get("kty"), "key type must be OKP for Ed25519 keys");
-    assertEquals("Ed25519", key.get("crv"), "curve must be Ed25519");
-  }
-
-  /**
-   * The JWKS endpoint MUST be accessible without any {@code Authorization} header; public key
-   * retrieval must not require credentials.
-   *
-   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
-   *      Discovery — unauthenticated access</a>
-   */
-  @Test
-  void jwksUriIsAccessibleWithoutAuthentication() {
-    // Per spec: JWKS must be a public endpoint — no credentials required.
-    String jwksUri = given()
-        .baseUri(realmUrl())
-        .when()
-        .get("/.well-known/agent-configuration")
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("jwks_uri");
-
-    assertNotNull(jwksUri, "jwks_uri must be present in the discovery document");
-
-    // Explicitly omit any Authorization header and assert 200.
+  void discoveryDoesNotAdvertiseServerJwksUriWithoutServerSigning() {
     given()
-        .when()
-        .get(jwksUri)
-        .then()
-        .statusCode(200);
-  }
-
-  /**
-   * The JWKS endpoint SHOULD return a {@code Cache-Control} header containing {@code max-age} so
-   * that clients can cache public keys and avoid repeated round-trips.
-   *
-   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
-   *      Discovery — Cache-Control SHOULD be present on JWKS endpoint</a>
-   */
-  @Test
-  void jwksUriHasCacheControlHeader() {
-    // Per spec: JWKS endpoint should return Cache-Control with max-age for performance.
-    String jwksUri = given()
         .baseUri(realmUrl())
         .when()
         .get("/.well-known/agent-configuration")
         .then()
         .statusCode(200)
-        .extract()
-        .path("jwks_uri");
+        .body("jwks_uri", nullValue());
+  }
 
-    assertNotNull(jwksUri, "jwks_uri must be present in the discovery document");
-
+  /**
+   * The removed placeholder server JWKS endpoint should not be reachable directly.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
+   *      Discovery — jwks_uri</a>
+   */
+  @Test
+  void serverJwksEndpointIsNotPublishedWithoutServerSigning() {
     given()
+        .baseUri(issuerUrl())
         .when()
-        .get(jwksUri)
+        .get("/jwks")
         .then()
-        .statusCode(200)
-        .header("Cache-Control", containsString("max-age"));
-  }
-
-  /**
-   * The {@code jwks_uri} advertised in the discovery document MUST be the actual endpoint that
-   * returns a valid JWK Set; the advertised URL and the real JWKS endpoint must not diverge.
-   *
-   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery">§5.1
-   *      Discovery — jwks_uri must resolve to a valid JWKS</a>
-   */
-  @Test
-  void discoveryJwksUriMatchesActualJwksEndpoint() {
-    // Fetch jwks_uri from discovery, then GET that URL and assert a valid JWKS is returned.
-    String jwksUri = given()
-        .baseUri(realmUrl())
-        .when()
-        .get("/.well-known/agent-configuration")
-        .then()
-        .statusCode(200)
-        .extract()
-        .path("jwks_uri");
-
-    assertNotNull(jwksUri, "jwks_uri must be present in the discovery document");
-    assertFalse(jwksUri.isBlank(), "jwks_uri must not be blank");
-
-    List<?> keys = given()
-        .when()
-        .get(jwksUri)
-        .then()
-        .statusCode(200)
-        .body("keys", notNullValue())
-        .extract()
-        .path("keys");
-
-    assertNotNull(keys, "jwks_uri must resolve to a JWKS with a 'keys' array");
-    assertFalse(keys.isEmpty(), "JWKS 'keys' array at jwks_uri must be non-empty");
+        .statusCode(404);
   }
 }

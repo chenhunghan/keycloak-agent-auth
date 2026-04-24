@@ -28,7 +28,7 @@ public class AgentAuthWellKnownProvider implements WellKnownProvider {
     config.put("issuer", agentAuthBase);
     config.put("algorithms", List.of("Ed25519"));
     config.put("modes", List.of("delegated", "autonomous"));
-    config.put("approval_methods", List.of("device_authorization", "ciba"));
+    config.put("approval_methods", List.of("admin"));
 
     Map<String, String> endpoints = new HashMap<>();
     endpoints.put("register", "/agent/register");
@@ -46,7 +46,6 @@ public class AgentAuthWellKnownProvider implements WellKnownProvider {
     config.put("endpoints", endpoints);
 
     config.put("default_location", agentAuthBase + "/capability/execute");
-    config.put("jwks_uri", agentAuthBase + "/jwks");
     return config;
   }
 

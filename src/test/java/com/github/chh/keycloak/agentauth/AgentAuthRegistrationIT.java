@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
 import com.github.chh.keycloak.agentauth.support.TestJwts;
@@ -414,7 +415,8 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", notNullValue())
+        .body("approval.method", equalTo("admin"))
+        .body("approval.status_url", notNullValue())
         .extract()
         .path("agent_id");
 
@@ -809,7 +811,8 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", notNullValue())
+        .body("approval.method", equalTo("admin"))
+        .body("approval.status_url", notNullValue())
         .body("agent_capability_grants", hasSize(2))
         .extract()
         .path("agent_capability_grants");
@@ -1287,16 +1290,15 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
   // -------------------------------------------------------------------------
 
   /**
-   * When a registration request includes {@code preferred_method} to hint the desired approval flow
-   * (e.g. {@code "device_authorization"}), the {@code approval} object in a pending response SHOULD
-   * reflect that method, allowing clients to steer the user experience.
+   * When a registration request includes {@code preferred_method}, this implementation accepts the
+   * hint but returns the only supported approval method: admin-mediated HTTP approval.
    *
    * @see <a href=
    *      "https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration">§5.3
    *      Agent Registration — preferred_method optional request field</a>
    */
   @Test
-  void todoPreferredMethodHintIsReflectedInApprovalObject() {
+  void todoUnsupportedPreferredMethodHintFallsBackToAdminApprovalObject() {
     OctetKeyPair preferredAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, preferredAgentKey, issuerUrl());
 
@@ -1318,13 +1320,14 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", equalTo("device_authorization"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.status_url", notNullValue())
+        .body("approval.verification_uri", nullValue());
   }
 
   /**
-   * When a registration request includes {@code login_hint} to identify a specific user for the
-   * approval workflow, the server SHOULD forward that hint to the approval flow so the correct user
-   * is prompted.
+   * When a registration request includes {@code login_hint}, this implementation accepts the field
+   * but does not echo CIBA/device-flow metadata in the custom admin approval object.
    *
    * @see <a href=
    *      "https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration">§5.3
@@ -1352,12 +1355,13 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .post("/agent/register")
         .then()
         .statusCode(200)
-        .body("approval.login_hint", equalTo("user@example.com"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.login_hint", nullValue());
   }
 
   /**
-   * When a registration request includes a {@code binding_message} field, the server SHOULD surface
-   * that message during the approval interaction so the user can confirm context.
+   * When a registration request includes a {@code binding_message} field, the server accepts it but
+   * keeps the custom admin approval response free of CIBA-specific fields.
    *
    * @see <a href=
    *      "https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration">§5.3
@@ -1385,7 +1389,8 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .post("/agent/register")
         .then()
         .statusCode(200)
-        .body("approval.binding_message", equalTo("Approve my agent for account check"));
+        .body("approval.method", equalTo("admin"))
+        .body("approval.binding_message", nullValue());
   }
 
   /**
@@ -1552,6 +1557,136 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .body("agent_id", notNullValue())
         .body("status", equalTo("active"))
         .body("agent_capability_grants", hasSize(0));
+  }
+
+  @Test
+  void jwksRegisteredAgentJwtVerifiesThroughJwksUrl() {
+    OctetKeyPair jwksHostKey = TestKeys.generateEd25519();
+    OctetKeyPair jwksAgentKey = TestKeys.generateEd25519();
+    String kid = "agent-verify-kid-" + UUID.randomUUID();
+    HttpServer server = null;
+    try {
+      server = startJwksServer(jwksAgentKey, kid);
+      Testcontainers.exposeHostPorts(server.getAddress().getPort());
+      String jwksUrl = "http://host.testcontainers.internal:" + server.getAddress().getPort()
+          + "/jwks";
+      String hostJwt = TestJwts.hostJwtForRegistrationWithAgentJwksUrl(
+          jwksHostKey, jwksUrl, kid, issuerUrl());
+
+      String jwksAgentId = given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer " + hostJwt)
+          .contentType(ContentType.JSON)
+          .body("""
+              {
+                "name": "Agent JWKS Introspect",
+                "host_name": "jwks-host",
+                "capabilities": [],
+                "mode": "delegated"
+              }
+              """)
+          .when()
+          .post("/agent/register")
+          .then()
+          .statusCode(200)
+          .extract()
+          .path("agent_id");
+
+      String agentJwt = TestJwts.agentJwtWithKid(jwksHostKey, jwksAgentKey, jwksAgentId,
+          issuerUrl(), kid);
+
+      given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer " + TestJwts.hostJwt(jwksHostKey, issuerUrl()))
+          .contentType(ContentType.JSON)
+          .body(String.format("""
+              {
+                "token": "%s"
+              }
+              """, agentJwt))
+          .when()
+          .post("/agent/introspect")
+          .then()
+          .statusCode(200)
+          .body("active", equalTo(true))
+          .body("agent_id", equalTo(jwksAgentId));
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    } finally {
+      if (server != null) {
+        server.stop(0);
+      }
+    }
+  }
+
+  /**
+   * The host key reference is mutually exclusive: a registration host JWT MUST NOT include both an
+   * inline {@code host_public_key} and a {@code host_jwks_url}.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#42-host-jwt">§4.2 Host
+   *      JWT — inline JWK and JWKS URL alternatives</a>
+   */
+  @Test
+  void registrationRejectsBothHostPublicKeyAndHostJwksUrl() {
+    String hostJwt = TestJwts.hostJwtForRegistration(
+        hostKey,
+        TestKeys.generateEd25519(),
+        issuerUrl(),
+        Map.of("host_jwks_url", hostJwksUrl));
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Both Host Key Forms",
+              "host_name": "jwks-host",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"))
+        .body("message", equalTo("host_public_key and host_jwks_url are mutually exclusive"));
+  }
+
+  /**
+   * The agent key reference is mutually exclusive: a registration host JWT MUST NOT include both an
+   * inline {@code agent_public_key} and an {@code agent_jwks_url}.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#42-host-jwt">§4.2 Host
+   *      JWT — inline JWK and JWKS URL alternatives</a>
+   */
+  @Test
+  void registrationRejectsBothAgentPublicKeyAndAgentJwksUrl() {
+    String hostJwt = TestJwts.hostJwtForRegistration(
+        hostKey,
+        TestKeys.generateEd25519(),
+        issuerUrl(),
+        Map.of("agent_jwks_url", agentJwksUrl, "agent_kid", agentJwksKid));
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Both Agent Key Forms",
+              "host_name": "jwks-host",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"))
+        .body("message", equalTo("agent_public_key and agent_jwks_url are mutually exclusive"));
   }
 
   /**

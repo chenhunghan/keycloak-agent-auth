@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
 import io.restassured.http.ContentType;
@@ -608,23 +609,37 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
 
   @Test
   void registerCapabilityWithoutLocationIsAccepted() {
+    String name = "no_location_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
         .contentType(ContentType.JSON)
-        .body("""
+        .body(String.format("""
             {
-              "name": "no_location_cap",
+              "name": "%s",
               "description": "Missing location",
               "visibility": "public",
               "requires_approval": false
             }
-            """)
+            """, name))
         .when()
         .post("/capabilities")
         .then()
         .statusCode(201)
-        .body("name", equalTo("no_location_cap"));
+        .body("name", equalTo(name))
+        .body("location", nullValue());
+
+    given()
+        .baseUri(issuerUrl())
+        .queryParam("name", name)
+        .when()
+        .get("/capability/describe")
+        .then()
+        .statusCode(200)
+        .body("name", equalTo(name))
+        .body("location", nullValue());
   }
 
   @Test

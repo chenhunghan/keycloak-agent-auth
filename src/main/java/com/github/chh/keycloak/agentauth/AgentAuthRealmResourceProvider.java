@@ -1,6 +1,4 @@
 package com.github.chh.keycloak.agentauth;
-
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.nimbusds.jose.JWSVerifier;
 import com.nimbusds.jose.crypto.Ed25519Verifier;
 import com.nimbusds.jose.jwk.OctetKeyPair;
@@ -46,13 +44,14 @@ import org.keycloak.util.JsonSerialization;
 public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
   private static final long DEFAULT_AGENT_TTL_SECONDS = 3600L;
-  private static final int DEFAULT_APPROVAL_EXPIRES_IN = 300;
-  private static final int DEFAULT_APPROVAL_INTERVAL = 5;
+  private static final int DEFAULT_APPROVAL_EXPIRES_IN = 600;
+  private static final int DEFAULT_APPROVAL_INTERVAL = 10;
   private static final long CLOCK_SKEW_MS = 30_000L;
   private static final int INTROSPECT_UNAUTH_RATE_LIMIT = 100;
   private static final long RATE_LIMIT_WINDOW_MS = 60_000L;
   private static final Set<String> SUPPORTED_CONSTRAINT_OPERATORS = Set.of("max", "min", "in",
       "not_in");
+  private static final JwksCache JWKS_CACHE = new JwksCache();
   private final KeycloakSession session; // NOPMD: will be used by protocol endpoints
 
   public AgentAuthRealmResourceProvider(KeycloakSession session) {
@@ -69,29 +68,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @Produces(MediaType.APPLICATION_JSON)
   public Response health() {
     return Response.ok("{\"status\":\"ok\",\"provider\":\"agent-auth\"}").build();
-  }
-
-  @GET
-  @Path("jwks")
-  @Produces(MediaType.APPLICATION_JSON)
-  @SuppressWarnings("unchecked")
-  public Response getJwks() {
-    // Return a static OKP Ed25519 placeholder JWKS. The Agent Auth Protocol uses
-    // Ed25519 key-pairs supplied by hosts/agents rather than a server signing key,
-    // so we expose an informational JWKS with kty=OKP / crv=Ed25519.
-    // The key material below is a well-known test OKP key (no private key exposed).
-    Map<String, Object> key = new HashMap<>();
-    key.put("kty", "OKP");
-    key.put("crv", "Ed25519");
-    // A deterministic, non-secret 32-byte x value (all-zeros base64url) used as a placeholder.
-    key.put("x", "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo");
-    key.put("use", "sig");
-    key.put("alg", "EdDSA");
-    Map<String, Object> jwks = new HashMap<>();
-    jwks.put("keys", List.of(key));
-    return Response.ok(jwks)
-        .header("Cache-Control", "max-age=3600, public")
-        .build();
   }
 
   @POST
@@ -135,7 +111,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      if (InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -174,8 +150,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
           .getJSONObjectClaim("host_public_key");
+      String hostJwksUrl = jwt.getJWTClaimsSet().getStringClaim("host_jwks_url");
+      if (hostPublicKeyMap != null && hostJwksUrl != null && !hostJwksUrl.isBlank()) {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request", "message",
+                "host_public_key and host_jwks_url are mutually exclusive"))
+            .build();
+      }
       if (hostPublicKeyMap == null) {
-        String hostJwksUrl = jwt.getJWTClaimsSet().getStringClaim("host_jwks_url");
         String hostKid = jwt.getHeader().getKeyID();
         if (hostJwksUrl == null || hostJwksUrl.isBlank()) {
           return Response.status(401)
@@ -190,7 +172,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               .build();
         }
         try {
-          hostPublicKeyMap = resolveJwkFromJwksUrl(hostJwksUrl, hostKid);
+          hostPublicKeyMap = JWKS_CACHE.resolve(hostJwksUrl, hostKid);
         } catch (IllegalArgumentException e) {
           return Response.status(401)
               .entity(Map.of("error", "invalid_jwt", "message", e.getMessage()))
@@ -200,8 +182,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       Map<String, Object> agentPublicKeyMap = jwt.getJWTClaimsSet()
           .getJSONObjectClaim("agent_public_key");
+      String agentJwksUrl = jwt.getJWTClaimsSet().getStringClaim("agent_jwks_url");
+      if (agentPublicKeyMap != null && agentJwksUrl != null && !agentJwksUrl.isBlank()) {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request", "message",
+                "agent_public_key and agent_jwks_url are mutually exclusive"))
+            .build();
+      }
       if (agentPublicKeyMap == null) {
-        String agentJwksUrl = jwt.getJWTClaimsSet().getStringClaim("agent_jwks_url");
         String agentKid = jwt.getJWTClaimsSet().getStringClaim("agent_kid");
         if (agentJwksUrl == null || agentJwksUrl.isBlank()) {
           return Response.status(401)
@@ -216,7 +204,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               .build();
         }
         try {
-          agentPublicKeyMap = resolveJwkFromJwksUrl(agentJwksUrl, agentKid);
+          agentPublicKeyMap = JWKS_CACHE.resolve(agentJwksUrl, agentKid);
         } catch (IllegalArgumentException e) {
           return Response.status(401)
               .entity(Map.of("error", "invalid_jwt", "message", e.getMessage()))
@@ -423,7 +411,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("host_id", hostId);
       agentData.put("agent_key_thumbprint", agentKeyThumb);
       agentData.put("agent_public_key", agentPublicKeyMap);
-      String agentJwksUrl = jwt.getJWTClaimsSet().getStringClaim("agent_jwks_url");
       if (agentJwksUrl != null && !agentJwksUrl.isBlank()) {
         agentData.put("agent_jwks_url", agentJwksUrl);
         agentData.put("agent_kid", jwt.getJWTClaimsSet().getStringClaim("agent_kid"));
@@ -451,7 +438,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         hostData = new HashMap<>();
         hostData.put("host_id", hostId);
         hostData.put("public_key", hostPublicKeyMap);
-        String hostJwksUrl = jwt.getJWTClaimsSet().getStringClaim("host_jwks_url");
         if (hostJwksUrl != null && !hostJwksUrl.isBlank()) {
           hostData.put("host_jwks_url", hostJwksUrl);
           hostData.put("host_kid", jwt.getHeader().getKeyID());
@@ -527,8 +513,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
-      Map<String, Object> agentPublicKeyMap = (Map<String, Object>) agentData
-          .get("agent_public_key");
+      Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
       if (agentPublicKeyMap == null) {
         return Response.ok(Map.of("active", false)).build();
       }
@@ -563,7 +548,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
-      if (InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, now) != null) {
+      if (isJtiReplay(jwt, jti)) {
         return Response.ok(Map.of("active", false)).build();
       }
 
@@ -598,6 +583,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .get("agent_capability_grants");
       List<Map<String, Object>> returnedGrants = new ArrayList<>();
       List<String> scopeList = new ArrayList<>();
+      Map<String, Object> selectedGrant = null;
 
       if (allGrants != null) {
         for (Map<String, Object> grant : allGrants) {
@@ -612,6 +598,28 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           compactGrant.put("status", grant.get("status"));
           returnedGrants.add(compactGrant);
           scopeList.add(capName);
+          if (selectedGrant == null) {
+            selectedGrant = grant;
+          }
+        }
+      }
+
+      String selectedCapability = null;
+      Object requestedCapability = requestBody.get("capability");
+      if (requestedCapability instanceof String requestedCapabilityName
+          && !requestedCapabilityName.isBlank()) {
+        selectedCapability = requestedCapabilityName;
+      } else if (restrictedCaps != null && restrictedCaps.size() == 1) {
+        selectedCapability = restrictedCaps.get(0);
+      } else if (returnedGrants.size() == 1) {
+        selectedCapability = (String) returnedGrants.get(0).get("capability");
+      }
+      if (selectedCapability != null && allGrants != null) {
+        for (Map<String, Object> grant : allGrants) {
+          if (selectedCapability.equals(grant.get("capability"))) {
+            selectedGrant = grant;
+            break;
+          }
         }
       }
 
@@ -629,6 +637,39 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       response.put("mode", mode);
       response.put("expires_at", agentData.get("expires_at"));
       response.put("capabilities", returnedGrants);
+      response.put("aud", aud.size() == 1 ? aud.get(0) : aud);
+      response.put("jti", jti);
+
+      if (selectedGrant != null) {
+        response.put("capability", selectedGrant.get("capability"));
+        response.put("grant_status", selectedGrant.get("status"));
+        if (selectedGrant.containsKey("constraints")) {
+          response.put("constraints", selectedGrant.get("constraints"));
+        }
+      }
+
+      Object rawArguments = requestBody.get("arguments");
+      if (rawArguments != null) {
+        if (!(rawArguments instanceof Map<?, ?>)) {
+          return Response.status(400)
+              .entity(Map.of("error", "invalid_request", "message", "arguments must be an object"))
+              .build();
+        }
+        List<Map<String, Object>> violationMaps = new ArrayList<>();
+        if (selectedGrant != null && selectedGrant.containsKey("constraints")) {
+          List<ConstraintViolation> violations = new ConstraintValidator().validate(
+              (Map<String, Object>) selectedGrant.get("constraints"),
+              (Map<String, Object>) rawArguments);
+          for (ConstraintViolation v : violations) {
+            Map<String, Object> vmap = new HashMap<>();
+            vmap.put("field", v.field());
+            vmap.put("constraint", v.constraint());
+            vmap.put("actual", v.actual());
+            violationMaps.add(vmap);
+          }
+        }
+        response.put("violations", violationMaps);
+      }
 
       return Response.ok(response).build();
     } catch (Exception e) {
@@ -754,8 +795,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (jti == null || isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -813,8 +853,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
     try {
       String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (jti == null || isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -968,8 +1007,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
     try {
       String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (jti == null || isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -1108,8 +1146,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
     try {
       String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (jti == null || isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -1301,8 +1338,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
     try {
       String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (jti == null || isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -1424,8 +1460,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
     try {
       String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null
-          || InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, System.currentTimeMillis()) != null) {
+      if (jti == null || isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
       }
@@ -1569,7 +1604,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           if (sub != null) {
             Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(sub);
             if (agentData != null) {
-              Map<String, Object> keyMap = (Map<String, Object>) agentData.get("agent_public_key");
+              Map<String, Object> keyMap = resolveAgentPublicKeyMap(agentData, jwt);
               OctetKeyPair agentKey = OctetKeyPair.parse(keyMap);
               JWSVerifier verifier = new Ed25519Verifier(agentKey);
               if (jwt.verify(verifier)) {
@@ -1717,7 +1752,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           if (sub != null) {
             Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(sub);
             if (agentData != null) {
-              Map<String, Object> keyMap = (Map<String, Object>) agentData.get("agent_public_key");
+              Map<String, Object> keyMap = resolveAgentPublicKeyMap(agentData, jwt);
               OctetKeyPair agentKey = OctetKeyPair.parse(keyMap);
               JWSVerifier verifier = new Ed25519Verifier(agentKey);
               if (jwt.verify(verifier)) {
@@ -1807,7 +1842,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Missing jti"))
             .build();
       }
-      if (InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, now) != null) {
+      if (isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected"))
             .build();
@@ -1864,8 +1899,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> agentPublicKeyMap = (Map<String, Object>) agentData
-          .get("agent_public_key");
+      Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
       OctetKeyPair agentKey = OctetKeyPair.parse(agentPublicKeyMap);
       JWSVerifier verifier = new Ed25519Verifier(agentKey);
       if (!jwt.verify(verifier)) {
@@ -2135,7 +2169,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Missing jti"))
             .build();
       }
-      if (InMemoryRegistry.SEEN_JTIS.putIfAbsent(jti, now) != null) {
+      if (isJtiReplay(jwt, jti)) {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected"))
             .build();
@@ -2185,8 +2219,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      Map<String, Object> agentPublicKeyMap = (Map<String, Object>) agentData
-          .get("agent_public_key");
+      Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
       OctetKeyPair agentKey = OctetKeyPair.parse(agentPublicKeyMap);
       JWSVerifier verifier = new Ed25519Verifier(agentKey);
       if (!jwt.verify(verifier)) {
@@ -2334,8 +2367,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       String location = (String) registeredCap.get("location");
       if (location == null || location.isBlank()) {
-        return Response.status(502).entity(Map.of("error", "bad_gateway",
-            "message", "Capability has no location configured")).build();
+        return Response.status(500).entity(Map.of("error", "capability_misconfigured",
+            "message",
+            "Capability has no location and this server does not execute capabilities directly. "
+                + "Register the capability with an explicit location pointing at a resource server."))
+            .build();
       }
       String bodyJson = JsonSerialization.writeValueAsString(requestBody);
 
@@ -2454,8 +2490,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found"))
             .build();
       }
-      Map<String, Object> agentPublicKeyMap = (Map<String, Object>) agentData
-          .get("agent_public_key");
+      Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
       OctetKeyPair agentKey = OctetKeyPair.parse(agentPublicKeyMap);
       JWSVerifier verifier = new Ed25519Verifier(agentKey);
       if (!jwt.verify(verifier)) {
@@ -2499,66 +2534,43 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
   }
 
-  @SuppressWarnings("unchecked")
-  private static Map<String, Object> resolveJwkFromJwksUrl(String jwksUrl, String kid) {
-    try {
-      URI uri = URI.create(jwksUrl);
-      String scheme = uri.getScheme();
-      if (!"https".equalsIgnoreCase(scheme) && !isLocalJwksUri(uri)) {
-        throw new IllegalArgumentException("JWKS URL must use HTTPS");
-      }
-
-      HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
-      conn.setRequestMethod("GET");
-      conn.setRequestProperty("Accept", "application/json");
-      conn.setConnectTimeout(5_000);
-      conn.setReadTimeout(5_000);
-
-      int status = conn.getResponseCode();
-      if (status != 200) {
-        throw new IllegalArgumentException("Unable to fetch JWKS");
-      }
-
-      try (InputStream is = conn.getInputStream()) {
-        Map<String, Object> jwks = JsonSerialization.readValue(is,
-            new TypeReference<Map<String, Object>>() {
-            });
-        Object rawKeys = jwks.get("keys");
-        if (!(rawKeys instanceof List<?> keys)) {
-          throw new IllegalArgumentException("JWKS does not contain a keys array");
-        }
-        for (Object rawKey : keys) {
-          if (rawKey instanceof Map<?, ?> key && kid.equals(key.get("kid"))) {
-            return new HashMap<>((Map<String, Object>) key);
-          }
-        }
-        throw new IllegalArgumentException("No matching JWK found for kid");
-      }
-    } catch (IllegalArgumentException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new IllegalArgumentException("Unable to resolve JWKS key: " + e.getMessage(), e);
-    }
-  }
-
-  private static boolean isLocalJwksUri(URI uri) {
-    if (!"http".equalsIgnoreCase(uri.getScheme())) {
-      return false;
-    }
-    String host = uri.getHost();
-    return "localhost".equalsIgnoreCase(host)
-        || "127.0.0.1".equals(host)
-        || "host.testcontainers.internal".equalsIgnoreCase(host)
-        || "host.docker.internal".equalsIgnoreCase(host)
-        || "172.17.0.1".equals(host);
-  }
-
   private static String nowTimestamp() {
     return Instant.now().toString();
   }
 
   private static String futureTimestamp(long seconds) {
     return Instant.now().plusSeconds(seconds).toString();
+  }
+
+  private boolean isJtiReplay(SignedJWT jwt, String jti) {
+    long ttlSeconds = 60;
+    try {
+      if (jwt.getJWTClaimsSet().getExpirationTime() != null) {
+        long ttlMillis = jwt.getJWTClaimsSet().getExpirationTime().getTime()
+            - System.currentTimeMillis();
+        ttlSeconds = Math.max(60, (ttlMillis + 999) / 1000);
+      }
+    } catch (Exception ignored) {
+      // Malformed JWTs fail elsewhere; keep a short single-use TTL for this defensive path.
+    }
+    return !session.singleUseObjects().putIfAbsent("agentauth:jti:" + jti, ttlSeconds);
+  }
+
+  @SuppressWarnings("unchecked")
+  private Map<String, Object> resolveAgentPublicKeyMap(Map<String, Object> agentData,
+      SignedJWT jwt) {
+    String agentJwksUrl = (String) agentData.get("agent_jwks_url");
+    if (agentJwksUrl != null && !agentJwksUrl.isBlank()) {
+      String kid = jwt.getHeader().getKeyID();
+      if (kid == null || kid.isBlank()) {
+        kid = (String) agentData.get("agent_kid");
+      }
+      if (kid == null || kid.isBlank()) {
+        throw new IllegalArgumentException("Missing kid for agent_jwks_url");
+      }
+      return JWKS_CACHE.resolve(agentJwksUrl, kid);
+    }
+    return (Map<String, Object>) agentData.get("agent_public_key");
   }
 
   private String issuerUrl() {
@@ -2569,28 +2581,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
   private Map<String, Object> buildApprovalObject(Map<String, Object> requestBody, String agentId) {
     Map<String, Object> approval = new HashMap<>();
-    String preferredMethod = (String) requestBody.get("preferred_method");
-    String method = preferredMethod != null && !preferredMethod.isBlank()
-        ? preferredMethod
-        : "ciba";
-    approval.put("method", method);
+    approval.put("method", "admin");
     approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
     approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
-    approval.put("verification_uri",
+    approval.put("status_url",
         session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
             .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
-            .path("approval").path(agentId).build().toString());
-    approval.put("user_code", agentId.substring(0, Math.min(8, agentId.length())).toUpperCase());
-    approval.put("verification_uri_complete", approval.get("verification_uri") + "?user_code="
-        + approval.get("user_code"));
-
-    if (requestBody.containsKey("login_hint")) {
-      approval.put("login_hint", requestBody.get("login_hint"));
-    }
-    if (requestBody.containsKey("binding_message")) {
-      approval.put("binding_message", requestBody.get("binding_message"));
-    }
-
+            .path("agent").path("status").queryParam("agent_id", agentId).build().toString());
     return approval;
   }
 

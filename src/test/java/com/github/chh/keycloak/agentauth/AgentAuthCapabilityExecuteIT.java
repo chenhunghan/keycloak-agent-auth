@@ -445,6 +445,65 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .body("error", org.hamcrest.Matchers.nullValue());
   }
 
+  @Test
+  void executeLocationlessCapabilityReturnsMisconfigurationError() {
+    String locationlessCapability = "locationless_execute_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "No explicit resource-server location",
+              "visibility": "authenticated",
+              "requires_approval": false
+            }
+            """, locationlessCapability))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201)
+        .body("location", org.hamcrest.Matchers.nullValue());
+
+    String requestJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + requestJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "Exercise default_location misconfiguration path"
+            }
+            """, locationlessCapability))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants[0].status", equalTo("active"));
+
+    String executeJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        issuerUrl() + "/capability/execute");
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + executeJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capability": "%s",
+              "arguments": {}
+            }
+            """, locationlessCapability))
+        .when()
+        .post("/capability/execute")
+        .then()
+        .statusCode(500)
+        .body("error", equalTo("capability_misconfigured"));
+  }
+
   /**
    * §2.15: The execution gateway MUST forward both the {@code capability} name and the
    * {@code arguments} object to the upstream resource server without modification.
