@@ -87,6 +87,11 @@ public class AgentAuthUserEventListenerProviderFactory implements EventListenerP
         }
       }
     });
+    // AAP §7.1 pending-agent GC. Piggy-backing on this factory because it already owns the
+    // postInit hook; the scheduler itself is idempotent across repeated postInit calls.
+    PendingAgentCleanup.start(factory,
+        PendingAgentCleanup.DEFAULT_INTERVAL_SECONDS,
+        PendingAgentCleanup.DEFAULT_THRESHOLD_SECONDS);
   }
 
   @Override

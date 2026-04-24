@@ -130,6 +130,15 @@ public class JpaStorage implements AgentAuthStorage {
   }
 
   @Override
+  public int deletePendingAgentsOlderThan(long thresholdEpochMs) {
+    return em()
+        .createQuery("delete from AgentEntity a where a.status = 'pending'"
+            + " and a.createdAt < :threshold")
+        .setParameter("threshold", thresholdEpochMs)
+        .executeUpdate();
+  }
+
+  @Override
   public Map<String, Object> findAgentByKeyAndHost(String agentKeyThumbprint, String hostId) {
     List<AgentEntity> results = em()
         .createNamedQuery("AgentEntity.findByKeyAndHost", AgentEntity.class)

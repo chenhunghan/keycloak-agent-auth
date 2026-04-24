@@ -363,6 +363,26 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   }
 
   /**
+   * AAP §7.1: "Servers SHOULD periodically clean up agents that remain in pending state beyond a
+   * server-defined threshold ... Cleaned-up pending agents are deleted, not revoked — they never
+   * became active." This endpoint gives operators a manual trigger for the sweep (the extension
+   * also schedules an automatic hourly sweep once per JVM). Returns the number of agents removed.
+   */
+  @POST
+  @Path("pending-agents/cleanup")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response cleanupPendingAgents(
+      @jakarta.ws.rs.QueryParam("olderThanSeconds") Long olderThanSeconds) {
+    requireManageRealm();
+    long thresholdSec = olderThanSeconds == null
+        ? PendingAgentCleanup.DEFAULT_THRESHOLD_SECONDS
+        : Math.max(0L, olderThanSeconds);
+    long thresholdMs = System.currentTimeMillis() - (thresholdSec * 1000L);
+    int removed = storage().deletePendingAgentsOlderThan(thresholdMs);
+    return Response.ok(Map.of("removed", removed, "threshold_seconds", thresholdSec)).build();
+  }
+
+  /**
    * Links a host to a Keycloak user (AAP §2.9). On link, autonomous agents under the host are
    * claimed per §2.10 and delegated agents inherit the host's {@code user_id} per §3.2.
    */

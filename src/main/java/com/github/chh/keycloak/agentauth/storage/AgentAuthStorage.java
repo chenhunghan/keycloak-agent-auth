@@ -49,6 +49,15 @@ public interface AgentAuthStorage extends Provider {
    */
   Map<String, Object> findAgentByUserCode(String userCode);
 
+  /**
+   * Delete agents whose {@code status} is {@code pending} and whose first-seen timestamp is older
+   * than {@code thresholdEpochMs}. Returns the number of agents removed. Used to satisfy AAP §7.1:
+   * "Servers SHOULD periodically clean up agents that remain in pending state beyond a
+   * server-defined threshold ... Cleaned-up pending agents are deleted, not revoked — they never
+   * became active."
+   */
+  int deletePendingAgentsOlderThan(long thresholdEpochMs);
+
   // --- Capabilities (keyed by name) ---
 
   Map<String, Object> getCapability(String name);
