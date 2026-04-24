@@ -48,8 +48,10 @@ Resource Server (any language)
 | Concern | Endpoint | Description |
 |---------|----------|-------------|
 | Discovery | `GET /.well-known/agent-configuration` | Protocol discovery (WellKnownProvider SPI) |
+| Health | `GET /agent-auth/health` | Liveness probe; confirms the extension is loaded |
 | Registration | `POST /agent/register` | Register agent under a host |
 | Status | `GET /agent/status` | Check agent status + grants |
+| Grant status | `GET /agent/{agentId}/capabilities/{capabilityName}/status` | Poll a pending grant while it awaits approval |
 | Revocation | `POST /agent/revoke` | Permanently revoke an agent |
 | Reactivation | `POST /agent/reactivate` | Reactivate an expired agent |
 | Introspect | `POST /agent/introspect` | Validate agent JWT (RFC 7662 model) |
@@ -59,7 +61,10 @@ Resource Server (any language)
 | Capability request | `POST /agent/request-capability` | Request additional capabilities |
 | Capability listing | `GET /capability/list` | List available capabilities |
 | Capability detail | `GET /capability/describe` | Get full capability schema |
-| **Admin:** registration | `POST /admin/.../agent-auth/capabilities` | Register capabilities (admin API) |
+| Capability execution (gateway) | `POST /capability/execute` | Keycloak introspects the agent JWT, runs constraint checks, and proxies to `<capability.location>` |
+| **Admin:** capability CRUD | `POST / PUT / DELETE /admin/.../agent-auth/capabilities[/{name}]` | Register, update, and delete capabilities |
+| **Admin:** approve grant | `POST /admin/.../agent-auth/agents/{id}/capabilities/{capability}/approve` | Approve a pending capability grant |
+| **Admin:** reject / expire agent | `POST /admin/.../agent-auth/agents/{id}/{reject\|expire}` | Reject a pending agent or force-expire an active one |
 
 ### What lives in the resource server
 
@@ -69,6 +74,13 @@ Resource Server (any language)
 | JWT validation | Calls Keycloak's `/agent/introspect` to verify agent JWTs, or verifies signature/audience locally when it has the agent key material |
 
 The resource server can be written in **any language**. For each request it should verify that the JWT `aud` matches its own capability URL, call Keycloak's `/agent/introspect` with `{"token":"..."}` (or `{"token":"...","capability":"...","arguments":{...}}` when it wants Keycloak to run constraint checks), and reject the request when `active` is `false` or when `violations` is present and non-empty.
+
+### Execution modes
+
+Both execution paths defined by the spec are supported; the agent picks which one to call:
+
+- **Gateway** — agent `POST`s to Keycloak's `/capability/execute` with `{capability, arguments}`. Keycloak introspects the agent JWT, runs constraint checks, and proxies the request to `<capability.location>`. The resource server does not need to call `/agent/introspect` itself. Synchronous, async-pending, and SSE streaming responses are all proxied.
+- **Direct** — agent `POST`s straight to `<capability.location>` with its agent JWT in the `Authorization` header. The resource server calls `/agent/introspect` to validate and reject accordingly. Useful when the resource server wants finer-grained control, already runs its own auth plumbing, or prefers to avoid an extra hop.
 
 ## Centralized Capability Registry
 
