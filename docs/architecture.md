@@ -75,39 +75,38 @@ sequenceDiagram
     participant RS as Resource Server
 
     Agent->>Client: connect
-    Client->>Server: GET /.well-known/agent-configuration
-    Server-->>Client: discovery doc
+    Client->>Server: /.well-known/agent-configuration
+    Server-->>Client: discovery
 
-    Client->>Server: POST /agent/register  [host+jwt]
-    Server-->>Client: 200 + approval object
+    Client->>Server: /agent/register
+    Server-->>Client: approval object
 
-    Note over Server,User: spec §7 approval flow<br/>(device_auth / CIBA / admin UI)
+    Note over Server,User: spec §7 approval
     Server->>User: verification prompt
-    User->>Server: authenticate + approve
+    User->>Server: approve
 
     loop poll
-        Client->>Server: GET /agent/status  [host+jwt]
+        Client->>Server: /agent/status
     end
-    Server-->>Client: status = active
+    Server-->>Client: active
 
-    Agent->>Client: execute capability
+    Agent->>Client: run capability
 
-    alt Gateway mode
-        Client->>Server: POST /capability/execute  [agent+jwt]
+    alt gateway
+        Client->>Server: /capability/execute
         Server->>RS: proxy
         RS-->>Server: result
         Server-->>Client: result
-    else Direct mode
-        Client->>RS: POST <capability.location>  [agent+jwt]
-        RS->>Server: POST /agent/introspect
+    else direct
+        Client->>RS: capability.location
+        RS->>Server: /agent/introspect
         Server-->>RS: active + grants
         RS-->>Client: result
     end
     Client-->>Agent: answer
 
-    Note over Client,Server: teardown
-    Client->>Server: POST /agent/revoke  [host+jwt]
-    Server-->>Client: status = revoked
+    Client->>Server: /agent/revoke
+    Server-->>Client: revoked
 ```
 
 A few nuances worth calling out:
@@ -123,37 +122,27 @@ Host linking is the spec's mechanism for binding a host (machine identity) to a 
 ```mermaid
 sequenceDiagram
     actor Admin
-    participant Ext as AgentAuthAdminResourceProvider
-    participant KC as Keycloak (users)
-    participant Store as AgentAuthStorage
+    participant Ext as AdminResourceProvider
+    participant KC as Keycloak
+    participant Store
 
-    Admin->>Ext: POST /admin/.../hosts/{id}/link<br/>body: { user_id }  [admin OIDC]
+    Admin->>Ext: .../hosts/{id}/link { user_id }
     Ext->>Store: getHost(id)
-    alt host not found
-        Ext-->>Admin: 404 host_not_found
-    end
-    Ext->>KC: users().getUserById(user_id)
-    alt user not found
-        Ext-->>Admin: 404 user_not_found
-    end
-    alt host.user_id already set<br/>and != requested
-        Ext-->>Admin: 409 host_already_linked
-    end
-
-    Ext->>Store: putHost(id, { ..., user_id })
+    Ext->>KC: getUserById(user_id)
+    Note over Ext: 404 if host/user missing<br/>409 if already linked elsewhere
+    Ext->>Store: putHost(id, user_id)
 
     loop each agent under host
-        alt mode = autonomous AND status not terminal
-            Ext->>Store: putAgent(agent,<br/>status=claimed,<br/>grants[].status=revoked,<br/>user_id=user)
-            Note right of Ext: §2.10 — claim
-        else mode = delegated
-            Ext->>Store: putAgent(agent, user_id=user)
-            Note right of Ext: §3.2 — propagate
+        alt autonomous + not terminal
+            Ext->>Store: claim (grants revoked)
+            Note right of Ext: §2.10
+        else delegated
+            Ext->>Store: propagate user_id
+            Note right of Ext: §3.2
         end
     end
 
-    Ext->>KC: emit AdminEvent<br/>agent-auth/host/{id}/link
-    Ext-->>Admin: 200 + host record
+    Ext-->>Admin: host
 ```
 
 Unlink (`DELETE /admin/.../hosts/{id}/link`) runs the inverse cascade: all delegated agents under the host are revoked (§2.9 — their authority derived from the now-removed link). Autonomous agents were already `claimed` by the link cascade, which is a terminal state, so they stay put. The host's `user_id` is cleared and it becomes unlinked again.
@@ -167,20 +156,19 @@ flowchart TB
     subgraph KC["Keycloak server"]
         subgraph CORE["Keycloak core"]
             direction LR
-            C1["Realms / users /<br/>sessions"]
-            C2["OIDC"]
-            C3["Admin UI + REST"]
-            C4["Event framework"]
-            C5["JPA persistence"]
+            C1["realms / users"]
+            C3["admin REST"]
+            C4["events"]
+            C5["JPA"]
         end
 
         subgraph EXT["This extension"]
             direction TB
             subgraph PROV["SPI providers"]
                 direction LR
-                P1["WellKnownProvider"]
-                P2["RealmResourceProvider"]
-                P3["AdminRealmResourceProvider"]
+                P1["WellKnown"]
+                P2["RealmResource"]
+                P3["AdminRealmResource"]
             end
 
             subgraph STOR["Storage SPI"]
