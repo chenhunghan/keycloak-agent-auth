@@ -190,7 +190,7 @@ Release asset uploads are verified in GitHub Actions.
 docker compose up
 ```
 
-Keycloak will be available at `http://localhost:8080` with the extension loaded. The agent-auth endpoints are at `/realms/{realm}/agent-auth/...`.
+Keycloak will be available at `http://localhost:28080` with the extension loaded. The agent-auth endpoints are at `/realms/{realm}/agent-auth/...`.
 
 The Dockerfile is multi-stage — the builder runs `mvn package` against the checked-in source, then the runtime stage copies the extension JAR plus its runtime libs (nimbus-jose-jwt, tink) from `target/provider-libs/` into `/opt/keycloak/providers/`. No host JDK or Maven is required. The integration tests use the same `target/provider-libs/` directory via testcontainers, so the image and test harness share one source of truth for runtime deps.
 
