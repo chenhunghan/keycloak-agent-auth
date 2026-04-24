@@ -45,8 +45,8 @@ flowchart LR
     U(("User"))
 
     C -->|host ops| S
-    C -->|execute<br/>(gateway)| S
-    C -.->|execute<br/>(direct)| RS
+    C -->|"execute<br/>(gateway)"| S
+    C -.->|"execute<br/>(direct)"| RS
     RS -.->|introspect| S
     S -->|approval| U
 ```
