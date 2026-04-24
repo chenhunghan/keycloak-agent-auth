@@ -664,7 +664,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .body("agent_capability_grants[0].capability", equalTo(approvalCap))
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.status_url", notNullValue());
   }
 
@@ -886,9 +886,10 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.status_url", notNullValue())
-        .body("approval.verification_uri", nullValue());
+        .body("approval.verification_uri", notNullValue())
+        .body("approval.user_code", notNullValue());
   }
 
   /**
@@ -943,7 +944,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.login_hint", nullValue());
   }
 
@@ -999,7 +1000,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.binding_message", nullValue());
   }
 
@@ -1274,12 +1275,12 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/agent/request-capability")
         .then()
         .statusCode(200)
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.expires_in", notNullValue())
         .body("approval.interval", notNullValue())
         .body("approval.status_url", notNullValue())
-        .body("approval.verification_uri", nullValue())
-        .body("approval.user_code", nullValue());
+        .body("approval.verification_uri", notNullValue())
+        .body("approval.user_code", notNullValue());
   }
 
   /**

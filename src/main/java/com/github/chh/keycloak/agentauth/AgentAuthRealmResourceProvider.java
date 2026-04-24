@@ -1318,8 +1318,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
         if (needsApproval) {
           agentData.put("status", "pending");
-          agentData.put("approval",
-              buildApprovalObject((String) agentData.get("agent_id")));
+          String userCode = generateUserCode();
+          agentData.put("user_code", userCode);
+          agentData.put("approval", buildDeviceAuthApprovalObject(
+              (String) agentData.get("agent_id"), userCode));
         } else {
           agentData.put("status", "active");
           agentData.remove("approval");
@@ -2121,7 +2123,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       responseMap.put("agent_id", agentId);
       responseMap.put("agent_capability_grants", newGrants);
       if (requiresApproval) {
-        responseMap.put("approval", buildApprovalObject(agentId));
+        String userCode = generateUserCode();
+        agentData.put("user_code", userCode);
+        responseMap.put("approval", buildDeviceAuthApprovalObject(agentId, userCode));
       }
       agentData.put("updated_at", nowTimestamp());
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
@@ -2624,7 +2628,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               "message", "Approval is no longer possible; agent is in a terminal state"))
           .build();
     }
-    if (!"pending".equals(status)) {
+    // Two approval contexts share this endpoint:
+    // (a) §5.3 register / §5.6 reactivate — agent itself is `pending`.
+    // (b) §5.4 capability-request — agent is `active`, and one or more grants are `pending`.
+    boolean isCapabilityRequestApproval = "active".equals(status) && hasPendingGrants(agentData);
+    if (!"pending".equals(status) && !isCapabilityRequestApproval) {
       return Response.status(409)
           .entity(Map.of("error", "invalid_state",
               "message", "Agent is not awaiting approval"))
@@ -2636,12 +2644,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     String hostId = (String) agentData.get("host_id");
     String nowTs = nowTimestamp();
 
+    List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
+        .get("agent_capability_grants");
+
     if (approve) {
-      agentData.put("status", "active");
-      agentData.put("activated_at", nowTs);
-      agentData.put("user_id", userId);
-      List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
-          .get("agent_capability_grants");
+      if (!isCapabilityRequestApproval) {
+        // Register/reactivate path: transition the agent itself.
+        agentData.put("status", "active");
+        agentData.put("activated_at", nowTs);
+        agentData.put("user_id", userId);
+      }
       if (grants != null) {
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
@@ -2662,13 +2674,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           }
         }
       }
-      // Approval succeeded — user_code is no longer needed.
       agentData.remove("user_code");
     } else {
-      agentData.put("status", "rejected");
-      agentData.put("rejection_reason", "user_denied");
-      List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
-          .get("agent_capability_grants");
+      if (!isCapabilityRequestApproval) {
+        agentData.put("status", "rejected");
+        agentData.put("rejection_reason", "user_denied");
+      }
       if (grants != null) {
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
@@ -2678,14 +2689,20 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
       // Keep user_code so a subsequent approve attempt resolves the rejected agent and
-      // returns 410 (§7.1: "client MUST NOT retry"), not 404.
+      // returns 410 (§7.1: "client MUST NOT retry"), not 404. For capability-request denials
+      // the user_code is cleared since the agent remains active and may receive fresh
+      // approvals later.
+      if (isCapabilityRequestApproval) {
+        agentData.remove("user_code");
+      }
     }
     agentData.put("updated_at", nowTs);
     agentData.remove("approval");
     storage.putAgent(agentId, agentData);
 
-    if (approve) {
+    if (approve && !isCapabilityRequestApproval) {
       // §2.9: linking happens on user approval of a delegated registration on an unlinked host.
+      // Capability-request approvals do not re-link — the host is already linked.
       Map<String, Object> hostData = storage.getHost(hostId);
       if (hostData != null && hostData.get("user_id") == null) {
         hostData.put("user_id", userId);
@@ -2695,6 +2712,21 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
 
     return Response.ok(agentData).build();
+  }
+
+  @SuppressWarnings("unchecked")
+  private static boolean hasPendingGrants(Map<String, Object> agentData) {
+    Object raw = agentData.get("agent_capability_grants");
+    if (!(raw instanceof List<?>)) {
+      return false;
+    }
+    for (Object entry : (List<?>) raw) {
+      if (entry instanceof Map<?, ?> g
+          && "pending".equals(((Map<String, Object>) g).get("status"))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static boolean isEd25519Jwk(Map<String, Object> jwk) {

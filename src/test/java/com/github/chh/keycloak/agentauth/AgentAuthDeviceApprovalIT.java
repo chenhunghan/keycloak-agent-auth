@@ -187,6 +187,151 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
   }
 
   @Test
+  void capabilityRequestApproval_activatesGrantsWithoutChangingAgentStatus() {
+    // §5.4 + §7 + §7.1: a capability-request on an already-active agent that needs user
+    // approval MUST go through the same device_authorization flow. The agent stays `active`;
+    // only the pending grants flip to `active`.
+    String autoCap = registerAutoCapability("devauth_capreq_auto_" + suffix());
+    String approvalCap = registerApprovalRequiredCapability("devauth_capreq_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+
+    // Register the agent with only the auto-approved capability → status=active straight away.
+    String agentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "capreq agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, autoCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("active"))
+        .extract()
+        .path("agent_id");
+
+    // Agent now requests the approval-required capability.
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"]
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability");
+    reqResp.then()
+        .statusCode(200)
+        .body("approval.method", org.hamcrest.Matchers.equalTo("device_authorization"))
+        .body("approval.user_code", matchesPattern("[A-Z]{4}-[A-Z]{4}"));
+    String userCode = reqResp.jsonPath().getString("approval.user_code");
+
+    // User approves.
+    String username = "capreq-approver-" + suffix();
+    createTestUser(username);
+    String userAccessToken = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + userAccessToken)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    // Agent status remains active; the newly-requested grant is now active too.
+    Map<String, Object> status = agentStatusBody(agentId, hostKey);
+    assertThat(status.get("status")).isEqualTo("active");
+    @SuppressWarnings("unchecked")
+    java.util.List<Map<String, Object>> grants = (java.util.List<Map<String, Object>>) status
+        .get("agent_capability_grants");
+    Map<String, Object> requestedGrant = grants.stream()
+        .filter(g -> approvalCap.equals(g.get("capability")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("Requested grant missing"));
+    assertThat(requestedGrant.get("status")).isEqualTo("active");
+  }
+
+  @Test
+  void reactivateApproval_flipsExpiredAgentBackToActive() {
+    // §5.6 + §7: reactivate of an expired agent follows the same device_authorization flow as
+    // a new delegated registration when the reactivated grants include one that requires
+    // approval.
+    String approvalCap = registerApprovalRequiredCapability("devauth_react_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+
+    // Register as delegated + capability requires approval → pending.
+    Response regResp = registerDelegatedAgent(hostKey, agentKey, approvalCap);
+    String agentId = regResp.jsonPath().getString("agent_id");
+    String firstUserCode = regResp.jsonPath().getString("approval.user_code");
+
+    // First approval to get to active.
+    String username = "reactivate-approver-" + suffix();
+    createTestUser(username);
+    String userAccessToken = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + userAccessToken)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", firstUserCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    // Admin forces expiration of the agent.
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .when()
+        .post("/agents/" + agentId + "/expire")
+        .then()
+        .statusCode(200);
+
+    // Agent requests reactivation — default_capability_grants replay forces approval again.
+    String hostJwtForReact = TestJwts.hostJwt(hostKey, issuerUrl());
+    Response reactResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwtForReact)
+        .contentType(ContentType.JSON)
+        .body(Map.of("agent_id", agentId))
+        .when()
+        .post("/agent/reactivate");
+    reactResp.then()
+        .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("pending"))
+        .body("approval.method", org.hamcrest.Matchers.equalTo("device_authorization"))
+        .body("approval.user_code", matchesPattern("[A-Z]{4}-[A-Z]{4}"));
+    String reactivationUserCode = reactResp.jsonPath().getString("approval.user_code");
+
+    // Approve the reactivation.
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + realmUserAccessToken(username))
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", reactivationUserCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    assertThat(agentStatusBody(agentId, hostKey).get("status")).isEqualTo("active");
+  }
+
+  @Test
   void approveWithoutAuth_returns401() {
     given()
         .baseUri(issuerUrl())
@@ -255,6 +400,29 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
           + " body=" + resp.getBody().asString());
     }
     return resp.jsonPath().getString("access_token");
+  }
+
+  private static String registerAutoCapability(String name) {
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Auto-approved capability",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, name, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+    return name;
   }
 
   private static String registerApprovalRequiredCapability(String name) {
