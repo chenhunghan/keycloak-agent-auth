@@ -10,7 +10,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  */
 public final class PostgresSupport {
 
-  static final String POSTGRES_IMAGE = "postgres:16-alpine";
+  static final String POSTGRES_IMAGE = "postgres:18-alpine";
   static final String POSTGRES_ALIAS = "agent-auth-postgres";
   static final String DB_NAME = "keycloak";
   static final String DB_USER = "keycloak";

@@ -1447,7 +1447,12 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/agents/" + agentId + "/capabilities/" + pollCap + "/approve")
         .then()
         .statusCode(200)
-        .body("status", equalTo("active"));
+        .body("status", equalTo("active"))
+        // Per AAP §3.3.1, admin-mediated approval must record the approver's user id in
+        // granted_by (not a literal string), separate from user_id (the end-user context).
+        .body("granted_by",
+            org.hamcrest.Matchers.matchesPattern(
+                "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
 
     String pollingJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
 

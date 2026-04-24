@@ -272,7 +272,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (registeredCap.containsKey("output")) {
       targetGrant.put("output", registeredCap.get("output"));
     }
-    targetGrant.put("granted_by", "admin");
+    targetGrant.put("granted_by", approverUserId());
     targetGrant.remove("status_url");
 
     boolean hasPendingGrant = false;
@@ -366,6 +366,18 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (auth != null) {
       auth.realm().requireManageRealm();
     }
+  }
+
+  /**
+   * Identity to record in {@code granted_by} for admin-mediated approvals. Per AAP §3.3.1,
+   * {@code granted_by} records the admin or reviewer who approved a grant, which is distinct from
+   * {@code user_id} (the end-user on whose behalf the agent acts).
+   */
+  private String approverUserId() {
+    if (auth != null && auth.adminAuth() != null && auth.adminAuth().getUser() != null) {
+      return auth.adminAuth().getUser().getId();
+    }
+    return "admin";
   }
 
   private void emitAdminEvent(String resourcePath, OperationType operation,
