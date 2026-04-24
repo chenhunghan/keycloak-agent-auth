@@ -1,8 +1,10 @@
 package com.github.chh.keycloak.agentauth;
 
 import com.github.chh.keycloak.agentauth.storage.AgentAuthStorage;
+import com.nimbusds.jose.jwk.OctetKeyPair;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -290,6 +292,74 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     emitAdminEvent("agent-auth/agent/" + id + "/capability/" + capability + "/approve",
         OperationType.ACTION, targetGrant);
     return Response.ok(targetGrant).build();
+  }
+
+  @POST
+  @Path("hosts")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response preRegisterHost(Map<String, Object> requestBody) {
+    requireManageRealm();
+    if (requestBody == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
+    }
+
+    Object rawKey = requestBody.get("host_public_key");
+    if (!(rawKey instanceof Map)) {
+      return Response.status(400).entity(Map.of("error", "invalid_request", "message",
+          "Missing host_public_key")).build();
+    }
+    Map<String, Object> hostPublicKeyMap = (Map<String, Object>) rawKey;
+
+    String hostId;
+    try {
+      hostId = OctetKeyPair.parse(hostPublicKeyMap).computeThumbprint().toString();
+    } catch (Exception e) {
+      return Response.status(400).entity(Map.of("error", "invalid_request", "message",
+          "Invalid host_public_key")).build();
+    }
+
+    AgentAuthStorage storage = storage();
+    if (storage.getHost(hostId) != null) {
+      return Response.status(409).entity(Map.of("error", "host_exists", "message",
+          "Host already registered")).build();
+    }
+
+    String nowTs = Instant.now().toString();
+    Map<String, Object> hostData = new HashMap<>();
+    hostData.put("host_id", hostId);
+    hostData.put("public_key", hostPublicKeyMap);
+    hostData.put("status", "active");
+    hostData.put("created_at", nowTs);
+    hostData.put("updated_at", nowTs);
+
+    Object name = requestBody.get("name");
+    if (name instanceof String && !((String) name).isBlank()) {
+      hostData.put("name", name);
+    }
+    Object description = requestBody.get("description");
+    if (description instanceof String && !((String) description).isBlank()) {
+      hostData.put("description", description);
+    }
+
+    storage.putHost(hostId, hostData);
+    emitAdminEvent("agent-auth/host/" + hostId, OperationType.CREATE, hostData);
+    return Response.status(201).entity(hostData).build();
+  }
+
+  @GET
+  @Path("hosts/{id}")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getHost(@PathParam("id") String id) {
+    requireManageRealm();
+    Map<String, Object> hostData = storage().getHost(id);
+    if (hostData == null) {
+      return Response.status(404).entity(Map.of("error", "host_not_found",
+          "message", "Host not found")).build();
+    }
+    return Response.ok(hostData).build();
   }
 
   private void requireManageRealm() {
