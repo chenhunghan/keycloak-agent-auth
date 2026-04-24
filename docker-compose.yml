@@ -3,11 +3,7 @@ services:
     build: .
     ports:
       - "8080:8080"
-      - "5005:5005"
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      DEBUG: "true"
-      DEBUG_PORT: "*:5005"
-      DEBUG_SUSPEND: "n"
     command: ["start-dev"]
