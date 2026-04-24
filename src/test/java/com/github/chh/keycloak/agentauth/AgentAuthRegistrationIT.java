@@ -3,6 +3,7 @@ package com.github.chh.keycloak.agentauth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -10,12 +11,19 @@ import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
 import com.github.chh.keycloak.agentauth.support.TestJwts;
 import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
+import com.sun.net.httpserver.HttpServer;
 import io.restassured.http.ContentType;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.keycloak.util.JsonSerialization;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.testcontainers.Testcontainers;
 
 /**
  * Integration tests for {@code POST /agent/register} and related registration flows.
@@ -61,11 +69,40 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
   private static String activeCapability;
   private static String constrainedCapability;
   private static String pendingCapability;
+  private static OctetKeyPair agentJwksHostKey;
+  private static OctetKeyPair agentJwksAgentKey;
+  private static String agentJwksKid;
+  private static String agentJwksUrl;
+  private static HttpServer agentJwksServer;
+  private static OctetKeyPair hostJwksHostKey;
+  private static OctetKeyPair hostJwksAgentKey;
+  private static String hostJwksKid;
+  private static String hostJwksUrl;
+  private static HttpServer hostJwksServer;
 
   @BeforeAll
   static void generateKeysAndRegisterCapabilities() {
     hostKey = TestKeys.generateEd25519();
     agentKey = TestKeys.generateEd25519();
+    agentJwksHostKey = TestKeys.generateEd25519();
+    agentJwksAgentKey = TestKeys.generateEd25519();
+    agentJwksKid = "agent-kid-" + UUID.randomUUID();
+    hostJwksHostKey = TestKeys.generateEd25519();
+    hostJwksAgentKey = TestKeys.generateEd25519();
+    hostJwksKid = "host-kid-" + UUID.randomUUID();
+
+    try {
+      agentJwksServer = startJwksServer(agentJwksAgentKey, agentJwksKid);
+      hostJwksServer = startJwksServer(hostJwksHostKey, hostJwksKid);
+    } catch (Exception e) {
+      throw new AssertionError("Failed to start JWKS test servers", e);
+    }
+    Testcontainers.exposeHostPorts(agentJwksServer.getAddress().getPort());
+    Testcontainers.exposeHostPorts(hostJwksServer.getAddress().getPort());
+    agentJwksUrl = "http://host.testcontainers.internal:"
+        + agentJwksServer.getAddress().getPort() + "/jwks";
+    hostJwksUrl = "http://host.testcontainers.internal:"
+        + hostJwksServer.getAddress().getPort() + "/jwks";
 
     String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
     activeCapability = "check_balance_" + suffix;
@@ -75,6 +112,16 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     registerCapability(activeCapability, "Check account balance", false);
     registerCapability(constrainedCapability, "Transfer funds", false);
     registerCapability(pendingCapability, "Transfer funds with approval", true);
+  }
+
+  @AfterAll
+  static void stopJwksServers() {
+    if (agentJwksServer != null) {
+      agentJwksServer.stop(0);
+    }
+    if (hostJwksServer != null) {
+      hostJwksServer.stop(0);
+    }
   }
 
   private static void registerCapability(
@@ -107,6 +154,26 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .post("/capabilities")
         .then()
         .statusCode(201);
+  }
+
+  private static HttpServer startJwksServer(OctetKeyPair key, String kid) throws Exception {
+    Map<String, Object> jwk = new HashMap<>(key.toPublicJWK().toJSONObject());
+    jwk.put("kid", kid);
+    jwk.put("alg", "EdDSA");
+    jwk.put("use", "sig");
+    byte[] jwks = JsonSerialization.writeValueAsString(Map.of("keys", List.of(jwk)))
+        .getBytes(StandardCharsets.UTF_8);
+
+    HttpServer server = HttpServer.create(new InetSocketAddress("0.0.0.0", 0), 0);
+    server.createContext("/jwks", exchange -> {
+      exchange.getResponseHeaders().add("Content-Type", "application/json");
+      exchange.getResponseHeaders().add("Cache-Control", "max-age=60, public");
+      exchange.sendResponseHeaders(200, jwks.length);
+      exchange.getResponseBody().write(jwks);
+      exchange.close();
+    });
+    server.start();
+    return server;
   }
 
   /**
@@ -148,6 +215,36 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .body("host_id", notNullValue())
         .body("name", equalTo("Test Agent"))
         .body("mode", equalTo("delegated"))
+        .body("status", equalTo("active"))
+        .body("agent_capability_grants", hasSize(0));
+  }
+
+  /**
+   * §5.3 defines {@code capabilities} as optional. If omitted, the server creates the agent with no
+   * initial capability grants so the agent can request capabilities later via
+   * {@code POST /agent/request-capability}.
+   */
+  @Test
+  void registerAgentWithOmittedCapabilitiesCreatesEmptyGrantSet() {
+    OctetKeyPair noCapsAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, noCapsAgentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "No Initial Capabilities Agent",
+              "host_name": "test-host",
+              "mode": "delegated",
+              "reason": "Capabilities are requested later"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
         .body("status", equalTo("active"))
         .body("agent_capability_grants", hasSize(0));
   }
@@ -1200,10 +1297,28 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoPreferredMethodHintIsReflectedInApprovalObject() {
-    /*
-     * TODO: register with preferred_method="device_authorization" and assert response
-     * approval.method == "device_authorization"
-     */
+    OctetKeyPair preferredAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, preferredAgentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Preferred Method Agent",
+              "host_name": "test-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "preferred_method": "device_authorization"
+            }
+            """, pendingCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .body("approval.method", equalTo("device_authorization"));
   }
 
   /**
@@ -1217,10 +1332,27 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoLoginHintIsForwardedToApprovalFlow() {
-    /*
-     * TODO: register with login_hint="user@example.com" and verify the hint appears in the pending
-     * approval object or is otherwise plumbed through
-     */
+    OctetKeyPair loginHintAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, loginHintAgentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Login Hint Agent",
+              "host_name": "test-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "login_hint": "user@example.com"
+            }
+            """, pendingCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("approval.login_hint", equalTo("user@example.com"));
   }
 
   /**
@@ -1233,10 +1365,27 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoBindingMessageAppearsInApprovalInteraction() {
-    /*
-     * TODO: register with binding_message="Approve my agent for account check" and verify the
-     * message is echoed in the approval response or surfaced during user flow
-     */
+    OctetKeyPair bindingMessageAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, bindingMessageAgentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Binding Message Agent",
+              "host_name": "test-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "binding_message": "Approve my agent for account check"
+            }
+            """, pendingCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("approval.binding_message", equalTo("Approve my agent for account check"));
   }
 
   /**
@@ -1252,16 +1401,82 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoDeniedRegistrationTransitionsAgentToRejectedState() {
-    /*
-     * TODO: place an agent in pending, simulate user denial via admin/approval endpoint, then
-     * verify agent status == "rejected" and any subsequent auth returns agent_rejected
-     */
+    OctetKeyPair rejectedAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, rejectedAgentKey, issuerUrl());
+
+    String rejectedAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Rejected Registration Agent",
+              "host_name": "test-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "Denied registration test"
+            }
+            """, pendingCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .extract()
+        .path("agent_id");
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "reason": "User denied registration"
+            }
+            """)
+        .when()
+        .post("/agents/" + rejectedAgentId + "/reject")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("rejected"))
+        .body("agent_capability_grants[0].status", equalTo("denied"))
+        .body("agent_capability_grants[0].reason", equalTo("User denied registration"));
+
+    String statusJwt = TestJwts.hostJwt(hostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + statusJwt)
+        .queryParam("agent_id", rejectedAgentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("rejected"))
+        .body("agent_capability_grants[0].status", equalTo("denied"))
+        .body("agent_capability_grants[0].reason", equalTo("User denied registration"));
+
+    String agentJwt = TestJwts.agentJwt(hostKey, rejectedAgentKey, rejectedAgentId, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "Rejected agent must not request more access"
+            }
+            """, activeCapability))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("agent_rejected"));
   }
 
   /**
-   * When a server does not support the {@code autonomous} mode (i.e. it is not advertised in
-   * discovery), a registration request with {@code mode: "autonomous"} MUST be rejected with HTTP
-   * 400 and error code {@code unsupported_mode}.
+   * When a server advertises {@code autonomous} in discovery, a registration request with
+   * {@code mode: "autonomous"} must be accepted. Unsupported mode rejection is covered separately
+   * by malformed/unknown mode tests because this provider intentionally advertises autonomous mode.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#22-agent-modes">§2.2
    *      Agent Modes — servers MUST reject unsupported modes</a>
@@ -1270,11 +1485,36 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    *      Agent Registration — mode validation</a>
    */
   @Test
-  void todoAutonomousModeRejectedWhenNotAdvertisedInDiscovery() {
-    /*
-     * TODO: configure a realm that does not advertise autonomous mode in its discovery document,
-     * then verify POST /agent/register with mode=autonomous returns 400 unsupported_mode
-     */
+  void autonomousModeAdvertisedByDiscoveryCanRegister() {
+    given()
+        .baseUri(realmUrl())
+        .when()
+        .get("/.well-known/agent-configuration")
+        .then()
+        .statusCode(200)
+        .body("modes", hasItem("autonomous"));
+
+    OctetKeyPair autonomousAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, autonomousAgentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Advertised Autonomous Agent",
+              "host_name": "test-host",
+              "capabilities": [],
+              "mode": "autonomous"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("mode", equalTo("autonomous"))
+        .body("status", equalTo("active"));
   }
 
   /**
@@ -1289,11 +1529,29 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    *      Host JWT Verification — agent key extraction (step 9)</a>
    */
   @Test
-  void todoRegistrationWithAgentJwksUrlSucceeds() {
-    /*
-     * TODO: build a host+jwt carrying agent_jwks_url and agent_kid (no agent_public_key), post to
-     * /agent/register, and verify 200 with a valid agent_id
-     */
+  void registrationWithAgentJwksUrlSucceeds() {
+    String hostJwt = TestJwts.hostJwtForRegistrationWithAgentJwksUrl(
+        agentJwksHostKey, agentJwksUrl, agentJwksKid, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Agent JWKS Registration",
+              "host_name": "jwks-host",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("agent_id", notNullValue())
+        .body("status", equalTo("active"))
+        .body("agent_capability_grants", hasSize(0));
   }
 
   /**
@@ -1308,11 +1566,29 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    *      JWT — host_jwks_url alternative to host_public_key</a>
    */
   @Test
-  void todoRegistrationWithHostJwksUrlSucceeds() {
-    /*
-     * TODO: build a host+jwt carrying host_jwks_url and kid (no host_public_key), serve the JWKS
-     * from a test HTTP server, post to /agent/register, and verify 200
-     */
+  void registrationWithHostJwksUrlSucceeds() {
+    String hostJwt = TestJwts.hostJwtForRegistrationWithHostJwksUrl(
+        hostJwksHostKey, hostJwksAgentKey, hostJwksUrl, hostJwksKid, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Host JWKS Registration",
+              "host_name": "jwks-host",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("agent_id", notNullValue())
+        .body("status", equalTo("active"))
+        .body("agent_capability_grants", hasSize(0));
   }
 
   /**
@@ -1446,10 +1722,51 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoDeniedGrantIncludesReasonField() {
-    /*
-     * TODO: register with a capability that the server is configured to deny outright, then verify
-     * agent_capability_grants[0].status == "denied" and reason is present
-     */
+    String deniedCap = "denied_reason_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Auto-denied capability for reason testing",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "auto_deny": true,
+              "location": "https://resource.example.test/capabilities/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, deniedCap, deniedCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    OctetKeyPair deniedReasonAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, deniedReasonAgentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Denied Reason Agent",
+              "host_name": "test-host",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, deniedCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants[0].status", equalTo("denied"))
+        .body("agent_capability_grants[0].reason", notNullValue());
   }
 
   /**
@@ -1462,10 +1779,56 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoRevokedHostCannotRegisterNewAgent() {
-    /*
-     * TODO: register a host, revoke it via the admin API, then attempt to register a new agent with
-     * a JWT from that host and verify 401
-     */
+    OctetKeyPair revokedHostKey = TestKeys.generateEd25519();
+    OctetKeyPair firstAgentKey = TestKeys.generateEd25519();
+    String initialJwt = TestJwts.hostJwtForRegistration(revokedHostKey, firstAgentKey,
+        issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + initialJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Host To Revoke Agent",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(revokedHostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body("{}")
+        .when()
+        .post("/host/revoke")
+        .then()
+        .statusCode(200);
+
+    String newRegistrationJwt = TestJwts.hostJwtForRegistration(revokedHostKey,
+        TestKeys.generateEd25519(), issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + newRegistrationJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Rejected New Agent",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("host_revoked"));
   }
 
   // -------------------------------------------------------------------------

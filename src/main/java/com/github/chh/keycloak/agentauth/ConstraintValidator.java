@@ -58,18 +58,18 @@ public class ConstraintValidator {
         throw new IllegalArgumentException("Unknown constraint operator: " + operator);
       }
       boolean violated = false;
-      if ("max".equals(operator) && actualValue instanceof Number) {
-        violated = ((Number) actualValue).doubleValue() > ((Number) opValue).doubleValue();
-      } else if ("min".equals(operator) && actualValue instanceof Number) {
-        violated = ((Number) actualValue).doubleValue() < ((Number) opValue).doubleValue();
-      } else if ("in".equals(operator) && actualValue != null) {
-        @SuppressWarnings("unchecked")
-        List<Object> inList = (List<Object>) opValue;
-        violated = !inList.contains(actualValue);
-      } else if ("not_in".equals(operator) && actualValue != null) {
-        @SuppressWarnings("unchecked")
-        List<Object> notInList = (List<Object>) opValue;
-        violated = notInList.contains(actualValue);
+      if ("max".equals(operator)) {
+        violated = !(actualValue instanceof Number) || !(opValue instanceof Number)
+            || ((Number) actualValue).doubleValue() > ((Number) opValue).doubleValue();
+      } else if ("min".equals(operator)) {
+        violated = !(actualValue instanceof Number) || !(opValue instanceof Number)
+            || ((Number) actualValue).doubleValue() < ((Number) opValue).doubleValue();
+      } else if ("in".equals(operator)) {
+        violated = !(opValue instanceof List) || actualValue == null
+            || !((List<?>) opValue).contains(actualValue);
+      } else if ("not_in".equals(operator)) {
+        violated = !(opValue instanceof List)
+            || (actualValue != null && ((List<?>) opValue).contains(actualValue));
       }
       if (violated) {
         violations.add(new ConstraintViolation(field, ops, actualValue));

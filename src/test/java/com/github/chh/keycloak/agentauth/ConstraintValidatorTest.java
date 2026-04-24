@@ -238,6 +238,28 @@ class ConstraintValidatorTest {
   }
 
   @Test
+  void missingArgumentForOperatorConstraintIsViolation() {
+    Map<String, Object> constraints = Map.of("amount", Map.of("max", 1000));
+    Map<String, Object> arguments = Map.of();
+
+    List<ConstraintViolation> violations = validator.validate(constraints, arguments);
+
+    assertThat(violations).hasSize(1);
+    assertThat(violations.get(0).field()).isEqualTo("amount");
+  }
+
+  @Test
+  void wrongTypeForNumericOperatorConstraintIsViolation() {
+    Map<String, Object> constraints = Map.of("amount", Map.of("max", 1000));
+    Map<String, Object> arguments = Map.of("amount", "high");
+
+    List<ConstraintViolation> violations = validator.validate(constraints, arguments);
+
+    assertThat(violations).hasSize(1);
+    assertThat(violations.get(0).field()).isEqualTo("amount");
+  }
+
+  @Test
   void extraArgumentsWithoutConstraintsAreAllowed() {
     Map<String, Object> constraints = Map.of("amount", Map.of("max", 1000));
     Map<String, Object> arguments = Map.of(

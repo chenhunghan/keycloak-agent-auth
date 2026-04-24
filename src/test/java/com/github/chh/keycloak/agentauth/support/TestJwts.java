@@ -78,6 +78,63 @@ public final class TestJwts {
     }
   }
 
+  /** Builds a registration host+jwt that references the agent key through agent_jwks_url. */
+  public static String hostJwtForRegistrationWithAgentJwksUrl(
+      OctetKeyPair hostKey, String agentJwksUrl, String agentKid, String audience) {
+    try {
+      JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
+          .type(new JOSEObjectType("host+jwt"))
+          .build();
+
+      long now = System.currentTimeMillis();
+      JWTClaimsSet claims = new JWTClaimsSet.Builder()
+          .issuer(TestKeys.thumbprint(hostKey))
+          .audience(audience)
+          .issueTime(new Date(now))
+          .expirationTime(new Date(now + 60_000))
+          .jwtID("h-" + UUID.randomUUID())
+          .claim("host_public_key", hostKey.toPublicJWK().toJSONObject())
+          .claim("agent_jwks_url", agentJwksUrl)
+          .claim("agent_kid", agentKid)
+          .build();
+
+      SignedJWT jwt = new SignedJWT(header, claims);
+      jwt.sign(new Ed25519Signer(hostKey));
+      return jwt.serialize();
+    } catch (JOSEException e) {
+      throw new AssertionError("Failed to create host JWT for agent JWKS registration", e);
+    }
+  }
+
+  /** Builds a registration host+jwt that references the host signing key through host_jwks_url. */
+  public static String hostJwtForRegistrationWithHostJwksUrl(
+      OctetKeyPair hostKey, OctetKeyPair agentKey, String hostJwksUrl, String hostKid,
+      String audience) {
+    try {
+      JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
+          .type(new JOSEObjectType("host+jwt"))
+          .keyID(hostKid)
+          .build();
+
+      long now = System.currentTimeMillis();
+      JWTClaimsSet claims = new JWTClaimsSet.Builder()
+          .issuer(TestKeys.thumbprint(hostKey))
+          .audience(audience)
+          .issueTime(new Date(now))
+          .expirationTime(new Date(now + 60_000))
+          .jwtID("h-" + UUID.randomUUID())
+          .claim("host_jwks_url", hostJwksUrl)
+          .claim("agent_public_key", agentKey.toPublicJWK().toJSONObject())
+          .build();
+
+      SignedJWT jwt = new SignedJWT(header, claims);
+      jwt.sign(new Ed25519Signer(hostKey));
+      return jwt.serialize();
+    } catch (JOSEException e) {
+      throw new AssertionError("Failed to create host JWT for host JWKS registration", e);
+    }
+  }
+
   /**
    * Builds a host+jwt for non-registration operations (status, revoke, reactivate, key rotation).
    *

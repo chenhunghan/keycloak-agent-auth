@@ -12,7 +12,6 @@ import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import io.restassured.http.ContentType;
 import java.util.UUID;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -106,8 +105,8 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
 
   /**
    * Verifies that {@code GET /agent/status} returns full agent metadata including {@code agent_id},
-   * {@code host_id}, {@code name}, {@code mode}, {@code status}, and {@code agent_capability_grants}
-   * for an active agent.
+   * {@code host_id}, {@code name}, {@code mode}, {@code status}, and
+   * {@code agent_capability_grants} for an active agent.
    *
    * <p>
    * Per §5.5, the status endpoint must return comprehensive lifecycle metadata and all capability
@@ -2348,14 +2347,81 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
    * @see <a href="https://agent-auth-protocol.com/docs/errors">Error Codes – agent_rejected
    *      (agent_revoked family)</a>
    */
-  @org.junit.jupiter.api.Disabled("Requires rejected state support — no admin endpoint exists yet to transition an agent to 'rejected'")
   @Test
   void todoReactivateRejectedAgentReturns403() {
-    /*
-     * TODO: register an agent with an approval-required capability, have the admin deny the
-     * approval (transitioning the agent to "rejected"), then call POST /agent/reactivate and assert
-     * 403 agent_rejected.
-     */
+    String rejectedCap = "rejected_reactivate_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Requires approval before rejection",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "location": "https://resource.example.test/capabilities/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, rejectedCap, rejectedCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    OctetKeyPair rejectedHostKey = TestKeys.generateEd25519();
+    OctetKeyPair rejectedAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(rejectedHostKey, rejectedAgentKey,
+        issuerUrl());
+
+    String rejectedAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Rejected Agent",
+              "host_name": "rejected-host",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, rejectedCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .extract()
+        .path("agent_id");
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body("{\"reason\":\"User denied approval\"}")
+        .when()
+        .post("/agents/" + rejectedAgentId + "/reject")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("rejected"));
+
+    String hostJwt = TestJwts.hostJwt(rejectedHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "agent_id": "%s"
+            }
+            """, rejectedAgentId))
+        .when()
+        .post("/agent/reactivate")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("agent_rejected"));
   }
 
   /**

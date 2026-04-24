@@ -2,7 +2,6 @@ package com.github.chh.keycloak.agentauth;
 
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -18,6 +17,8 @@ import io.restassured.http.ContentType;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1580,10 +1581,13 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .body("error", equalTo("invalid_request"))
         .body("message", notNullValue());
 
+    String secondAgentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        issuerUrl() + "/capability/execute");
+
     // Whitespace-only capability name
     given()
         .baseUri(issuerUrl())
-        .header("Authorization", "Bearer " + agentJwt)
+        .header("Authorization", "Bearer " + secondAgentJwt)
         .contentType(ContentType.JSON)
         .body("""
             {
@@ -1630,6 +1634,36 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .statusCode(401)
         .body("error", equalTo("invalid_jwt"))
         .body("message", notNullValue());
+  }
+
+  /**
+   * §4.3 says an optional {@code capabilities} claim narrows the JWT to that capability set. An
+   * execute request for any capability outside that claim must be rejected before the upstream
+   * capability service is called.
+   */
+  @Test
+  void executeWithCapabilityOutsideJwtScopeReturns403() {
+    String scopedJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        issuerUrl() + "/capability/execute", Map.of("capabilities", List.of(limitedCapability)));
+    int callsBefore = syncExecutions.get();
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + scopedJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capability": "%s",
+              "arguments": {}
+            }
+            """, syncCapability))
+        .when()
+        .post("/capability/execute")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("capability_not_granted"));
+
+    assertThat(syncExecutions.get()).isEqualTo(callsBefore);
   }
 
   /**
@@ -1886,9 +1920,8 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         issuerUrl() + "/capability/execute");
     int callsBefore = limitedExecutions.get();
 
-    // limitedCapability has constraint: amount max 1000.
-    // Omitting "amount" entirely: ConstraintValidator skips numeric checks for null actual values,
-    // so no violation is raised and the request is forwarded upstream (returns 200).
+    // limitedCapability has constraint: amount max 1000. Omitting the constrained field cannot
+    // satisfy the grant.
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -1902,12 +1935,10 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .when()
         .post("/capability/execute")
         .then()
-        .statusCode(anyOf(equalTo(200), equalTo(403)));
+        .statusCode(403)
+        .body("error", equalTo("constraint_violated"));
 
-    // The upstream must have been called if 200 was returned (no server error)
-    // and must not have been called if 403 was returned.
-    // Either outcome is acceptable; what must NOT happen is a 500.
-    assertThat(limitedExecutions.get()).isGreaterThanOrEqualTo(callsBefore);
+    assertThat(limitedExecutions.get()).isEqualTo(callsBefore);
   }
 
   /**
@@ -1926,10 +1957,9 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
         issuerUrl() + "/capability/execute");
 
-    // limitedCapability has constraint: amount max 1000.
-    // Sending amount as a string: ConstraintValidator's "max" branch requires actualValue
-    // instanceof Number, which is false for a string, so no violation is raised.
-    // The request must not produce a 500 server error.
+    // limitedCapability has constraint: amount max 1000. A string cannot satisfy a numeric max
+    // constraint, so the server must reject before forwarding upstream.
+    int callsBefore = limitedExecutions.get();
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -1945,6 +1975,9 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .when()
         .post("/capability/execute")
         .then()
-        .statusCode(anyOf(equalTo(200), equalTo(403)));
+        .statusCode(403)
+        .body("error", equalTo("constraint_violated"));
+
+    assertThat(limitedExecutions.get()).isEqualTo(callsBefore);
   }
 }

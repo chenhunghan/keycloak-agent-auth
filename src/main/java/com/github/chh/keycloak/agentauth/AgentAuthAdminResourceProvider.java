@@ -9,6 +9,7 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -122,7 +123,9 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (rawBody != null && !rawBody.isBlank()) {
       try {
         requestBody = new com.fasterxml.jackson.databind.ObjectMapper()
-            .readValue(rawBody, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            .readValue(rawBody,
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+                });
       } catch (Exception ignored) {
         // ignore malformed body
       }
@@ -148,6 +151,111 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       }
     }
     return Response.ok(agentData).build();
+  }
+
+  @POST
+  @Path("agents/{id}/reject")
+  @Consumes(MediaType.WILDCARD)
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response rejectAgent(@PathParam("id") String id, String rawBody) {
+    Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
+    if (agentData == null) {
+      return Response.status(404).entity(Map.of("error", "not_found")).build();
+    }
+
+    String reason = "Approval denied";
+    if (rawBody != null && !rawBody.isBlank()) {
+      try {
+        Map<String, Object> requestBody = new com.fasterxml.jackson.databind.ObjectMapper()
+            .readValue(rawBody,
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+                });
+        Object requestedReason = requestBody.get("reason");
+        if (requestedReason instanceof String && !((String) requestedReason).isBlank()) {
+          reason = (String) requestedReason;
+        }
+      } catch (Exception ignored) {
+        // ignore malformed body
+      }
+    }
+
+    agentData.put("status", "rejected");
+    agentData.put("rejection_reason", reason);
+    agentData.put("updated_at", Instant.now().toString());
+    List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
+        .get("agent_capability_grants");
+    if (grants != null) {
+      for (Map<String, Object> grant : grants) {
+        if ("pending".equals(grant.get("status"))) {
+          grant.put("status", "denied");
+          grant.put("reason", reason);
+          grant.remove("status_url");
+        }
+      }
+    }
+    return Response.ok(agentData).build();
+  }
+
+  @POST
+  @Path("agents/{id}/capabilities/{capability}/approve")
+  @Consumes(MediaType.WILDCARD)
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response approveCapability(@PathParam("id") String id,
+      @PathParam("capability") String capability) {
+    Map<String, Object> agentData = InMemoryRegistry.AGENTS.get(id);
+    if (agentData == null) {
+      return Response.status(404).entity(Map.of("error", "not_found")).build();
+    }
+
+    Map<String, Object> registeredCap = InMemoryRegistry.CAPABILITIES.get(capability);
+    if (registeredCap == null) {
+      return Response.status(404).entity(Map.of("error", "capability_not_found")).build();
+    }
+
+    List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
+        .get("agent_capability_grants");
+    if (grants == null) {
+      return Response.status(404).entity(Map.of("error", "grant_not_found")).build();
+    }
+
+    Map<String, Object> targetGrant = null;
+    for (Map<String, Object> grant : grants) {
+      if (capability.equals(grant.get("capability"))) {
+        targetGrant = grant;
+        break;
+      }
+    }
+    if (targetGrant == null) {
+      return Response.status(404).entity(Map.of("error", "grant_not_found")).build();
+    }
+
+    targetGrant.put("status", "active");
+    targetGrant.put("description", registeredCap.get("description"));
+    if (registeredCap.containsKey("input")) {
+      targetGrant.put("input", registeredCap.get("input"));
+    }
+    if (registeredCap.containsKey("output")) {
+      targetGrant.put("output", registeredCap.get("output"));
+    }
+    targetGrant.put("granted_by", "admin");
+    targetGrant.remove("status_url");
+
+    boolean hasPendingGrant = false;
+    for (Map<String, Object> grant : grants) {
+      if ("pending".equals(grant.get("status"))) {
+        hasPendingGrant = true;
+        break;
+      }
+    }
+    if (!hasPendingGrant && "pending".equals(agentData.get("status"))) {
+      agentData.put("status", "active");
+      agentData.put("activated_at", Instant.now().toString());
+      agentData.remove("approval");
+    }
+    agentData.put("updated_at", Instant.now().toString());
+    return Response.ok(targetGrant).build();
   }
 
   @Override

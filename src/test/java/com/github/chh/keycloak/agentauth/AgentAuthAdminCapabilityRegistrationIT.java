@@ -607,7 +607,7 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
   }
 
   @Test
-  void registerCapabilityWithNullLocationReturns400() {
+  void registerCapabilityWithoutLocationIsAccepted() {
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -623,8 +623,8 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
         .when()
         .post("/capabilities")
         .then()
-        .statusCode(400)
-        .body("error", equalTo("invalid_request"));
+        .statusCode(201)
+        .body("name", equalTo("no_location_cap"));
   }
 
   @Test

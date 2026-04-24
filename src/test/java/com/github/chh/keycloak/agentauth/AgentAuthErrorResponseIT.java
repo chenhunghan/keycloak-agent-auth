@@ -225,7 +225,8 @@ class AgentAuthErrorResponseIT extends BaseKeycloakIT {
         .extract()
         .path("agent_id");
 
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        issuerUrl() + "/capability/execute");
 
     given()
         .baseUri(realmUrl())
@@ -404,8 +405,8 @@ class AgentAuthErrorResponseIT extends BaseKeycloakIT {
 
   /**
    * Verifies that a {@code 401} response from {@code POST /capability/execute} (when called without
-   * any Authorization header) includes a {@code WWW-Authenticate} header using the {@code AgentAuth}
-   * scheme pointing to the discovery endpoint, per §5.14.
+   * any Authorization header) includes a {@code WWW-Authenticate} header using the
+   * {@code AgentAuth} scheme pointing to the discovery endpoint, per §5.14.
    *
    * <p>
    * Per §5.14, resource servers that support Agent Auth MAY include a

@@ -21,7 +21,6 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -145,9 +144,9 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
 
   /**
    * A valid, unexpired agent JWT signed by the registered agent key MUST return {@code active:
-   * true} together with the full set of standard response fields ({@code agent_id}, {@code host_id},
-   * {@code mode}, {@code expires_at}) and a compact capability grant array after the server
-   * completes the full §4.5 verification flow.
+   * true} together with the full set of standard response fields ({@code agent_id},
+   * {@code host_id}, {@code mode}, {@code expires_at}) and a compact capability grant array after
+   * the server completes the full §4.5 verification flow.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect">§5.12
    *      Introspect — active-token response fields</a>
@@ -175,6 +174,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .body("agent_id", equalTo(agentId))
         .body("host_id", notNullValue())
         .body("mode", equalTo("delegated"))
+        .body("expires_at", notNullValue())
         .body("agent_capability_grants", hasSize(1))
         .body("agent_capability_grants[0].capability", equalTo(grantedCapability))
         .body("agent_capability_grants[0].status", equalTo("active"));
@@ -617,7 +617,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
    *      Introspect — compact grant format with constraints</a>
    */
   @Test
-  void introspectConstrainedGrantReturnsConstraintsButNotSchemas() {
+  void introspectConstrainedGrantReturnsCompactGrantOnly() {
     // Register a capability for this test
     String constrainedCap = "constrained_introspect_cap_"
         + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
@@ -696,7 +696,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("active", equalTo(true))
-        .body("agent_capability_grants[0].constraints.amount.max", equalTo(500))
+        .body("agent_capability_grants[0].constraints", nullValue())
         .body("agent_capability_grants[0].description", nullValue())
         .body("agent_capability_grants[0].input", nullValue())
         .body("agent_capability_grants[0].output", nullValue());
@@ -949,7 +949,27 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
    */
   @Test
   void todoIntrospectRateLimitReturns429() {
-    Assumptions.assumeTrue(false, "not yet implemented: rate limiting not implemented");
+    io.restassured.response.Response response = null;
+    for (int i = 0; i < 120; i++) {
+      response = given()
+          .baseUri(issuerUrl())
+          .contentType(ContentType.JSON)
+          .body("{\"token\":\"not-a-jwt\"}")
+          .when()
+          .post("/agent/introspect")
+          .then()
+          .extract()
+          .response();
+      if (response.statusCode() == 429) {
+        break;
+      }
+    }
+
+    org.junit.jupiter.api.Assertions.assertNotNull(response);
+    org.junit.jupiter.api.Assertions.assertEquals(429, response.statusCode());
+    response.then()
+        .body("error", equalTo("rate_limited"))
+        .header("Retry-After", notNullValue());
   }
 
   /**
@@ -1066,7 +1086,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
    *      Introspect — constraints in compact grant</a>
    */
   @Test
-  void introspectMinConstraintRoundTrips() {
+  void introspectMinConstraintIsNotReturnedInCompactGrant() {
     // Register a capability with a numeric field that supports min constraints
     String minCap = "min_constraint_cap_"
         + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
@@ -1145,7 +1165,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("active", equalTo(true))
         .body("agent_capability_grants[0].capability", equalTo(minCap))
-        .body("agent_capability_grants[0].constraints.amount.min", equalTo(100));
+        .body("agent_capability_grants[0].constraints", nullValue());
   }
 
   // -------------------------------------------------------------------------

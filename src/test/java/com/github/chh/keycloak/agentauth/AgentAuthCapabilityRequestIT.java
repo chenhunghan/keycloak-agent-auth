@@ -13,9 +13,10 @@ import com.github.chh.keycloak.agentauth.support.TestJwts;
 import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import io.restassured.http.ContentType;
+import java.time.Instant;
 import java.util.UUID;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -296,9 +297,11 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(200);
 
+    String duplicateRequestJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+
     given()
         .baseUri(issuerUrl())
-        .header("Authorization", "Bearer " + agentJwt)
+        .header("Authorization", "Bearer " + duplicateRequestJwt)
         .contentType(ContentType.JSON)
         .body(String.format("""
             {
@@ -782,11 +785,52 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
    *      §5.4 Request Capability — session TTL extension on success</a>
    */
   @Test
-  void todoSuccessfulRequestExtendsAgentSessionTtl() {
-    /*
-     * TODO: record the agent expiry time before the request, call this endpoint, then fetch agent
-     * status and assert that the new expiry is later than the original.
-     */
+  void todoSuccessfulRequestExtendsAgentSessionTtl() throws InterruptedException {
+    String initialExpiry = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .queryParam("agent_id", agentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("expires_at", notNullValue())
+        .extract()
+        .path("expires_at");
+
+    Thread.sleep(10L);
+
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "TTL extension test"
+            }
+            """, activeCapability))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants[0].status", equalTo("active"));
+
+    String refreshedExpiry = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .queryParam("agent_id", agentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("expires_at", notNullValue())
+        .extract()
+        .path("expires_at");
+
+    Assertions.assertTrue(Instant.parse(refreshedExpiry).isAfter(Instant.parse(initialExpiry)),
+        "A successful capability request must refresh expires_at");
   }
 
   /**
@@ -1066,10 +1110,51 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
    */
   @Test
   void todoEscalatedCapabilitiesAreDroppedOnAgentReactivation() {
-    /*
-     * TODO: escalate a capability, let the agent expire, reactivate via POST /agent/reactivate,
-     * then fetch agent status and assert the escalated capability is no longer in the grant list.
-     */
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "Temporary escalation before reactivation"
+            }
+            """, activeCapability))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants[0].capability", equalTo(activeCapability))
+        .body("agent_capability_grants[0].status", equalTo("active"));
+
+    forceExpireAgent(agentId);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "agent_id": "%s"
+            }
+            """, agentId))
+        .when()
+        .post("/agent/reactivate")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("active"))
+        .body("agent_capability_grants", hasSize(0));
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .queryParam("agent_id", agentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants", hasSize(0));
   }
 
   // ---------------------------------------------------------------------------
@@ -1295,13 +1380,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
    * the {@code status_url} from the grant until approval completes; once the user approves, a GET
    * to that URL MUST return {@code status:"active"} for the grant.
    *
-   * <p>
-   * This test will FAIL until the approval polling endpoint is implemented (TDD).
-   *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
    *      §5.4 Request Capability — approval polling via status_url</a>
    */
-  @Disabled("Requires approval polling endpoint support in the server")
   @Test
   void approvalCompletionTransitionsPendingToActive() {
     String pollCap = "approval_poll_cap_"
@@ -1349,7 +1430,18 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .path("agent_capability_grants[0].status_url");
 
     given()
-        .header("Authorization", "Bearer " + agentJwt)
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .post("/agents/" + agentId + "/capabilities/" + pollCap + "/approve")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("active"));
+
+    String pollingJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+
+    given()
+        .header("Authorization", "Bearer " + pollingJwt)
         .when()
         .get(statusUrl)
         .then()
