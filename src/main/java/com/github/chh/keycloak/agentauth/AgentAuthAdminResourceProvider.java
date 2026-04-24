@@ -362,6 +362,127 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     return Response.ok(hostData).build();
   }
 
+  /**
+   * Links a host to a Keycloak user (AAP §2.9). On link, autonomous agents under the host are
+   * claimed per §2.10 and delegated agents inherit the host's {@code user_id} per §3.2.
+   */
+  @POST
+  @Path("hosts/{id}/link")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response linkHost(@PathParam("id") String hostId, Map<String, Object> requestBody) {
+    requireManageRealm();
+    if (requestBody == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
+    }
+    Object rawUserId = requestBody.get("user_id");
+    if (!(rawUserId instanceof String) || ((String) rawUserId).isBlank()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Missing user_id")).build();
+    }
+    String userId = (String) rawUserId;
+
+    AgentAuthStorage storage = storage();
+    Map<String, Object> hostData = storage.getHost(hostId);
+    if (hostData == null) {
+      return Response.status(404)
+          .entity(Map.of("error", "host_not_found", "message", "Host not found")).build();
+    }
+
+    RealmModel realm = session.getContext().getRealm();
+    if (realm == null || session.users().getUserById(realm, userId) == null) {
+      return Response.status(404)
+          .entity(Map.of("error", "user_not_found", "message", "User not found")).build();
+    }
+
+    Object existingUserId = hostData.get("user_id");
+    if (existingUserId != null && !userId.equals(existingUserId)) {
+      return Response.status(409)
+          .entity(Map.of("error", "host_already_linked",
+              "message", "Host is already linked to a different user"))
+          .build();
+    }
+
+    String nowTs = Instant.now().toString();
+    hostData.put("user_id", userId);
+    hostData.put("updated_at", nowTs);
+    storage.putHost(hostId, hostData);
+
+    // Cascade to agents under this host.
+    for (Map<String, Object> agentData : storage.findAgentsByHost(hostId)) {
+      String agentId = (String) agentData.get("agent_id");
+      String mode = (String) agentData.get("mode");
+      String status = (String) agentData.get("status");
+      boolean terminal = "claimed".equals(status) || "revoked".equals(status)
+          || "rejected".equals(status);
+      if ("autonomous".equals(mode) && !terminal) {
+        // §2.10: claim — status="claimed", revoke grants, attribute to user.
+        agentData.put("status", "claimed");
+        agentData.put("user_id", userId);
+        agentData.put("updated_at", nowTs);
+        List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
+            .get("agent_capability_grants");
+        if (grants != null) {
+          for (Map<String, Object> grant : grants) {
+            if (!"revoked".equals(grant.get("status"))) {
+              grant.put("status", "revoked");
+            }
+          }
+        }
+        storage.putAgent(agentId, agentData);
+      } else if ("delegated".equals(mode)) {
+        // §3.2: agent.user_id is set from host.user_id. Propagate unchanged status.
+        agentData.put("user_id", userId);
+        agentData.put("updated_at", nowTs);
+        storage.putAgent(agentId, agentData);
+      }
+    }
+
+    emitAdminEvent("agent-auth/host/" + hostId + "/link", OperationType.ACTION, hostData);
+    return Response.ok(hostData).build();
+  }
+
+  /**
+   * Unlinks a host. Per AAP §2.9, all delegated agents under the host MUST be revoked — their
+   * authority derived from the now-removed user linkage. Autonomous agents (already {@code claimed}
+   * by the link cascade) are terminal and left alone.
+   */
+  @DELETE
+  @Path("hosts/{id}/link")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response unlinkHost(@PathParam("id") String hostId) {
+    requireManageRealm();
+    AgentAuthStorage storage = storage();
+    Map<String, Object> hostData = storage.getHost(hostId);
+    if (hostData == null) {
+      return Response.status(404)
+          .entity(Map.of("error", "host_not_found", "message", "Host not found")).build();
+    }
+
+    Object existingUserId = hostData.get("user_id");
+    if (existingUserId != null) {
+      String nowTs = Instant.now().toString();
+      for (Map<String, Object> agentData : storage.findAgentsByHost(hostId)) {
+        String agentId = (String) agentData.get("agent_id");
+        String mode = (String) agentData.get("mode");
+        String status = (String) agentData.get("status");
+        if ("delegated".equals(mode) && !"revoked".equals(status) && !"rejected".equals(status)) {
+          agentData.put("status", "revoked");
+          agentData.put("updated_at", nowTs);
+          storage.putAgent(agentId, agentData);
+        }
+      }
+      hostData.remove("user_id");
+      hostData.put("updated_at", nowTs);
+      storage.putHost(hostId, hostData);
+    }
+
+    emitAdminEvent("agent-auth/host/" + hostId + "/unlink", OperationType.ACTION, hostData);
+    return Response.noContent().build();
+  }
+
   private void requireManageRealm() {
     if (auth != null) {
       auth.realm().requireManageRealm();
