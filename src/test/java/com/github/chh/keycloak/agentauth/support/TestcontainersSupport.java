@@ -11,7 +11,7 @@ public final class TestcontainersSupport {
 
   private static final String KEYCLOAK_IMAGE = "quay.io/keycloak/keycloak:26.1.4";
   private static final String DOCKER_API_VERSION = "1.54";
-  private static final String TEST_LIBS_DIR = "target/test-libs";
+  private static final String PROVIDER_LIBS_DIR = "target/provider-libs";
   private static final String TEST_REALM_IMPORT = "realms/agent-auth-test-realm.json";
 
   private TestcontainersSupport() {
@@ -52,11 +52,11 @@ public final class TestcontainersSupport {
   }
 
   private static List<File> providerLibs() {
-    Path libsDir = Path.of(TEST_LIBS_DIR);
+    Path libsDir = Path.of(PROVIDER_LIBS_DIR);
     if (!Files.isDirectory(libsDir)) {
       throw new IllegalStateException(
           "Expected provider libs at " + libsDir.toAbsolutePath()
-              + ". Run `mvn process-test-classes` (or any later phase) to populate it via "
+              + ". Run `mvn package` (or any later phase) to populate it via "
               + "maven-dependency-plugin:copy-dependencies.");
     }
     try (Stream<Path> paths = Files.list(libsDir)) {

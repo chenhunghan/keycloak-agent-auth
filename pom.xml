@@ -212,9 +212,11 @@
                 </executions>
             </plugin>
 
-            <!-- Copy runtime libs Keycloak doesn't supply (nimbus, tink) into target/test-libs
-                 so ITs can mount them into the Keycloak container deterministically, instead of
-                 scavenging ~/.m2/repository. -->
+            <!-- Copy runtime libs Keycloak doesn't supply (nimbus, tink) into target/provider-libs
+                 as the single source of truth consumed by both the ITs (mounted via
+                 withProviderLibsFrom) and the Dockerfile (COPY into /opt/keycloak/providers).
+                 Bound to `package` so it runs for `mvn package`, `mvn verify`, and `mvn package
+                 -Pquick`; ITs run after `package` in the default lifecycle. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
@@ -222,12 +224,12 @@
                 <executions>
                     <execution>
                         <id>copy-provider-libs</id>
-                        <phase>process-test-classes</phase>
+                        <phase>package</phase>
                         <goals>
                             <goal>copy-dependencies</goal>
                         </goals>
                         <configuration>
-                            <outputDirectory>${project.build.directory}/test-libs</outputDirectory>
+                            <outputDirectory>${project.build.directory}/provider-libs</outputDirectory>
                             <includeArtifactIds>nimbus-jose-jwt,tink</includeArtifactIds>
                             <includeScope>runtime</includeScope>
                             <overWriteReleases>false</overWriteReleases>

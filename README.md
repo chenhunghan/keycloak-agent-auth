@@ -193,6 +193,8 @@ docker compose up
 
 Keycloak will be available at `http://localhost:8080` with the extension loaded. The agent-auth endpoints are at `/realms/{realm}/agent-auth/...`.
 
+The image bundles the extension JAR plus its runtime libs (nimbus-jose-jwt, tink) from `target/provider-libs/`, populated by `mvn package` via `maven-dependency-plugin`. The integration tests mount the same directory into their Keycloak container, so the container and test harness share one source of truth for runtime deps.
+
 ### Project structure
 
 ```
