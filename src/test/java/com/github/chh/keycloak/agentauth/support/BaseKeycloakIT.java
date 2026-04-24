@@ -15,12 +15,16 @@ import org.junit.jupiter.api.AfterAll;
  */
 public abstract class BaseKeycloakIT {
 
-  protected static final String REALM = "master";
+  /** Dedicated, hermetic test realm imported on container startup. */
+  protected static final String REALM = "agent-auth-test";
+
+  /** Realm hosting the Keycloak admin user; used to mint admin tokens. */
+  private static final String ADMIN_REALM = "master";
 
   @SuppressWarnings("resource")
   protected static KeycloakContainer KEYCLOAK;
 
-  /** Base URL for realm-scoped requests, e.g. http://localhost:PORT/realms/master */
+  /** Base URL for realm-scoped requests, e.g. http://localhost:PORT/realms/agent-auth-test */
   protected static String realmUrl() {
     ensureStarted();
     return KEYCLOAK.getAuthServerUrl() + "/realms/" + REALM;
@@ -33,18 +37,23 @@ public abstract class BaseKeycloakIT {
 
   /**
    * Base URL for admin extension requests, e.g.
-   * http://localhost:PORT/admin/realms/master/agent-auth
+   * http://localhost:PORT/admin/realms/agent-auth-test/agent-auth
    */
   protected static String adminApiUrl() {
     ensureStarted();
     return KEYCLOAK.getAuthServerUrl() + "/admin/realms/" + REALM + "/agent-auth";
   }
 
-  /** Fetches an admin access token for Keycloak's admin REST API. */
+  /**
+   * Fetches an admin access token for Keycloak's admin REST API. The token is minted from the
+   * {@code master} realm (where the admin user lives) regardless of the test realm, and is accepted
+   * cross-realm because the admin role grants realm-admin on all realms.
+   */
   protected static String adminAccessToken() {
     ensureStarted();
+    String adminTokenUrl = KEYCLOAK.getAuthServerUrl() + "/realms/" + ADMIN_REALM;
     return given()
-        .baseUri(realmUrl())
+        .baseUri(adminTokenUrl)
         .contentType(ContentType.URLENC)
         .formParam("grant_type", "password")
         .formParam("client_id", "admin-cli")
