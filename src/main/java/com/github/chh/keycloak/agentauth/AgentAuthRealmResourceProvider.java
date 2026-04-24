@@ -2793,6 +2793,37 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
     }
 
+    // §8.11: "Servers MUST require proof of physical presence (WebAuthn, hardware key) or use
+    // an out-of-band approval channel (CIBA on a separate device) when approving capabilities
+    // that can modify data or perform actions on behalf of the user." We enforce this on the
+    // subset of pending grants that will actually flip to active.
+    if (approve && grants != null) {
+      boolean anyWriteCapable = false;
+      for (Map<String, Object> grant : grants) {
+        if (!"pending".equals(grant.get("status"))) {
+          continue;
+        }
+        String capName = (String) grant.get("capability");
+        if (approvedSubset != null && !approvedSubset.contains(capName)) {
+          continue;
+        }
+        Map<String, Object> regCap = storage.getCapability(capName);
+        if (regCap != null && Boolean.TRUE.equals(regCap.get("write_capable"))) {
+          anyWriteCapable = true;
+          break;
+        }
+      }
+      if (anyWriteCapable && !hasProofOfPresence(auth)) {
+        return Response.status(403)
+            .entity(Map.of("error", "webauthn_required",
+                "message",
+                "§8.11: approval of write-capable grants requires proof of physical presence"
+                    + " (WebAuthn or hardware key). Re-authenticate with a stronger factor"
+                    + " and retry."))
+            .build();
+      }
+    }
+
     if (approve) {
       if (!isCapabilityRequestApproval) {
         // Register/reactivate path: transition the agent itself. Per §5.3 the agent becomes
@@ -2867,6 +2898,44 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
 
     return Response.ok(agentData).build();
+  }
+
+  /**
+   * §8.11 proof-of-presence check. Evaluates the access token's {@code amr} claim (RFC 8176) and
+   * the session's authentication method reference note to determine whether the user proved
+   * physical presence with a factor like WebAuthn, hardware key, or MFA. Returns {@code true} only
+   * when the session is backed by an accepted factor.
+   */
+  private static boolean hasProofOfPresence(
+      org.keycloak.services.managers.AuthenticationManager.AuthResult auth) {
+    if (auth == null) {
+      return false;
+    }
+    Set<String> accepted = Set.of(
+        "hwk", "swk", "webauthn", "webauthn-passwordless", "mfa", "fpt", "otp");
+    org.keycloak.representations.AccessToken token = auth.token();
+    if (token != null) {
+      Object amr = token.getOtherClaims().get("amr");
+      if (amr instanceof List<?> list) {
+        for (Object v : list) {
+          if (v instanceof String s && accepted.contains(s)) {
+            return true;
+          }
+        }
+      }
+    }
+    // Fallback: inspect the session note that KC authenticators add during browser login.
+    if (auth.session() != null) {
+      String note = auth.session().getNote("AUTHENTICATION_METHOD_REFERENCE");
+      if (note != null) {
+        for (String part : note.split(",")) {
+          if (accepted.contains(part.trim())) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private static Response htmlPage(int status, String heading, String body) {
