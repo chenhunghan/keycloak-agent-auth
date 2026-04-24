@@ -1,1 +1,2 @@
 com.github.chh.keycloak.agentauth.storage.InMemoryStorageFactory
+com.github.chh.keycloak.agentauth.storage.jpa.JpaStorageFactory
