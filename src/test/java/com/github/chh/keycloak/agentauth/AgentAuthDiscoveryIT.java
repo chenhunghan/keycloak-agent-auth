@@ -507,7 +507,11 @@ class AgentAuthDiscoveryIT extends BaseKeycloakIT {
         .extract()
         .path("approval_methods");
     for (String method : methods) {
-      assertTrue(method.equals("admin"),
+      // §5.1 core values are "device_authorization" and "ciba"; this server additionally exposes
+      // the "admin" extension method for admin-mediated capability approvals.
+      assertTrue(
+          method.equals("device_authorization") || method.equals("ciba")
+              || method.equals("admin"),
           "Unexpected approval_method value: " + method);
     }
   }

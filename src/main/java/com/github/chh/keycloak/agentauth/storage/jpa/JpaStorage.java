@@ -92,6 +92,7 @@ public class JpaStorage implements AgentAuthStorage {
     String thumbprint = (String) agent.get("agent_key_thumbprint");
     String status = (String) agent.get("status");
     String userId = stringField(agent, "user_id");
+    String userCode = stringField(agent, "user_code");
     if (entity == null) {
       entity = new AgentEntity();
       entity.setId(agentId);
@@ -101,6 +102,7 @@ public class JpaStorage implements AgentAuthStorage {
       entity.setStatus(status);
       entity.setPayload(json);
       entity.setUserId(userId);
+      entity.setUserCode(userCode);
       entity.setUpdatedAt(now);
       em.persist(entity);
     } else {
@@ -109,8 +111,22 @@ public class JpaStorage implements AgentAuthStorage {
       entity.setStatus(status);
       entity.setPayload(json);
       entity.setUserId(userId);
+      entity.setUserCode(userCode);
       entity.setUpdatedAt(now);
     }
+  }
+
+  @Override
+  public Map<String, Object> findAgentByUserCode(String userCode) {
+    if (userCode == null) {
+      return null;
+    }
+    List<AgentEntity> results = em()
+        .createNamedQuery("AgentEntity.findByUserCode", AgentEntity.class)
+        .setParameter("userCode", userCode)
+        .setMaxResults(1)
+        .getResultList();
+    return results.isEmpty() ? null : deserialize(results.get(0).getPayload());
   }
 
   @Override

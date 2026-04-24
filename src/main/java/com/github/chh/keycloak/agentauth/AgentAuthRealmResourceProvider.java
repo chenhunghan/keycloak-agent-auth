@@ -431,7 +431,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
 
       if ("pending".equals(status)) {
-        agentData.put("approval", buildApprovalObject(agentId));
+        // AAP §7.1: delegated registration on an unlinked host goes through device-authorization
+        // approval. Admin-mediated approval remains available for other pending paths (e.g.
+        // capability-request against an already-linked host).
+        boolean hostLinked = hostData != null && hostData.get("user_id") != null;
+        if ("delegated".equals(mode) && !hostLinked) {
+          String userCode = generateUserCode();
+          agentData.put("user_code", userCode);
+          agentData.put("approval", buildDeviceAuthApprovalObject(agentId, userCode));
+        } else {
+          agentData.put("approval", buildApprovalObject(agentId));
+        }
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
             grant.put("status_url", buildGrantStatusUrl(agentId, (String) grant.get("capability")));
@@ -2545,6 +2555,148 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
   }
 
+  /**
+   * AAP §7.1 device-authorization approval. The user whose registration is being approved
+   * authenticates to Keycloak as a realm user and posts their {@code user_code} here. The endpoint
+   * activates the agent and links the host to the approving user per §2.9.
+   */
+  @POST
+  @Path("verify/approve")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response verifyApprove(Map<String, Object> requestBody) {
+    return transitionPendingAgent(requestBody, /* approve= */ true);
+  }
+
+  /**
+   * AAP §7.1 device-authorization denial. Per the spec: "User denial is terminal for that attempt.
+   * The client MUST NOT automatically retry." The endpoint transitions the agent to
+   * {@code rejected}; subsequent approve attempts return 410.
+   */
+  @POST
+  @Path("verify/deny")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response verifyDeny(Map<String, Object> requestBody) {
+    return transitionPendingAgent(requestBody, /* approve= */ false);
+  }
+
+  @SuppressWarnings("unchecked")
+  private Response transitionPendingAgent(Map<String, Object> requestBody, boolean approve) {
+    org.keycloak.services.managers.AuthenticationManager.AuthResult auth = new org.keycloak.services.managers.AppAuthManager.BearerTokenAuthenticator(
+        session)
+        .authenticate();
+    if (auth == null) {
+      return Response.status(401)
+          .entity(Map.of("error", "authentication_required",
+              "message", "Realm user access token required"))
+          .build();
+    }
+    if (auth.user().getServiceAccountClientLink() != null) {
+      return Response.status(403)
+          .entity(Map.of("error", "user_required",
+              "message", "Approval must come from a realm user, not a service account"))
+          .build();
+    }
+
+    if (requestBody == null || !(requestBody.get("user_code") instanceof String rawCode)
+        || ((String) requestBody.get("user_code")).isBlank()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Missing user_code"))
+          .build();
+    }
+    String userCode = normalizeUserCode(rawCode);
+
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = storage.findAgentByUserCode(userCode);
+    if (agentData == null) {
+      return Response.status(404)
+          .entity(Map.of("error", "unknown_user_code",
+              "message", "No pending approval for that user_code"))
+          .build();
+    }
+
+    String status = (String) agentData.get("status");
+    if ("rejected".equals(status) || "revoked".equals(status) || "claimed".equals(status)) {
+      // §7.1: denial (and other terminal states) is terminal. Re-approval is not allowed.
+      return Response.status(410)
+          .entity(Map.of("error", "approval_terminal",
+              "message", "Approval is no longer possible; agent is in a terminal state"))
+          .build();
+    }
+    if (!"pending".equals(status)) {
+      return Response.status(409)
+          .entity(Map.of("error", "invalid_state",
+              "message", "Agent is not awaiting approval"))
+          .build();
+    }
+
+    String userId = auth.user().getId();
+    String agentId = (String) agentData.get("agent_id");
+    String hostId = (String) agentData.get("host_id");
+    String nowTs = nowTimestamp();
+
+    if (approve) {
+      agentData.put("status", "active");
+      agentData.put("activated_at", nowTs);
+      agentData.put("user_id", userId);
+      List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
+          .get("agent_capability_grants");
+      if (grants != null) {
+        for (Map<String, Object> grant : grants) {
+          if ("pending".equals(grant.get("status"))) {
+            grant.put("status", "active");
+            grant.remove("status_url");
+            Map<String, Object> registeredCap = storage.getCapability(
+                (String) grant.get("capability"));
+            if (registeredCap != null) {
+              grant.put("description", registeredCap.get("description"));
+              if (registeredCap.containsKey("input")) {
+                grant.put("input", registeredCap.get("input"));
+              }
+              if (registeredCap.containsKey("output")) {
+                grant.put("output", registeredCap.get("output"));
+              }
+            }
+            grant.put("granted_by", userId);
+          }
+        }
+      }
+      // Approval succeeded — user_code is no longer needed.
+      agentData.remove("user_code");
+    } else {
+      agentData.put("status", "rejected");
+      agentData.put("rejection_reason", "user_denied");
+      List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
+          .get("agent_capability_grants");
+      if (grants != null) {
+        for (Map<String, Object> grant : grants) {
+          if ("pending".equals(grant.get("status"))) {
+            grant.put("status", "denied");
+            grant.remove("status_url");
+          }
+        }
+      }
+      // Keep user_code so a subsequent approve attempt resolves the rejected agent and
+      // returns 410 (§7.1: "client MUST NOT retry"), not 404.
+    }
+    agentData.put("updated_at", nowTs);
+    agentData.remove("approval");
+    storage.putAgent(agentId, agentData);
+
+    if (approve) {
+      // §2.9: linking happens on user approval of a delegated registration on an unlinked host.
+      Map<String, Object> hostData = storage.getHost(hostId);
+      if (hostData != null && hostData.get("user_id") == null) {
+        hostData.put("user_id", userId);
+        hostData.put("updated_at", nowTs);
+        storage.putHost(hostId, hostData);
+      }
+    }
+
+    return Response.ok(agentData).build();
+  }
+
   private static boolean isEd25519Jwk(Map<String, Object> jwk) {
     try {
       return jwk != null && com.nimbusds.jose.jwk.Curve.Ed25519
@@ -2609,6 +2761,45 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
             .path("agent").path("status").queryParam("agent_id", agentId).build().toString());
     return approval;
+  }
+
+  private Map<String, Object> buildDeviceAuthApprovalObject(String agentId, String userCodeRaw) {
+    String display = displayUserCode(userCodeRaw);
+    String verifyBase = issuerUrl() + "/verify";
+    String statusUrl = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
+        .path("agent").path("status").queryParam("agent_id", agentId).build().toString();
+    Map<String, Object> approval = new HashMap<>();
+    approval.put("method", "device_authorization");
+    approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
+    approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
+    approval.put("user_code", display);
+    approval.put("verification_uri", verifyBase);
+    approval.put("verification_uri_complete", verifyBase + "?user_code=" + display);
+    approval.put("status_url", statusUrl);
+    return approval;
+  }
+
+  private static final java.security.SecureRandom USER_CODE_RNG = new java.security.SecureRandom();
+  private static final int USER_CODE_LENGTH = 8;
+
+  private static String generateUserCode() {
+    char[] chars = new char[USER_CODE_LENGTH];
+    for (int i = 0; i < USER_CODE_LENGTH; i++) {
+      chars[i] = (char) ('A' + USER_CODE_RNG.nextInt(26));
+    }
+    return new String(chars);
+  }
+
+  private static String displayUserCode(String raw) {
+    return raw.substring(0, 4) + "-" + raw.substring(4);
+  }
+
+  private static String normalizeUserCode(String userCode) {
+    if (userCode == null) {
+      return null;
+    }
+    return userCode.replace("-", "").toUpperCase(Locale.ROOT);
   }
 
   private String buildGrantStatusUrl(String agentId, String capabilityName) {

@@ -79,6 +79,19 @@ public class InMemoryStorage implements AgentAuthStorage {
   }
 
   @Override
+  public Map<String, Object> findAgentByUserCode(String userCode) {
+    if (userCode == null) {
+      return null;
+    }
+    for (Map<String, Object> agent : AGENTS.values()) {
+      if (userCode.equals(agent.get("user_code"))) {
+        return agent;
+      }
+    }
+    return null;
+  }
+
+  @Override
   public Map<String, Object> getCapability(String name) {
     return CAPABILITIES.get(name);
   }

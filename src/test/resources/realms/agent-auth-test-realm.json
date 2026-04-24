@@ -7,5 +7,16 @@
   "duplicateEmailsAllowed": false,
   "resetPasswordAllowed": false,
   "editUsernameAllowed": false,
-  "bruteForceProtected": false
+  "bruteForceProtected": false,
+  "clients": [
+    {
+      "clientId": "agent-auth-test-client",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["*"]
+    }
+  ]
 }

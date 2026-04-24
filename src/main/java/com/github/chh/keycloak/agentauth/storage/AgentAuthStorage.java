@@ -42,6 +42,13 @@ public interface AgentAuthStorage extends Provider {
    */
   List<Map<String, Object>> findHostsByUser(String userId);
 
+  /**
+   * The agent whose {@code user_code} payload field equals {@code userCode}, or {@code null} when
+   * no match exists. Used by the AAP §7.1 device-authorization verify endpoints to resolve a
+   * pending agent from the code the user enters.
+   */
+  Map<String, Object> findAgentByUserCode(String userCode);
+
   // --- Capabilities (keyed by name) ---
 
   Map<String, Object> getCapability(String name);

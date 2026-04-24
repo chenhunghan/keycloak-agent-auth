@@ -129,4 +129,25 @@
             <column name="USER_ID"/>
         </createIndex>
     </changeSet>
+
+    <!--
+        Queryable USER_CODE column for the AAP §7.1 device-authorization approval flow. Agents in
+        pending delegated registration carry a short human-typable code; the /verify endpoint looks
+        the agent up by that code. Nullable — only pending-device-auth agents populate it; cleared
+        once the agent transitions to a terminal state.
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.2.0-agent-user-code">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_AGENT" columnName="USER_CODE"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_AGENT">
+            <column name="USER_CODE" type="VARCHAR(16)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <createIndex indexName="IDX_AGENT_AUTH_AGENT_USER_CODE"
+                     tableName="AGENT_AUTH_AGENT">
+            <column name="USER_CODE"/>
+        </createIndex>
+    </changeSet>
 </databaseChangeLog>

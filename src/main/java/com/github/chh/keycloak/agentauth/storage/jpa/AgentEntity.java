@@ -12,12 +12,14 @@ import jakarta.persistence.Table;
 @Table(name = "AGENT_AUTH_AGENT", indexes = {
     @Index(name = "IDX_AGENT_AUTH_AGENT_HOST", columnList = "HOST_ID"),
     @Index(name = "IDX_AGENT_AUTH_AGENT_HOST_KEY", columnList = "HOST_ID,KEY_THUMBPRINT"),
-    @Index(name = "IDX_AGENT_AUTH_AGENT_USER", columnList = "USER_ID")
+    @Index(name = "IDX_AGENT_AUTH_AGENT_USER", columnList = "USER_ID"),
+    @Index(name = "IDX_AGENT_AUTH_AGENT_USER_CODE", columnList = "USER_CODE")
 })
 @NamedQueries({
     @NamedQuery(name = "AgentEntity.findByHost", query = "select a from AgentEntity a where a.hostId = :hostId"),
     @NamedQuery(name = "AgentEntity.findByKeyAndHost", query = "select a from AgentEntity a "
-        + "where a.hostId = :hostId and a.keyThumbprint = :keyThumbprint")
+        + "where a.hostId = :hostId and a.keyThumbprint = :keyThumbprint"),
+    @NamedQuery(name = "AgentEntity.findByUserCode", query = "select a from AgentEntity a where a.userCode = :userCode")
 })
 public class AgentEntity {
 
@@ -50,6 +52,14 @@ public class AgentEntity {
    */
   @Column(name = "USER_ID", length = 36)
   private String userId;
+
+  /**
+   * Queryable mirror of {@code payload.user_code}, non-null only while the agent is in
+   * {@code pending} state awaiting AAP §7.1 device-authorization approval. The /verify endpoints
+   * look up the agent by this code.
+   */
+  @Column(name = "USER_CODE", length = 16)
+  private String userCode;
 
   public String getId() {
     return id;
@@ -113,5 +123,13 @@ public class AgentEntity {
 
   public void setUserId(String userId) {
     this.userId = userId;
+  }
+
+  public String getUserCode() {
+    return userCode;
+  }
+
+  public void setUserCode(String userCode) {
+    this.userCode = userCode;
   }
 }

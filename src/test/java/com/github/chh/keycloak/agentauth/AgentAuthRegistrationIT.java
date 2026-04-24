@@ -415,7 +415,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.status_url", notNullValue())
         .extract()
         .path("agent_id");
@@ -811,7 +811,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.status_url", notNullValue())
         .body("agent_capability_grants", hasSize(2))
         .extract()
@@ -1320,9 +1320,10 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.status_url", notNullValue())
-        .body("approval.verification_uri", nullValue());
+        .body("approval.verification_uri", notNullValue())
+        .body("approval.user_code", notNullValue());
   }
 
   /**
@@ -1355,7 +1356,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .post("/agent/register")
         .then()
         .statusCode(200)
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.login_hint", nullValue());
   }
 
@@ -1389,7 +1390,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .post("/agent/register")
         .then()
         .statusCode(200)
-        .body("approval.method", equalTo("admin"))
+        .body("approval.method", equalTo("device_authorization"))
         .body("approval.binding_message", nullValue());
   }
 
