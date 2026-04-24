@@ -196,6 +196,102 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
   }
 
   @Test
+  void capabilityRequestUnderLinkedHost_returnsCibaApprovalObject() {
+    // §5.4 + §7.3: capability-request against an already-linked host should emit CIBA, not
+    // device_authorization. Without this, cap-request on a linked host would force the user
+    // through a user_code flow even though the server already knows who the user is.
+    String autoCap = registerAutoCap("ciba_capreq_auto_" + suffix());
+    String approvalCap = registerApprovalCap("ciba_capreq_approv_" + suffix());
+    String username = "ciba-capreq-" + suffix();
+    String userId = createTestUser(username);
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    preRegisterHost(hostKey, "ciba-capreq-host");
+    linkHost(TestKeys.thumbprint(hostKey), userId);
+
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String agentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "ciba capreq agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, autoCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    Response capReqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "binding_message": "Grant extra permission"
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability");
+    capReqResp.then()
+        .statusCode(200)
+        .body("approval.method", org.hamcrest.Matchers.equalTo("ciba"))
+        .body("approval.user_code", org.hamcrest.Matchers.nullValue())
+        .body("approval.binding_message",
+            org.hamcrest.Matchers.equalTo("Grant extra permission"));
+
+    // User approves via agent_id path; grant becomes active, agent stays active.
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + passwordGrantToken(username))
+        .contentType(ContentType.JSON)
+        .body(Map.of("agent_id", agentId))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> grants = (List<Map<String, Object>>) adminFetchAgent(agentId)
+        .get("agent_capability_grants");
+    Map<String, Object> newGrant = grants.stream()
+        .filter(g -> approvalCap.equals(g.get("capability"))).findFirst().orElseThrow();
+    assertThat(newGrant.get("status")).isEqualTo("active");
+  }
+
+  private static String registerAutoCap(String name) {
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "CIBA cap-request auto",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, name, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+    return name;
+  }
+
+  @Test
   void inboxWithoutAuth_returns401() {
     given()
         .baseUri(issuerUrl())

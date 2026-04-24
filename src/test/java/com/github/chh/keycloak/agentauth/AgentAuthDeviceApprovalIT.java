@@ -265,19 +265,20 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
 
   @Test
   void reactivateApproval_flipsExpiredAgentBackToActive() {
-    // §5.6 + §7: reactivate of an expired agent follows the same device_authorization flow as
-    // a new delegated registration when the reactivated grants include one that requires
-    // approval.
+    // §5.6 + §7: reactivate of an expired agent triggers approval again when reactivated grants
+    // require it. After the first approval the host is linked to the approver, so the
+    // reactivation approval follows the CIBA path (§7.3 — prefer CIBA when user is known);
+    // the user approves via agent_id rather than user_code.
     String approvalCap = registerApprovalRequiredCapability("devauth_react_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
 
-    // Register as delegated + capability requires approval → pending.
+    // Register as delegated + capability requires approval → pending + device_authorization.
     Response regResp = registerDelegatedAgent(hostKey, agentKey, approvalCap);
     String agentId = regResp.jsonPath().getString("agent_id");
     String firstUserCode = regResp.jsonPath().getString("approval.user_code");
 
-    // First approval to get to active.
+    // First approval to get to active. This links the host to the approver.
     String username = "reactivate-approver-" + suffix();
     createTestUser(username);
     String userAccessToken = realmUserAccessToken(username);
@@ -302,6 +303,7 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .statusCode(200);
 
     // Agent requests reactivation — default_capability_grants replay forces approval again.
+    // Host is now linked → CIBA approval.
     String hostJwtForReact = TestJwts.hostJwt(hostKey, issuerUrl());
     Response reactResp = given()
         .baseUri(issuerUrl())
@@ -313,16 +315,16 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
     reactResp.then()
         .statusCode(200)
         .body("status", org.hamcrest.Matchers.equalTo("pending"))
-        .body("approval.method", org.hamcrest.Matchers.equalTo("device_authorization"))
-        .body("approval.user_code", matchesPattern("[A-Z]{4}-[A-Z]{4}"));
-    String reactivationUserCode = reactResp.jsonPath().getString("approval.user_code");
+        .body("approval.method", org.hamcrest.Matchers.equalTo("ciba"))
+        .body("approval.user_code", org.hamcrest.Matchers.nullValue())
+        .body("approval.verification_uri", org.hamcrest.Matchers.nullValue());
 
-    // Approve the reactivation.
+    // Approve the reactivation via CIBA agent_id path.
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + realmUserAccessToken(username))
         .contentType(ContentType.JSON)
-        .body(Map.of("user_code", reactivationUserCode))
+        .body(Map.of("agent_id", agentId))
         .when()
         .post("/verify/approve")
         .then()
