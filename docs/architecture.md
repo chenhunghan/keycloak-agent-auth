@@ -35,26 +35,29 @@ Key property: **Client and Host are different things.** The client is the proces
 flowchart LR
     subgraph CE["Client environment (= host)"]
         direction LR
-        A["Agent<br/>(runtime LLM)"]
-        C["Client<br/>holds host keypair,<br/>signs JWTs"]
-        A <-->|"protocol tools<br/>MCP / SDK"| C
+        A["Agent"]
+        C["Client"]
+        A <-->|tools| C
     end
 
     S["Server<br/>(authz)"]
-    RS["Resource Server<br/>capability.location"]
+    RS["Resource Server"]
     U(("User"))
 
-    C -->|"host+jwt<br/>register · status · revoke · rotate"| S
-    C -->|"agent+jwt<br/>/capability/execute<br/>(gateway mode)"| S
-    C -.->|"agent+jwt<br/>(direct mode)"| RS
-    RS -->|"/agent/introspect<br/>server-to-server"| S
-    S -->|"approval prompt<br/>device_auth / CIBA / admin UI"| U
+    C -->|host ops| S
+    C -->|execute<br/>(gateway)| S
+    C -.->|execute<br/>(direct)| RS
+    RS -.->|introspect| S
+    S -->|approval| U
 ```
 
-Two capability-execution paths share the same picture:
+Solid edges happen in every session; dashed edges are one of two execution-mode alternatives. Every edge into or out of the Server is HTTP + JWT:
 
-- **Gateway** — client sends agent+jwt to `/capability/execute`; server validates, runs constraint checks, proxies to `<capability.location>`. The resource server never sees an agent+jwt directly.
-- **Direct** — client sends agent+jwt to `<capability.location>` directly; the resource server calls `/agent/introspect` to validate.
+- **host ops** — register, status, revoke, reactivate, rotate-key, plus list/describe. Bearer token is a `host+jwt`.
+- **execute (gateway)** — `POST /capability/execute` with `agent+jwt`; server validates, runs constraint checks, proxies to `<capability.location>`. Resource server never sees an agent+jwt.
+- **execute (direct)** — `POST <capability.location>` with `agent+jwt` straight from the client.
+- **introspect** — `POST /agent/introspect` server-to-server from the resource server; only used in direct mode.
+- **approval** — the approval method advertised in `/.well-known/agent-configuration` (`device_authorization`, `ciba`, or `admin`).
 
 Gateway is the simpler integration (resource server doesn't implement any auth); direct gives the resource server ownership of the auth decision and saves one hop.
 
@@ -161,40 +164,32 @@ Coverage: `AgentAuthHostLinkIT` walks each of the spec's normative consequences 
 
 ```mermaid
 flowchart TB
-    subgraph KC["Keycloak server (container)"]
-        direction TB
-        subgraph CORE["Keycloak core (pre-existing)"]
+    subgraph KC["Keycloak server"]
+        subgraph CORE["Keycloak core"]
             direction LR
             C1["Realms / users /<br/>sessions"]
-            C2["OIDC<br/>(admin-cli for TOKEN)"]
+            C2["OIDC"]
             C3["Admin UI + REST"]
-            C4["Event framework<br/>(AdminEvents)"]
-            C5["JPA persistence unit<br/>(H2 dev · Postgres prod)"]
+            C4["Event framework"]
+            C5["JPA persistence"]
         end
 
-        subgraph EXT["This extension (keycloak-agent-auth JAR)"]
+        subgraph EXT["This extension"]
             direction TB
             subgraph PROV["SPI providers"]
                 direction LR
-                P1["WellKnownProvider<br/>AgentAuthWellKnownProvider"]
-                P2["RealmResourceProvider<br/>AgentAuthRealmResourceProvider"]
-                P3["AdminRealmResourceProvider<br/>AgentAuthAdminResourceProvider"]
+                P1["WellKnownProvider"]
+                P2["RealmResourceProvider"]
+                P3["AdminRealmResourceProvider"]
             end
 
-            subgraph STOR["Storage SPI · AgentAuthStorage"]
+            subgraph STOR["Storage SPI"]
                 direction LR
-                S1["JpaStorage<br/>(default, order=100)"]
-                S2["InMemoryStorage<br/>(tests)"]
+                S1["JpaStorage"]
+                S2["InMemoryStorage"]
             end
 
-            JPA["JpaEntityProvider +<br/>Liquibase changelog →<br/>AGENT_AUTH_{HOST · AGENT ·<br/>CAPABILITY · ROTATED_HOST}"]
-
-            subgraph SUP["Support"]
-                direction LR
-                U1["JwksCache"]
-                U2["ConstraintValidator"]
-                U3["DiscoveryCacheFilter"]
-            end
+            JPA["JpaEntityProvider<br/>+ Liquibase"]
         end
     end
 
@@ -202,15 +197,12 @@ flowchart TB
     P3 --> S1
     S1 --> JPA
     JPA --> C5
-    P3 -.->|reuses admin<br/>OIDC auth| C3
+    P3 -.->|admin auth| C3
     P2 -.->|emits| C4
     P3 -.->|emits| C4
-    P2 --- U1
-    P2 --- U2
-    P1 --- U3
 ```
 
-The three SPIs (WellKnownProvider, RealmResourceProvider, AdminRealmResourceProvider) are the only extension points Keycloak itself defines; everything else the extension does is either SPI registration boilerplate or ordinary Java code that those three invoke.
+Three SPI providers (the only extension points Keycloak itself defines) sit above a storage SPI with a JPA default and an in-memory fallback; JPA entities + a Liquibase changelog flow into Keycloak's own persistence unit. Admin-auth reuse and admin-event emission are the two ways the extension plugs back into core. Concrete class names live in [the spec ↔ source map below](#spec--source-file-map); a few helper classes (`JwksCache`, `ConstraintValidator`, `DiscoveryCacheFilter`) are called from the providers but aren't pictured here.
 
 ### Storage layering
 
