@@ -84,3 +84,75 @@ Living list of things we want to come back to. Each item carries enough context 
   claim verbatim spec compliance, either drop it or move it under a
   vendor-prefixed namespace. Behaviour is invisible to spec-conforming
   clients, so low priority — but worth deciding.
+
+## Multi-tenancy — capability registry scoping
+
+The spec is silent on how capabilities are scoped (only hint is §5.2's
+"capabilities available to the host's linked user", with the filter
+left to the implementation). Today the registry is realm-wide and only
+realm admins can write. That's fine for single-tenant deployments;
+breaks down the moment we want a realm to host multiple teams or
+companies whose capabilities shouldn't bleed into each other.
+
+- [ ] **Scope capabilities to Keycloak Organizations (KC 26.x+).**
+  Add an `organization_id` column to `AGENT_AUTH_CAPABILITY` (nullable):
+
+  - `NULL` → realm-wide capability. Registered by realm admins via
+    the existing `POST /admin/realms/{r}/agent-auth/capabilities`.
+    Visible to any authenticated caller in the realm. Preserves
+    today's behavior.
+  - Set → org-scoped capability. Registered via a new entry point
+    (e.g. body field `organization_id`, or a new path
+    `POST /admin/realms/{r}/organizations/{orgId}/agent-auth/capabilities`).
+    Caller must hold `manage-organization` on that org. Visible only
+    to members of that org.
+
+  `/capability/list` filter, when caller identity is resolvable:
+
+  ```
+  WHERE organization_id IS NULL
+     OR organization_id IN (orgs the caller belongs to)
+  ```
+
+  Caller's orgs come from Keycloak's `OrganizationProvider` keyed off
+  the user that the host or agent is linked to (from §2.9 host linking
+  → `host.user_id` → user's org memberships).
+
+  This makes §5.2's "capabilities available to the host's linked user"
+  precise: realm-wide caps + caps in orgs the linked user belongs to.
+
+  **Why org-scoping and not user-scoping**: capabilities are owned by
+  the *service* that runs the resource server, which is almost always
+  a team / company, not a single user. A user-scoped registry would
+  collapse to "personal orgs of one" in practice. Keycloak Organizations
+  gives us membership, role-gated management, and token claims out of
+  the box; we'd be reinventing them otherwise.
+
+  **Tied to the typed-columns refactor above** — adding
+  `organization_id` to a JSON-blob `PAYLOAD` doesn't help, because the
+  `/capability/list` filter needs to be an indexed `WHERE` clause to
+  avoid scanning every row. Do this *with* the typed-columns migration
+  in one Liquibase changelog, not as a separate migration on top of
+  the blob.
+
+  Migration considerations:
+
+  1. Existing rows get `organization_id = NULL` — preserves today's
+     "realm-wide, registered by realm admin" behavior. No user-visible
+     regression.
+  2. Realm admins keep `manage-realm`-gated write access to NULL-org
+     capabilities; org admins get `manage-organization`-gated write
+     access scoped to their org_id.
+  3. Cross-org isolation needs IT coverage: org A's caller must NOT be
+     able to register/update/delete a capability with `organization_id
+     = orgB`, even if they have `manage-organization` on org A.
+  4. Discovery doc (`/.well-known/agent-configuration`) doesn't change
+     — the per-caller filter is applied at `/capability/list` time.
+
+  **Out of scope here**: per-user private capabilities. If someone
+  genuinely needs them, they can model as a single-member org. Don't
+  add a third dimension unless a real use case appears.
+
+  Trigger to act on this: a deployment scenario where a realm hosts
+  more than one tenant whose capabilities shouldn't be visible to the
+  others. Until then realm-only is fine.
