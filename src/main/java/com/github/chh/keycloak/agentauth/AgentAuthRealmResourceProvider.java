@@ -3640,9 +3640,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     user.getRealmRoleMappingsStream().map(RoleModel::getName).forEach(roles::add);
     Set<String> orgs = new HashSet<>();
     if (realm.isOrganizationsEnabled()) {
-      OrganizationProvider orgProvider = session.getProvider(OrganizationProvider.class);
-      if (orgProvider != null) {
-        orgProvider.getByMember(user).map(org -> org.getId()).forEach(orgs::add);
+      // Defense-in-depth: realm.isOrganizationsEnabled() short-circuits the common feature-off
+      // case, but a deployment could in theory have the realm flag on while the server-level
+      // feature flag is off, in which case session.getProvider may return null OR throw. Treat
+      // any failure as "user has no orgs", which makes org-gated caps invisible (fail-safe).
+      try {
+        OrganizationProvider orgProvider = session.getProvider(OrganizationProvider.class);
+        if (orgProvider != null) {
+          orgProvider.getByMember(user).map(org -> org.getId()).forEach(orgs::add);
+        }
+      } catch (RuntimeException ignored) {
+        // NOPMD: provider unavailable; orgs stays empty.
       }
     }
     return new UserEntitlement(orgs, roles);
