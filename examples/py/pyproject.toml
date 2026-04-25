@@ -19,3 +19,11 @@ aap-rs-standalone = "aap_demo.rs_standalone:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# `jwt` (PyJWT), `cryptography`, and `requests` don't ship type stubs that
+# satisfy mypy out of the box. We don't pull in stub packages because this
+# is a demo, not a typed library — silence the missing-import diagnostics
+# on these third-party imports specifically.
+[[tool.mypy.overrides]]
+module = ["jwt", "jwt.*", "cryptography.*", "requests", "requests.*"]
+ignore_missing_imports = true

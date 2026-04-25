@@ -26,13 +26,11 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-/// An Ed25519 keypair. The `SigningKey` already exposes the verifying key,
-/// but we keep the public key bytes pre-split for easy JWK export.
+/// An Ed25519 keypair. We keep the public key bytes pre-split for easy
+/// JWK export; the PKCS#8 DER form is what `jsonwebtoken`'s
+/// `EncodingKey::from_ed_der` consumes for signing.
 struct Ed25519KeyPair {
-    signing: SigningKey,
     public_bytes: [u8; 32],
-    /// PKCS#8 DER encoding of the private key, required by `jsonwebtoken`'s
-    /// `EncodingKey::from_ed_der`.
     pkcs8_der: Vec<u8>,
 }
 
@@ -46,7 +44,6 @@ impl Ed25519KeyPair {
             .as_bytes()
             .to_vec();
         Ok(Self {
-            signing,
             public_bytes,
             pkcs8_der,
         })
@@ -249,7 +246,7 @@ impl Client {
             .context("POST /capability/execute")?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        let body: Value = serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text));
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
         Ok(ExecuteAttempt { status, body })
     }
 
