@@ -4,62 +4,13 @@ Living list of things we want to come back to. Each item carries enough context 
 
 ## Storage
 
-- [ ] **Replace JSON-blob payload storage with proper typed columns.**
-  Today every entity in `storage/jpa/` (`HostEntity`, `AgentEntity`,
-  `CapabilityEntity`, `RotatedHostEntity`) keeps four typed columns
-  (`ID` / `STATUS` / `CREATED_AT` / `UPDATED_AT`) plus a `PAYLOAD TEXT`
-  that holds the full record as a JSON blob. That was the right call to
-  ship the JPA migration quickly — adding optional fields is a
-  zero-migration change — but it has real costs:
-
-  - Cannot index, sort, or filter on any field that lives inside the
-    blob (e.g. "list capabilities by visibility", "find agents by host
-    user_id", "find capabilities pointing at a given location URL").
-  - Cannot enforce referential integrity (e.g. agent → host FK,
-    grant → capability FK).
-  - Constraint checks (`max` / `min` / `in` on a grant) require parsing
-    JSON every execute call instead of reading column values.
-  - Multi-tenancy is awkward — `CapabilityEntity` has no realm column
-    today, so the registry is global. A normalised schema would make
-    realm scoping a one-line addition rather than a JSON migration.
-
-  The replacement is the obvious normalised shape:
-
-  - `AGENT_AUTH_HOST(host_id PK, public_key_jwk, jwks_url, jwks_kid,
-    user_id FK, status, created_at, updated_at, last_used_at, …)`
-  - `AGENT_AUTH_AGENT(agent_id PK, host_id FK, user_id, mode,
-    name, status, public_key_jwk, jwks_url, jwks_kid,
-    activated_at, expires_at, …)`
-  - `AGENT_AUTH_AGENT_GRANT(agent_id FK, capability_name FK,
-    status, granted_by, constraints_json, …)` — promote grants from
-    nested array to a real join table; `constraints_json` can stay TEXT.
-  - `AGENT_AUTH_CAPABILITY(name PK, realm_id, description, location,
-    visibility, requires_approval, auto_deny, default_grants_json,
-    input_schema_json, output_schema_json, …)`
-  - `AGENT_AUTH_ROTATED_HOST(old_host_id PK, new_host_id FK,
-    rotated_at)` — already mostly normalised; just confirm shape.
-
-  Migration plan (rough sketch):
-
-  1. New Liquibase changeset adds the typed columns next to the
-     existing `PAYLOAD` column on each table.
-  2. One-shot Java migration changeset reads `PAYLOAD`, populates the
-     new columns, leaves the blob in place.
-  3. Update `JpaStorage` reads/writes to use the typed columns; keep
-     blob writes for one release as a safety net.
-  4. Final changeset drops the `PAYLOAD` column.
-
-  Don't tackle this until either an indexed query or referential
-  integrity becomes painful — both are visible features (admin UI,
-  multi-tenant), so the trigger will be obvious. Until then the blob
-  is fine.
-
-  **Scheduling note (2026-04-25):** the multi-tenant authz plan below
-  splits this entry across Phase 3 (agent grants → join table — needed
-  for efficient cascade queries) and Phase 6 (remaining typed columns
-  + real FKs). Phase 4's eager cascade on org-membership changes is
-  the trigger that makes the agent-grants table painful to keep as a
-  blob; that's when this work starts in earnest.
+- [x] **Replace JSON-blob payload storage with proper typed columns.**
+  ✅ Shipped 2026-04-25 across Phases 3 (agent grants → join table)
+  and 6a/6b/6c (capability/host/agent typed columns) of the multi-
+  tenant authz plan below. PAYLOAD blob columns dropped from all four
+  agent-auth tables. Real FKs to KC's KEYCLOAK_REALM/KEYCLOAK_USER/
+  KEYCLOAK_ORG are still soft string references; see Phase 6's
+  "Outstanding" note for why and when to revisit.
 
 ## §5.2 capability listing — spec gaps
 
@@ -229,11 +180,28 @@ cascade (Phase 4). Phases 5–6 are quality-of-life and still pending.
    one SA per confidential client; operators provision the client
    with `serviceAccountsEnabled=true` and pass the client_id.
 
-6. **Phase 6 — Remaining storage normalization.** Folds the existing
-   "Storage" entry above. Typed columns on host/agent/capability,
-   real FKs from agent-auth tables to `KEYCLOAK_REALM`,
-   `KEYCLOAK_USER`, `KEYCLOAK_ORG`, drop JSON blobs. Defense-in-depth
-   layer: integrity now enforced at the data layer, not just app code.
+6. **Phase 6 — Remaining storage normalization.** ✅ Substages 6a/6b/6c
+   shipped 2026-04-25 (no-migration path: pre-production codebase, no
+   existing data). Typed columns now everywhere; PAYLOAD blob columns
+   dropped from AGENT_AUTH_CAPABILITY (6a), AGENT_AUTH_HOST (6b),
+   AGENT_AUTH_AGENT (6c). Round-trip is via per-entity {entity}ToMap +
+   apply{Entity}Fields helpers in JpaStorage; null columns are omitted
+   from the projected map so unset fields preserve "absent vs explicit
+   null" JSON semantics. Indexed ORGANIZATION_ID and REQUIRED_ROLE on
+   capability make Phase 1's filter and Phase 4's cascade SQL-efficient
+   (previously in-Java scans of all caps). Phase 6c also added a
+   "skip grants-table sync when grants array unchanged" optimization
+   to avoid lock contention when a long-running streaming proxy holds
+   a transaction concurrently with revoke.
+
+   **Outstanding (deferred to a future phase if pain emerges):** real
+   FKs from agent-auth tables to KEYCLOAK_REALM, KEYCLOAK_USER,
+   KEYCLOAK_ORG. Data-layer referential integrity is still enforced
+   only at the application level (cascade listeners + soft
+   string-string lookups). Adding KC FKs would require declaring our
+   Liquibase changesets to depend on KC's, which is fragile across KC
+   version bumps. Keep soft for now; revisit if a stale-id orphan bug
+   shows up.
 
 ### Open implementation items
 

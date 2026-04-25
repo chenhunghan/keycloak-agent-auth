@@ -296,4 +296,67 @@
         </addColumn>
         <dropColumn tableName="AGENT_AUTH_HOST" columnName="PAYLOAD"/>
     </changeSet>
+
+    <!--
+        Phase 6c of the multi-tenant authz plan: promote AGENT_AUTH_AGENT to typed columns.
+        Pre-production schema, no migration. Per-grant data lives in AGENT_AUTH_AGENT_GRANT
+        (Phase 3) but the per-agent grants list is also kept here as JSON TEXT for the
+        application read path that hasn't been swapped yet — that swap is Phase 6d (or later).
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.4.0-agent-typed-columns">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_AGENT" columnName="MODE"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_AGENT">
+            <column name="MODE" type="VARCHAR(32)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="AGENT_PUBLIC_KEY" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="AGENT_JWKS_URL" type="VARCHAR(2048)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="AGENT_KID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="ACTIVATED_AT" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="EXPIRES_AT" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="LAST_USED_AT" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="SESSION_TTL_RESET_AT" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="MAX_LIFETIME_RESET_AT" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="ABSOLUTE_LIFETIME_ELAPSED" type="BOOLEAN">
+                <constraints nullable="true"/>
+            </column>
+            <column name="APPROVAL" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="REASON" type="VARCHAR(1024)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="REJECTION_REASON" type="VARCHAR(1024)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="REVOCATION_REASON" type="VARCHAR(1024)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="AGENT_GRANTS" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <dropColumn tableName="AGENT_AUTH_AGENT" columnName="PAYLOAD"/>
+    </changeSet>
 </databaseChangeLog>

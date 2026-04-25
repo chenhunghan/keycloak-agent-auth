@@ -8,6 +8,12 @@ import jakarta.persistence.NamedQueries;
 import jakarta.persistence.NamedQuery;
 import jakarta.persistence.Table;
 
+/**
+ * Phase 6c: typed columns replace the prior JSON-blob {@code PAYLOAD}. Per-grant data lives in
+ * {@code AGENT_AUTH_AGENT_GRANT} (Phase 3 secondary index); the per-agent grants list is also kept
+ * here as JSON TEXT ({@code AGENT_GRANTS}) for the application read path that hasn't been swapped
+ * to query the grants table yet.
+ */
 @Entity
 @Table(name = "AGENT_AUTH_AGENT", indexes = {
     @Index(name = "IDX_AGENT_AUTH_AGENT_HOST", columnList = "HOST_ID"),
@@ -37,30 +43,65 @@ public class AgentEntity {
   @Column(name = "STATUS", length = 32, nullable = false)
   private String status;
 
-  @Column(name = "PAYLOAD", columnDefinition = "TEXT", nullable = false)
-  private String payload;
-
   @Column(name = "CREATED_AT", nullable = false)
   private long createdAt;
 
   @Column(name = "UPDATED_AT", nullable = false)
   private long updatedAt;
 
-  /**
-   * Queryable mirror of {@code payload.user_id}. For delegated agents this inherits from
-   * {@code host.user_id} (AAP §3.2); for autonomous agents it is populated on claim (§2.10). Null
-   * when unset. Written in lock-step with the payload by {@code JpaStorage.putAgent}.
-   */
   @Column(name = "USER_ID", length = 36)
   private String userId;
 
-  /**
-   * Queryable mirror of {@code payload.user_code}, non-null only while the agent is in
-   * {@code pending} state awaiting AAP §7.1 device-authorization approval. The /verify endpoints
-   * look up the agent by this code.
-   */
   @Column(name = "USER_CODE", length = 16)
   private String userCode;
+
+  @Column(name = "MODE", length = 32)
+  private String mode;
+
+  @Column(name = "NAME", length = 255)
+  private String name;
+
+  @Column(name = "AGENT_PUBLIC_KEY", columnDefinition = "TEXT")
+  private String agentPublicKey;
+
+  @Column(name = "AGENT_JWKS_URL", length = 2048)
+  private String agentJwksUrl;
+
+  @Column(name = "AGENT_KID", length = 255)
+  private String agentKid;
+
+  @Column(name = "ACTIVATED_AT", length = 64)
+  private String activatedAt;
+
+  @Column(name = "EXPIRES_AT", length = 64)
+  private String expiresAt;
+
+  @Column(name = "LAST_USED_AT", length = 64)
+  private String lastUsedAt;
+
+  @Column(name = "SESSION_TTL_RESET_AT")
+  private Long sessionTtlResetAt;
+
+  @Column(name = "MAX_LIFETIME_RESET_AT")
+  private Long maxLifetimeResetAt;
+
+  @Column(name = "ABSOLUTE_LIFETIME_ELAPSED")
+  private Boolean absoluteLifetimeElapsed;
+
+  @Column(name = "APPROVAL", columnDefinition = "TEXT")
+  private String approval;
+
+  @Column(name = "REASON", length = 1024)
+  private String reason;
+
+  @Column(name = "REJECTION_REASON", length = 1024)
+  private String rejectionReason;
+
+  @Column(name = "REVOCATION_REASON", length = 1024)
+  private String revocationReason;
+
+  @Column(name = "AGENT_GRANTS", columnDefinition = "TEXT")
+  private String agentGrants;
 
   public String getId() {
     return id;
@@ -94,14 +135,6 @@ public class AgentEntity {
     this.status = status;
   }
 
-  public String getPayload() {
-    return payload;
-  }
-
-  public void setPayload(String payload) {
-    this.payload = payload;
-  }
-
   public long getCreatedAt() {
     return createdAt;
   }
@@ -132,5 +165,133 @@ public class AgentEntity {
 
   public void setUserCode(String userCode) {
     this.userCode = userCode;
+  }
+
+  public String getMode() {
+    return mode;
+  }
+
+  public void setMode(String mode) {
+    this.mode = mode;
+  }
+
+  public String getName() {
+    return name;
+  }
+
+  public void setName(String name) {
+    this.name = name;
+  }
+
+  public String getAgentPublicKey() {
+    return agentPublicKey;
+  }
+
+  public void setAgentPublicKey(String agentPublicKey) {
+    this.agentPublicKey = agentPublicKey;
+  }
+
+  public String getAgentJwksUrl() {
+    return agentJwksUrl;
+  }
+
+  public void setAgentJwksUrl(String agentJwksUrl) {
+    this.agentJwksUrl = agentJwksUrl;
+  }
+
+  public String getAgentKid() {
+    return agentKid;
+  }
+
+  public void setAgentKid(String agentKid) {
+    this.agentKid = agentKid;
+  }
+
+  public String getActivatedAt() {
+    return activatedAt;
+  }
+
+  public void setActivatedAt(String activatedAt) {
+    this.activatedAt = activatedAt;
+  }
+
+  public String getExpiresAt() {
+    return expiresAt;
+  }
+
+  public void setExpiresAt(String expiresAt) {
+    this.expiresAt = expiresAt;
+  }
+
+  public String getLastUsedAt() {
+    return lastUsedAt;
+  }
+
+  public void setLastUsedAt(String lastUsedAt) {
+    this.lastUsedAt = lastUsedAt;
+  }
+
+  public Long getSessionTtlResetAt() {
+    return sessionTtlResetAt;
+  }
+
+  public void setSessionTtlResetAt(Long sessionTtlResetAt) {
+    this.sessionTtlResetAt = sessionTtlResetAt;
+  }
+
+  public Long getMaxLifetimeResetAt() {
+    return maxLifetimeResetAt;
+  }
+
+  public void setMaxLifetimeResetAt(Long maxLifetimeResetAt) {
+    this.maxLifetimeResetAt = maxLifetimeResetAt;
+  }
+
+  public Boolean getAbsoluteLifetimeElapsed() {
+    return absoluteLifetimeElapsed;
+  }
+
+  public void setAbsoluteLifetimeElapsed(Boolean absoluteLifetimeElapsed) {
+    this.absoluteLifetimeElapsed = absoluteLifetimeElapsed;
+  }
+
+  public String getApproval() {
+    return approval;
+  }
+
+  public void setApproval(String approval) {
+    this.approval = approval;
+  }
+
+  public String getReason() {
+    return reason;
+  }
+
+  public void setReason(String reason) {
+    this.reason = reason;
+  }
+
+  public String getRejectionReason() {
+    return rejectionReason;
+  }
+
+  public void setRejectionReason(String rejectionReason) {
+    this.rejectionReason = rejectionReason;
+  }
+
+  public String getRevocationReason() {
+    return revocationReason;
+  }
+
+  public void setRevocationReason(String revocationReason) {
+    this.revocationReason = revocationReason;
+  }
+
+  public String getAgentGrants() {
+    return agentGrants;
+  }
+
+  public void setAgentGrants(String agentGrants) {
+    this.agentGrants = agentGrants;
   }
 }

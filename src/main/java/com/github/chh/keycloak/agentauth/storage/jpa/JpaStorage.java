@@ -72,7 +72,7 @@ public class JpaStorage implements AgentAuthStorage {
   @Override
   public Map<String, Object> getAgent(String agentId) {
     AgentEntity entity = em().find(AgentEntity.class, agentId);
-    return entity == null ? null : deserialize(entity.getPayload());
+    return entity == null ? null : agentToMap(entity);
   }
 
   @Override
@@ -80,34 +80,28 @@ public class JpaStorage implements AgentAuthStorage {
     EntityManager em = em();
     AgentEntity entity = em.find(AgentEntity.class, agentId);
     long now = System.currentTimeMillis();
-    String json = serialize(agent);
-    String hostId = (String) agent.get("host_id");
-    String thumbprint = (String) agent.get("agent_key_thumbprint");
-    String status = (String) agent.get("status");
-    String userId = stringField(agent, "user_id");
-    String userCode = stringField(agent, "user_code");
+    String priorGrantsJson;
     if (entity == null) {
       entity = new AgentEntity();
       entity.setId(agentId);
       entity.setCreatedAt(now);
-      entity.setHostId(hostId);
-      entity.setKeyThumbprint(thumbprint);
-      entity.setStatus(status);
-      entity.setPayload(json);
-      entity.setUserId(userId);
-      entity.setUserCode(userCode);
       entity.setUpdatedAt(now);
+      priorGrantsJson = null;
+      applyAgentFields(entity, agent);
       em.persist(entity);
     } else {
-      entity.setHostId(hostId);
-      entity.setKeyThumbprint(thumbprint);
-      entity.setStatus(status);
-      entity.setPayload(json);
-      entity.setUserId(userId);
-      entity.setUserCode(userCode);
+      priorGrantsJson = entity.getAgentGrants();
       entity.setUpdatedAt(now);
+      applyAgentFields(entity, agent);
     }
-    syncAgentGrants(em, agentId, agent, now);
+    // Only re-sync the AGENT_AUTH_AGENT_GRANT secondary index when the grants array actually
+    // changed. Skipping the unchanged case avoids a delete-and-replace round-trip on every
+    // putAgent (e.g. when /capability/execute updates last_used_at) and keeps long-running
+    // transactions like the streaming proxy from holding row locks against concurrent revokes.
+    String newGrantsJson = entity.getAgentGrants();
+    if (!java.util.Objects.equals(priorGrantsJson, newGrantsJson)) {
+      syncAgentGrants(em, agentId, agent, now);
+    }
   }
 
   @Override
@@ -120,7 +114,7 @@ public class JpaStorage implements AgentAuthStorage {
         .setParameter("userCode", userCode)
         .setMaxResults(1)
         .getResultList();
-    return results.isEmpty() ? null : deserialize(results.get(0).getPayload());
+    return results.isEmpty() ? null : agentToMap(results.get(0));
   }
 
   @Override
@@ -142,24 +136,24 @@ public class JpaStorage implements AgentAuthStorage {
 
   @Override
   public Map<String, Object> findAgentByKeyAndHost(String agentKeyThumbprint, String hostId) {
-    List<AgentEntity> results = em()
+    List<AgentEntity> rows = em()
         .createNamedQuery("AgentEntity.findByKeyAndHost", AgentEntity.class)
         .setParameter("hostId", hostId)
         .setParameter("keyThumbprint", agentKeyThumbprint)
         .setMaxResults(1)
         .getResultList();
-    return results.isEmpty() ? null : deserialize(results.get(0).getPayload());
+    return rows.isEmpty() ? null : agentToMap(rows.get(0));
   }
 
   @Override
   public List<Map<String, Object>> findAgentsByHost(String hostId) {
-    List<AgentEntity> results = em()
+    List<AgentEntity> rows = em()
         .createNamedQuery("AgentEntity.findByHost", AgentEntity.class)
         .setParameter("hostId", hostId)
         .getResultList();
-    List<Map<String, Object>> out = new ArrayList<>(results.size());
-    for (AgentEntity e : results) {
-      out.add(deserialize(e.getPayload()));
+    List<Map<String, Object>> out = new ArrayList<>(rows.size());
+    for (AgentEntity e : rows) {
+      out.add(agentToMap(e));
     }
     return out;
   }
@@ -204,7 +198,7 @@ public class JpaStorage implements AgentAuthStorage {
         .getResultList();
     List<Map<String, Object>> out = new ArrayList<>(rows.size());
     for (AgentEntity row : rows) {
-      out.add(deserialize(row.getPayload()));
+      out.add(agentToMap(row));
     }
     return out;
   }
@@ -293,6 +287,133 @@ public class JpaStorage implements AgentAuthStorage {
     entity.setDefaultCapabilityGrants(
         defaults instanceof List<?> ? serializeAny(defaults) : null);
     entity.setLastUsedAt(stringField(host, "last_used_at"));
+  }
+
+  /**
+   * Phase 6c: project an {@link AgentEntity} back to the protocol-shaped map. Null columns are
+   * omitted so unset fields don't surface as explicit nulls in JSON responses. Always populates the
+   * non-null PK / typed columns.
+   */
+  private static Map<String, Object> agentToMap(AgentEntity entity) {
+    Map<String, Object> map = new java.util.HashMap<>();
+    map.put("agent_id", entity.getId());
+    map.put("host_id", entity.getHostId());
+    map.put("agent_key_thumbprint", entity.getKeyThumbprint());
+    map.put("status", entity.getStatus());
+    map.put("created_at", java.time.Instant.ofEpochMilli(entity.getCreatedAt()).toString());
+    map.put("updated_at", java.time.Instant.ofEpochMilli(entity.getUpdatedAt()).toString());
+    if (entity.getUserId() != null) {
+      map.put("user_id", entity.getUserId());
+    }
+    if (entity.getUserCode() != null) {
+      map.put("user_code", entity.getUserCode());
+    }
+    if (entity.getMode() != null) {
+      map.put("mode", entity.getMode());
+    }
+    if (entity.getName() != null) {
+      map.put("name", entity.getName());
+    }
+    if (entity.getAgentPublicKey() != null) {
+      map.put("agent_public_key", deserialize(entity.getAgentPublicKey()));
+    }
+    if (entity.getAgentJwksUrl() != null) {
+      map.put("agent_jwks_url", entity.getAgentJwksUrl());
+    }
+    if (entity.getAgentKid() != null) {
+      map.put("agent_kid", entity.getAgentKid());
+    }
+    if (entity.getActivatedAt() != null) {
+      map.put("activated_at", entity.getActivatedAt());
+    }
+    if (entity.getExpiresAt() != null) {
+      map.put("expires_at", entity.getExpiresAt());
+    }
+    if (entity.getLastUsedAt() != null) {
+      map.put("last_used_at", entity.getLastUsedAt());
+    }
+    if (entity.getSessionTtlResetAt() != null) {
+      map.put("session_ttl_reset_at", entity.getSessionTtlResetAt());
+    }
+    if (entity.getMaxLifetimeResetAt() != null) {
+      map.put("max_lifetime_reset_at", entity.getMaxLifetimeResetAt());
+    }
+    if (entity.getAbsoluteLifetimeElapsed() != null) {
+      map.put("absolute_lifetime_elapsed", entity.getAbsoluteLifetimeElapsed());
+    }
+    if (entity.getApproval() != null) {
+      map.put("approval", deserialize(entity.getApproval()));
+    }
+    if (entity.getReason() != null) {
+      map.put("reason", entity.getReason());
+    }
+    if (entity.getRejectionReason() != null) {
+      map.put("rejection_reason", entity.getRejectionReason());
+    }
+    if (entity.getRevocationReason() != null) {
+      map.put("revocation_reason", entity.getRevocationReason());
+    }
+    if (entity.getAgentGrants() != null) {
+      map.put("agent_capability_grants", deserializeList(entity.getAgentGrants()));
+    }
+    return map;
+  }
+
+  /**
+   * Phase 6c: write protocol-shaped map fields onto an {@link AgentEntity}. The map fully replaces
+   * the prior agent record (mirrors blob-write semantics). Non-null fields HOST_ID, KEY_THUMBPRINT,
+   * STATUS are always set since they're {@code @Column(nullable = false)}.
+   */
+  @SuppressWarnings("unchecked")
+  private static void applyAgentFields(AgentEntity entity, Map<String, Object> agent) {
+    String hostId = stringField(agent, "host_id");
+    if (hostId != null) {
+      entity.setHostId(hostId);
+    }
+    String thumbprint = stringField(agent, "agent_key_thumbprint");
+    if (thumbprint != null) {
+      entity.setKeyThumbprint(thumbprint);
+    }
+    String status = stringField(agent, "status");
+    if (status != null) {
+      entity.setStatus(status);
+    }
+    entity.setUserId(stringField(agent, "user_id"));
+    entity.setUserCode(stringField(agent, "user_code"));
+    entity.setMode(stringField(agent, "mode"));
+    entity.setName(stringField(agent, "name"));
+    Object agentPublicKey = agent.get("agent_public_key");
+    entity.setAgentPublicKey(agentPublicKey instanceof Map<?, ?>
+        ? serialize((Map<String, Object>) agentPublicKey)
+        : null);
+    entity.setAgentJwksUrl(stringField(agent, "agent_jwks_url"));
+    entity.setAgentKid(stringField(agent, "agent_kid"));
+    entity.setActivatedAt(stringField(agent, "activated_at"));
+    entity.setExpiresAt(stringField(agent, "expires_at"));
+    entity.setLastUsedAt(stringField(agent, "last_used_at"));
+    entity.setSessionTtlResetAt(longField(agent, "session_ttl_reset_at"));
+    entity.setMaxLifetimeResetAt(longField(agent, "max_lifetime_reset_at"));
+    entity.setAbsoluteLifetimeElapsed(booleanField(agent, "absolute_lifetime_elapsed"));
+    Object approval = agent.get("approval");
+    entity.setApproval(approval instanceof Map<?, ?>
+        ? serialize((Map<String, Object>) approval)
+        : null);
+    entity.setReason(stringField(agent, "reason"));
+    entity.setRejectionReason(stringField(agent, "rejection_reason"));
+    entity.setRevocationReason(stringField(agent, "revocation_reason"));
+    Object grants = agent.get("agent_capability_grants");
+    entity.setAgentGrants(grants instanceof List<?> ? serializeAny(grants) : null);
+  }
+
+  private static Long longField(Map<String, Object> map, String key) {
+    Object value = map == null ? null : map.get(key);
+    if (value instanceof Long l) {
+      return l;
+    }
+    if (value instanceof Number n) {
+      return n.longValue();
+    }
+    return null;
   }
 
   // --- Capabilities ---
