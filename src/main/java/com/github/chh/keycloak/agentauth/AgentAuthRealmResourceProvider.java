@@ -1646,7 +1646,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             JWSVerifier verifier = new Ed25519Verifier(hostKey);
             if (jwt.verify(verifier)) {
               String iss = jwt.getJWTClaimsSet().getIssuer();
-              if (iss != null && hostKey.computeThumbprint().toString().equals(iss)) {
+              if (iss != null && iss.equals(hostKey.computeThumbprint().toString())) {
                 verifiedHostId = iss;
                 isAuthenticated = true;
               }
@@ -1833,7 +1833,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             JWSVerifier verifier = new Ed25519Verifier(hostKey);
             if (jwt.verify(verifier)) {
               String iss = jwt.getJWTClaimsSet().getIssuer();
-              if (iss != null && hostKey.computeThumbprint().toString().equals(iss)) {
+              if (iss != null && iss.equals(hostKey.computeThumbprint().toString())) {
                 isAuthenticated = true;
               }
             }
