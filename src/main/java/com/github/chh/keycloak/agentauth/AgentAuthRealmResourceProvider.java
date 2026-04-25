@@ -610,6 +610,15 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       List<String> scopeList = new ArrayList<>();
       Map<String, Object> selectedGrant = null;
 
+      // Phase 2 of the multi-tenant authz plan: lazy re-evaluation of the layer-2 gate against
+      // the agent's user. Q4 cascade is hybrid — eager on org-membership changes (Phase 4),
+      // lazy on role drift. Until Phase 4 lands, both paths are caught here: grants whose cap
+      // requires an org/role the agent's user no longer satisfies are stripped from the
+      // response. The grant row stays in storage (revocation is the cascade's job), but it
+      // becomes invisible to resource servers via introspect.
+      String agentUserId = (String) agentData.get("user_id");
+      UserEntitlement agentUserEntitlement = loadUserEntitlement(agentUserId);
+
       if (allGrants != null) {
         for (Map<String, Object> grant : allGrants) {
           if (!"active".equals(grant.get("status")))
@@ -617,6 +626,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           String capName = (String) grant.get("capability");
           if (restrictedCaps != null && !restrictedCaps.contains(capName))
             continue;
+
+          Map<String, Object> registeredCap = storage().getCapability(capName);
+          if (registeredCap == null
+              || !userEntitlementAllows(registeredCap, agentUserEntitlement)) {
+            continue;
+          }
 
           Map<String, Object> compactGrant = new HashMap<>();
           compactGrant.put("capability", capName);
@@ -3072,23 +3087,34 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         agentData.put("activated_at", nowTs);
         agentData.put("user_id", userId);
       }
+      // Phase 2 of the multi-tenant authz plan: snapshot the approver's KC entitlement once and
+      // use it to gate each pending grant. Caps the approver can't grant under their current
+      // org/role mapping flip to denied(reason=insufficient_authority) instead of active —
+      // matches the existing partial-approval shape (user_denied), but distinguishes the cause
+      // for audit/UI purposes.
+      UserEntitlement approverEntitlement = loadUserEntitlement(userId);
       if (grants != null) {
         for (Map<String, Object> grant : grants) {
           if ("pending".equals(grant.get("status"))) {
             String capName = (String) grant.get("capability");
             boolean grantedThis = approvedSubset == null || approvedSubset.contains(capName);
             if (grantedThis) {
+              Map<String, Object> registeredCap = storage.getCapability(capName);
+              if (registeredCap == null
+                  || !userEntitlementAllows(registeredCap, approverEntitlement)) {
+                grant.put("status", "denied");
+                grant.put("reason", "insufficient_authority");
+                grant.remove("status_url");
+                continue;
+              }
               grant.put("status", "active");
               grant.remove("status_url");
-              Map<String, Object> registeredCap = storage.getCapability(capName);
-              if (registeredCap != null) {
-                grant.put("description", registeredCap.get("description"));
-                if (registeredCap.containsKey("input")) {
-                  grant.put("input", registeredCap.get("input"));
-                }
-                if (registeredCap.containsKey("output")) {
-                  grant.put("output", registeredCap.get("output"));
-                }
+              grant.put("description", registeredCap.get("description"));
+              if (registeredCap.containsKey("input")) {
+                grant.put("input", registeredCap.get("input"));
+              }
+              if (registeredCap.containsKey("output")) {
+                grant.put("output", registeredCap.get("output"));
               }
               grant.put("granted_by", userId);
             } else {

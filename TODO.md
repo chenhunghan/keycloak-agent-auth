@@ -173,11 +173,16 @@ quality-of-life.
    `TestcontainersSupport`, realm-level toggle in the test realm
    import).
 
-2. **Phase 2 — Approval-time + introspect-time enforcement.** Wire
-   layer-2 check on `/verify/approve` and `/verify/deny` (reject if
-   caller lacks the cap's `org_id` ∩ `roles`). Wire lazy re-check on
-   `/agent/introspect` (filter dead grants from the response). Closes
-   the multi-tenant hole at both decision points.
+2. **Phase 2 — Approval-time + introspect-time enforcement.** ✅
+   Shipped 2026-04-25. `/verify/approve` now layer-2-checks each
+   pending grant against the approver's KC entitlement; gate-failed
+   grants flip to `status=denied` with `reason=insufficient_authority`
+   (mirroring the existing partial-approval shape, but distinguishing
+   the cause from `user_denied` for audit/UI). `/agent/introspect`
+   now lazy-re-evaluates the gate against the agent's user on every
+   call, stripping grants whose cap fails the current entitlement —
+   the lazy half of Q4's hybrid cascade. Eager cascade on
+   org-membership changes still owed by Phase 4.
 
 3. **Phase 3 — Grant join table (storage refactor, scoped).** Promote
    `agent.agent_capability_grants` from JSON blob to
