@@ -8,6 +8,12 @@ import jakarta.persistence.NamedQueries;
 import jakarta.persistence.NamedQuery;
 import jakarta.persistence.Table;
 
+/**
+ * Phase 6b: typed columns replace the prior JSON-blob {@code PAYLOAD}. The Ed25519 JWK is kept as
+ * TEXT ({@code PUBLIC_KEY_JWK}) — we never query its components individually — and the
+ * default-grants list is similarly serialized JSON ({@code DEFAULT_CAPABILITY_GRANTS}); both could
+ * be normalized further in a follow-up if a query pattern justifies it.
+ */
 @Entity
 @Table(name = "AGENT_AUTH_HOST", indexes = {
     @Index(name = "IDX_AGENT_AUTH_HOST_USER", columnList = "USER_ID")
@@ -24,22 +30,38 @@ public class HostEntity {
   @Column(name = "STATUS", length = 32, nullable = false)
   private String status;
 
-  @Column(name = "PAYLOAD", columnDefinition = "TEXT", nullable = false)
-  private String payload;
-
   @Column(name = "CREATED_AT", nullable = false)
   private long createdAt;
 
   @Column(name = "UPDATED_AT", nullable = false)
   private long updatedAt;
 
-  /**
-   * Queryable mirror of {@code payload.user_id}. Null when the host is not linked to a Keycloak
-   * user. Written in lock-step with the payload by {@code JpaStorage.putHost}; used for the §2.6
-   * user-deletion cascade lookup without scanning the JSON blob.
-   */
   @Column(name = "USER_ID", length = 36)
   private String userId;
+
+  @Column(name = "PUBLIC_KEY_JWK", columnDefinition = "TEXT")
+  private String publicKeyJwk;
+
+  @Column(name = "HOST_JWKS_URL", length = 2048)
+  private String hostJwksUrl;
+
+  @Column(name = "HOST_KID", length = 255)
+  private String hostKid;
+
+  @Column(name = "NAME", length = 255)
+  private String name;
+
+  @Column(name = "DESCRIPTION", length = 1024)
+  private String description;
+
+  @Column(name = "SERVICE_ACCOUNT_CLIENT_ID", length = 255)
+  private String serviceAccountClientId;
+
+  @Column(name = "DEFAULT_CAPABILITY_GRANTS", columnDefinition = "TEXT")
+  private String defaultCapabilityGrants;
+
+  @Column(name = "LAST_USED_AT", length = 64)
+  private String lastUsedAt;
 
   public String getId() {
     return id;
@@ -55,14 +77,6 @@ public class HostEntity {
 
   public void setStatus(String status) {
     this.status = status;
-  }
-
-  public String getPayload() {
-    return payload;
-  }
-
-  public void setPayload(String payload) {
-    this.payload = payload;
   }
 
   public long getCreatedAt() {
@@ -87,5 +101,69 @@ public class HostEntity {
 
   public void setUserId(String userId) {
     this.userId = userId;
+  }
+
+  public String getPublicKeyJwk() {
+    return publicKeyJwk;
+  }
+
+  public void setPublicKeyJwk(String publicKeyJwk) {
+    this.publicKeyJwk = publicKeyJwk;
+  }
+
+  public String getHostJwksUrl() {
+    return hostJwksUrl;
+  }
+
+  public void setHostJwksUrl(String hostJwksUrl) {
+    this.hostJwksUrl = hostJwksUrl;
+  }
+
+  public String getHostKid() {
+    return hostKid;
+  }
+
+  public void setHostKid(String hostKid) {
+    this.hostKid = hostKid;
+  }
+
+  public String getName() {
+    return name;
+  }
+
+  public void setName(String name) {
+    this.name = name;
+  }
+
+  public String getDescription() {
+    return description;
+  }
+
+  public void setDescription(String description) {
+    this.description = description;
+  }
+
+  public String getServiceAccountClientId() {
+    return serviceAccountClientId;
+  }
+
+  public void setServiceAccountClientId(String serviceAccountClientId) {
+    this.serviceAccountClientId = serviceAccountClientId;
+  }
+
+  public String getDefaultCapabilityGrants() {
+    return defaultCapabilityGrants;
+  }
+
+  public void setDefaultCapabilityGrants(String defaultCapabilityGrants) {
+    this.defaultCapabilityGrants = defaultCapabilityGrants;
+  }
+
+  public String getLastUsedAt() {
+    return lastUsedAt;
+  }
+
+  public void setLastUsedAt(String lastUsedAt) {
+    this.lastUsedAt = lastUsedAt;
   }
 }

@@ -256,4 +256,44 @@
         </createIndex>
         <dropColumn tableName="AGENT_AUTH_CAPABILITY" columnName="PAYLOAD"/>
     </changeSet>
+
+    <!--
+        Phase 6b of the multi-tenant authz plan: promote AGENT_AUTH_HOST to typed columns.
+        Pre-production schema, no migration. PUBLIC_KEY_JWK is the host's Ed25519 JWK, kept as
+        TEXT because we never query its components. DEFAULT_CAPABILITY_GRANTS is a serialized
+        list of {capability, status, constraints?} — promotion to a normalized table is left
+        to a future iteration since it isn't yet on a hot query path.
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.4.0-host-typed-columns">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_HOST" columnName="PUBLIC_KEY_JWK"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_HOST">
+            <column name="PUBLIC_KEY_JWK" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="HOST_JWKS_URL" type="VARCHAR(2048)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="HOST_KID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="DESCRIPTION" type="VARCHAR(1024)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="SERVICE_ACCOUNT_CLIENT_ID" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="DEFAULT_CAPABILITY_GRANTS" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="LAST_USED_AT" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <dropColumn tableName="AGENT_AUTH_HOST" columnName="PAYLOAD"/>
+    </changeSet>
 </databaseChangeLog>

@@ -37,7 +37,7 @@ public class JpaStorage implements AgentAuthStorage {
   @Override
   public Map<String, Object> getHost(String hostId) {
     HostEntity entity = em().find(HostEntity.class, hostId);
-    return entity == null ? null : deserialize(entity.getPayload());
+    return entity == null ? null : hostToMap(entity);
   }
 
   @Override
@@ -45,23 +45,16 @@ public class JpaStorage implements AgentAuthStorage {
     EntityManager em = em();
     HostEntity entity = em.find(HostEntity.class, hostId);
     long now = System.currentTimeMillis();
-    String json = serialize(host);
-    String status = (String) host.get("status");
-    String userId = stringField(host, "user_id");
     if (entity == null) {
       entity = new HostEntity();
       entity.setId(hostId);
       entity.setCreatedAt(now);
-      entity.setStatus(status);
-      entity.setPayload(json);
-      entity.setUserId(userId);
       entity.setUpdatedAt(now);
+      applyHostFields(entity, host);
       em.persist(entity);
     } else {
-      entity.setStatus(status);
-      entity.setPayload(json);
-      entity.setUserId(userId);
       entity.setUpdatedAt(now);
+      applyHostFields(entity, host);
     }
   }
 
@@ -227,9 +220,79 @@ public class JpaStorage implements AgentAuthStorage {
         .getResultList();
     List<Map<String, Object>> out = new ArrayList<>(results.size());
     for (HostEntity e : results) {
-      out.add(deserialize(e.getPayload()));
+      out.add(hostToMap(e));
     }
     return out;
+  }
+
+  /**
+   * Phase 6b: project a {@link HostEntity} back to the protocol-shaped map. Null columns are
+   * omitted so unset fields don't surface as explicit nulls in JSON responses. Always populates
+   * {@code host_id}, {@code status}, {@code created_at}, {@code updated_at} since those are
+   * non-null columns.
+   */
+  private static Map<String, Object> hostToMap(HostEntity entity) {
+    Map<String, Object> map = new java.util.HashMap<>();
+    map.put("host_id", entity.getId());
+    map.put("status", entity.getStatus());
+    map.put("created_at", java.time.Instant.ofEpochMilli(entity.getCreatedAt()).toString());
+    map.put("updated_at", java.time.Instant.ofEpochMilli(entity.getUpdatedAt()).toString());
+    if (entity.getUserId() != null) {
+      map.put("user_id", entity.getUserId());
+    }
+    if (entity.getPublicKeyJwk() != null) {
+      map.put("public_key", deserialize(entity.getPublicKeyJwk()));
+    }
+    if (entity.getHostJwksUrl() != null) {
+      map.put("host_jwks_url", entity.getHostJwksUrl());
+    }
+    if (entity.getHostKid() != null) {
+      map.put("host_kid", entity.getHostKid());
+    }
+    if (entity.getName() != null) {
+      map.put("name", entity.getName());
+    }
+    if (entity.getDescription() != null) {
+      map.put("description", entity.getDescription());
+    }
+    if (entity.getServiceAccountClientId() != null) {
+      map.put("service_account_client_id", entity.getServiceAccountClientId());
+    }
+    if (entity.getDefaultCapabilityGrants() != null) {
+      map.put("default_capability_grants",
+          deserializeList(entity.getDefaultCapabilityGrants()));
+    }
+    if (entity.getLastUsedAt() != null) {
+      map.put("last_used_at", entity.getLastUsedAt());
+    }
+    return map;
+  }
+
+  /**
+   * Phase 6b: write protocol-shaped map fields onto a {@link HostEntity}. The map fully replaces
+   * the prior host record (mirrors blob-write semantics). {@code created_at} timestamps from prior
+   * records are not overwritten by the caller — those live in the BIGINT columns and are managed by
+   * {@link #putHost} directly.
+   */
+  @SuppressWarnings("unchecked")
+  private static void applyHostFields(HostEntity entity, Map<String, Object> host) {
+    String status = stringField(host, "status");
+    if (status != null) {
+      entity.setStatus(status);
+    }
+    entity.setUserId(stringField(host, "user_id"));
+    Object publicKey = host.get("public_key");
+    entity.setPublicKeyJwk(
+        publicKey instanceof Map<?, ?> ? serialize((Map<String, Object>) publicKey) : null);
+    entity.setHostJwksUrl(stringField(host, "host_jwks_url"));
+    entity.setHostKid(stringField(host, "host_kid"));
+    entity.setName(stringField(host, "name"));
+    entity.setDescription(stringField(host, "description"));
+    entity.setServiceAccountClientId(stringField(host, "service_account_client_id"));
+    Object defaults = host.get("default_capability_grants");
+    entity.setDefaultCapabilityGrants(
+        defaults instanceof List<?> ? serializeAny(defaults) : null);
+    entity.setLastUsedAt(stringField(host, "last_used_at"));
   }
 
   // --- Capabilities ---
@@ -449,12 +512,29 @@ public class JpaStorage implements AgentAuthStorage {
     }
   }
 
+  private static String serializeAny(Object value) {
+    try {
+      return JsonSerialization.writeValueAsString(value);
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to serialize agent-auth payload", e);
+    }
+  }
+
   @SuppressWarnings("unchecked")
   private static Map<String, Object> deserialize(String json) {
     try {
       return JsonSerialization.readValue(json, Map.class);
     } catch (IOException e) {
       throw new IllegalStateException("Failed to deserialize agent-auth payload", e);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, Object>> deserializeList(String json) {
+    try {
+      return JsonSerialization.readValue(json, List.class);
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to deserialize agent-auth list payload", e);
     }
   }
 }
