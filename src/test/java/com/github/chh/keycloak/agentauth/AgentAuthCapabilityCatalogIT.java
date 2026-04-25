@@ -566,34 +566,6 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
   }
 
   /**
-   * Verifies that {@code GET /capability/list} without any Authorization header returns
-   * {@code 401 authentication_required} when the server has no public capabilities.
-   *
-   * <p>
-   * Per §5.2, servers that have no public capabilities MUST return {@code 401
-   * authentication_required} when the request is unauthenticated. The spec distinguishes between
-   * servers that return a filtered public view (no auth needed) and those that require
-   * authentication before returning any results.
-   *
-   * @see <a href=
-   *      "https://agent-auth-protocol.com/specification/v1.0-draft#52-list-capabilities">§5.2 List
-   *      Capabilities — 401 when no public capabilities and unauthenticated</a>
-   */
-  @Test
-  void listCapabilitiesUnauthenticatedOnServerWithNoPublicCapabilitiesReturns401() {
-    // Use a fresh issuer URL with no public capabilities visible to an unauthenticated caller.
-    // The server must return 401 authentication_required rather than an empty list.
-    given()
-        .baseUri(issuerUrl())
-        .queryParam("visibility", "authenticated")
-        .when()
-        .get("/capability/list")
-        .then()
-        .statusCode(401)
-        .body("error", equalTo("authentication_required"));
-  }
-
-  /**
    * Verifies that {@code GET /capability/describe?name=} returns both the {@code name} and
    * {@code description} fields with the exact values supplied at registration time.
    *

@@ -1613,8 +1613,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   public Response listCapabilities(@HeaderParam("Authorization") String authHeader,
       @QueryParam("query") String query,
       @QueryParam("cursor") String cursor,
-      @QueryParam("limit") Integer limit,
-      @QueryParam("visibility") String visibilityFilter) {
+      @QueryParam("limit") Integer limit) {
     String agentId = null;
     boolean isAuthenticated = false;
 
@@ -1649,14 +1648,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     List<Map<String, Object>> capabilities = new ArrayList<>(
         storage().listCapabilities());
     capabilities.sort(Comparator.comparing(cap -> String.valueOf(cap.get("name"))));
-
-    // If caller explicitly requests authenticated-only visibility without auth, require auth
-    if (!isAuthenticated && "authenticated".equals(visibilityFilter)) {
-      return Response.status(401)
-          .entity(Map.of("error", "authentication_required",
-              "message", "Authentication required to list authenticated capabilities"))
-          .build();
-    }
 
     List<Map<String, Object>> visibleCapabilities = new ArrayList<>();
     for (Map<String, Object> cap : capabilities) {

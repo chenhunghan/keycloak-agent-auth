@@ -78,12 +78,16 @@ Living list of things we want to come back to. Each item carries enough context 
   confirm `iss` matches the JWK thumbprint. Same fix applies to
   `describeCapability` (line 1746+) which inherits the same loose check.
 
-- [ ] **Non-spec `?visibility=authenticated` query param on
-  `/capability/list`.** We accept this and use it to force a 401 if the
-  caller is unauthenticated. Spec §5.2 doesn't define it. If we want to
-  claim verbatim spec compliance, either drop it or move it under a
-  vendor-prefixed namespace. Behaviour is invisible to spec-conforming
-  clients, so low priority — but worth deciding.
+- [ ] **Add a fixture-less-realm test for the §5.2 "no public caps →
+  401" branch.** When we dropped the non-spec `?visibility=authenticated`
+  query param, the test that used it was deleted because its fixture
+  always registered a public capability. The production code at
+  `AgentAuthRealmResourceProvider.listCapabilities` still has the
+  spec-compliant `!isAuthenticated && visibleCapabilities.isEmpty() →
+  401` branch, but it's no longer covered by an integration test. Cover
+  it with a separate realm fixture that registers only authenticated-
+  visibility capabilities (or none), then asserts an unauthenticated
+  `/capability/list` returns 401 `authentication_required`.
 
 ## DRAFT — AAP ↔ Keycloak authorization integration
 
