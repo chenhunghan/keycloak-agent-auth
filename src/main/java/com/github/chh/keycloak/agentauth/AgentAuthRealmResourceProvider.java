@@ -3198,7 +3198,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       String bindingMessage) {
     boolean hostLinked = hostData != null && hostData.get("user_id") != null;
     if ("delegated".equals(mode) && hostLinked) {
-      return buildCibaApprovalObject(agentId, bindingMessage);
+      Map<String, Object> approval = buildCibaApprovalObject(agentId, bindingMessage);
+      // §7.2 push delivery: best-effort email to the linked user. Failure is logged and
+      // swallowed by the notifier so the approval response itself never breaks on SMTP issues
+      // — the inbox endpoint remains the always-on fallback.
+      new com.github.chh.keycloak.agentauth.notify.CibaEmailNotifier(session)
+          .notifyApproval(agentId, agentData, hostData, bindingMessage);
+      return approval;
     }
     if ("delegated".equals(mode)) {
       String userCode = generateUserCode();

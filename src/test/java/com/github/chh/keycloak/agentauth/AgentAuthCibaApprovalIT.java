@@ -292,6 +292,83 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
   }
 
   @Test
+  void cibaRegisterSucceedsEvenWhenSmtpDeliveryFails() {
+    // §7.2 push channel must be best-effort: when SMTP can't deliver, the inbox is the
+    // fallback. The register response itself must NOT fail.
+    String cap = registerApprovalCap("ciba_smtp_fail_" + suffix());
+    String username = "ciba-smtpfail-" + suffix();
+    String userId = createTestUser(username);
+
+    // Point the realm's SMTP at a host that will refuse connections so EmailSenderProvider
+    // throws. Must be reverted at the end of the test so other CIBA tests aren't disturbed.
+    Map<String, Object> originalRealm = adminGetRealm();
+    @SuppressWarnings("unchecked")
+    Map<String, String> originalSmtp = (Map<String, String>) originalRealm.getOrDefault(
+        "smtpServer",
+        new java.util.HashMap<String, String>());
+    try {
+      adminPutRealm(Map.of("smtpServer", Map.of(
+          "host", "127.0.0.1",
+          "port", "1",
+          "from", "noreply@agent-auth.test",
+          "fromDisplayName", "Agent Auth")));
+
+      OctetKeyPair hostKey = TestKeys.generateEd25519();
+      preRegisterHost(hostKey, "smtp-fail-host");
+      linkHost(TestKeys.thumbprint(hostKey), userId);
+
+      OctetKeyPair agentKey = TestKeys.generateEd25519();
+      Response resp = given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer "
+              + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+          .contentType(ContentType.JSON)
+          .body(String.format("""
+              {
+                "name": "smtp-fail agent",
+                "capabilities": ["%s"],
+                "mode": "delegated"
+              }
+              """, cap))
+          .when()
+          .post("/agent/register");
+      // Email delivery to 127.0.0.1:1 will fail. Register response must still be 200 and
+      // CIBA-shaped — that's the resilience contract.
+      resp.then().statusCode(200)
+          .body("status", org.hamcrest.Matchers.equalTo("pending"))
+          .body("approval.method", org.hamcrest.Matchers.equalTo("ciba"));
+    } finally {
+      adminPutRealm(Map.of("smtpServer", originalSmtp));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> adminGetRealm() {
+    return given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/admin/realms/" + REALM)
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getMap("$");
+  }
+
+  private static void adminPutRealm(Map<String, Object> patch) {
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(patch)
+        .when()
+        .put("/admin/realms/" + REALM)
+        .then()
+        .statusCode(204);
+  }
+
+  @Test
   void inboxWithoutAuth_returns401() {
     given()
         .baseUri(issuerUrl())
