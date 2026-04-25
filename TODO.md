@@ -56,17 +56,6 @@ Living list of things we want to come back to. Each item carries enough context 
 
 ## §5.2 capability listing — spec gaps
 
-- [ ] **Add a fixture-less-realm test for the §5.2 "no public caps →
-  401" branch.** When we dropped the non-spec `?visibility=authenticated`
-  query param, the test that used it was deleted because its fixture
-  always registered a public capability. The production code at
-  `AgentAuthRealmResourceProvider.listCapabilities` still has the
-  spec-compliant `!isAuthenticated && visibleCapabilities.isEmpty() →
-  401` branch, but it's no longer covered by an integration test. Cover
-  it with a separate realm fixture that registers only authenticated-
-  visibility capabilities (or none), then asserts an unauthenticated
-  `/capability/list` returns 401 `authentication_required`.
-
 - [ ] **Promote host-defaults filtering on `/capability/list` into
   full user-entitlement gating.** The current §5.2 filter narrows the
   authenticated-visibility view for verified host JWTs from linked
