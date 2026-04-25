@@ -2574,60 +2574,117 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     String hostId = pendingAgent == null ? null : (String) pendingAgent.get("host_id");
     String status = pendingAgent == null ? null : (String) pendingAgent.get("status");
 
+    // §8.11 defense-in-depth: mint a CSRF token bound to this GET. The POST handler enforces
+    // double-submit: the cookie value MUST match the hidden form field. Bearer-authenticated
+    // POSTs skip this check (they already carry proof of intent).
+    String csrfToken = generateCsrfToken();
+
     StringBuilder html = new StringBuilder();
-    html.append("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">")
-        .append("<title>Agent Auth — Approve registration</title>")
-        .append("<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:640px;")
-        .append("margin:2rem auto;padding:0 1rem;color:#222}")
-        .append(
-            "h1{font-size:1.4rem}code{background:#f4f4f4;padding:.1rem .3rem;border-radius:3px}")
-        .append("form{margin-top:1.5rem}input[type=text],input[type=password]{width:100%;")
-        .append("padding:.5rem;margin:.25rem 0 .75rem;border:1px solid #ccc;border-radius:4px;")
-        .append("box-sizing:border-box;font-family:inherit}")
-        .append("button{padding:.55rem 1.1rem;border:0;border-radius:4px;font-weight:600;")
-        .append("cursor:pointer;margin-right:.5rem}")
-        .append(".approve{background:#1a7f37;color:#fff}.deny{background:#cf222e;color:#fff}")
-        .append(
-            ".err{background:#fff0f0;border:1px solid #cf222e;padding:.75rem;border-radius:4px}")
-        .append("label{font-size:.9rem;color:#555}</style></head><body>");
-    html.append("<h1>Agent Auth — Approve registration</h1>");
+    html.append("<!DOCTYPE html>\n")
+        .append("<html lang=\"en\">\n")
+        .append("<head>\n")
+        .append("<meta charset=\"utf-8\">\n")
+        .append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
+        .append("<title>Agent Auth — Approve registration</title>\n")
+        .append("</head>\n")
+        .append("<body>\n")
+        .append("<main>\n")
+        .append("<h1>Agent Auth — Approve registration</h1>\n");
+
     if (normalized == null || normalized.isBlank()) {
-      html.append("<p>Enter the <code>user_code</code> your agent gave you:</p>")
-          .append("<form method=\"get\" action=\"\">")
-          .append("<label for=\"user_code\">user_code</label>")
-          .append("<input type=\"text\" id=\"user_code\" name=\"user_code\" ")
-          .append("placeholder=\"ABCD-EFGH\" autofocus required>")
-          .append("<button type=\"submit\" class=\"approve\">Look up</button>")
-          .append("</form>");
+      html.append("<p>Enter the user code your agent gave you.</p>\n")
+          .append("<form method=\"get\" action=\"verify\" role=\"search\"\n")
+          .append("      aria-label=\"Look up user code\">\n")
+          .append("<p>\n")
+          .append("<label for=\"user_code\">User code</label>\n")
+          .append("<input type=\"text\" id=\"user_code\" name=\"user_code\"\n")
+          .append("       autocomplete=\"one-time-code\" required autofocus\n")
+          .append("       aria-describedby=\"user_code_hint\"\n")
+          .append("       pattern=\"[A-Za-z0-9-]{8,9}\" minlength=\"8\" maxlength=\"9\">\n")
+          .append("<span id=\"user_code_hint\">Eight letters, e.g. ABCD-EFGH.</span>\n")
+          .append("</p>\n")
+          .append("<p><button type=\"submit\">Look up</button></p>\n")
+          .append("</form>\n");
     } else if (pendingAgent == null) {
-      html.append("<div class=\"err\">No pending approval found for code <code>")
-          .append(htmlEscape(displayUserCode(normalized)))
-          .append("</code>. It may have expired or already been used.</div>");
-    } else if ("rejected".equals(status) || "revoked".equals(status) || "claimed".equals(status)) {
-      html.append("<div class=\"err\">This approval is no longer pending (status: <code>")
-          .append(htmlEscape(status)).append("</code>). Your agent must start a new flow.</div>");
+      html.append("<section role=\"alert\" aria-live=\"polite\">\n")
+          .append("<h2>Unknown or expired user code</h2>\n")
+          .append("<p>No pending approval found for code <code>")
+          .append(htmlEscape(displayUserCode(normalized))).append("</code>.\n")
+          .append("It may have expired or already been used.</p>\n")
+          .append("</section>\n");
+    } else if ("rejected".equals(status) || "revoked".equals(status)
+        || "claimed".equals(status)) {
+      html.append("<section role=\"alert\" aria-live=\"polite\">\n")
+          .append("<h2>Approval already closed</h2>\n")
+          .append("<p>This approval is no longer pending. The agent's current status is\n")
+          .append("<code>").append(htmlEscape(status)).append("</code>. ")
+          .append("Your agent must start a new flow.</p>\n")
+          .append("</section>\n");
     } else {
-      html.append("<p>Host <code>").append(htmlEscape(hostId == null ? "?" : hostId))
-          .append("</code> is requesting to register agent <code>")
-          .append(htmlEscape(name == null ? "(unnamed)" : name)).append("</code>.</p>");
-      html.append("<p>Paste a Keycloak access token for the user whose account should own this ")
-          .append("agent, then choose <em>Approve</em> or <em>Deny</em>. See ")
-          .append("<a href=\"https://www.rfc-editor.org/rfc/rfc8628\">RFC 8628</a> for the ")
-          .append("device-authorization flow this implements.</p>");
-      html.append("<form method=\"post\" action=\"verify\">")
+      html.append("<section aria-labelledby=\"request-summary\">\n")
+          .append("<h2 id=\"request-summary\">Registration request</h2>\n")
+          .append("<p>Host <code>")
+          .append(htmlEscape(hostId == null ? "unknown" : hostId))
+          .append("</code> is requesting to register an agent named\n<strong>")
+          .append(htmlEscape(name == null ? "(unnamed)" : name))
+          .append("</strong>. See ")
+          .append("<a href=\"https://www.rfc-editor.org/rfc/rfc8628\" rel=\"noreferrer\">\n")
+          .append("RFC 8628</a> for the flow this implements.</p>\n")
+          .append("</section>\n");
+      html.append("<form method=\"post\" action=\"verify\"\n")
+          .append("      aria-label=\"Approve or deny agent registration\">\n")
           .append("<input type=\"hidden\" name=\"user_code\" value=\"")
-          .append(htmlEscape(displayUserCode(normalized))).append("\">")
-          .append("<label for=\"access_token\">Keycloak access token</label>")
-          .append("<input type=\"password\" id=\"access_token\" name=\"access_token\" ")
-          .append("placeholder=\"eyJhbGciOi...\" required>")
-          .append("<button type=\"submit\" name=\"decision\" value=\"approve\" class=\"approve\">")
-          .append("Approve</button>")
-          .append("<button type=\"submit\" name=\"decision\" value=\"deny\" class=\"deny\">")
-          .append("Deny</button>")
-          .append("</form>");
+          .append(htmlEscape(displayUserCode(normalized))).append("\">\n")
+          .append("<input type=\"hidden\" name=\"csrf_token\" value=\"")
+          .append(csrfToken).append("\">\n")
+          .append("<fieldset>\n")
+          .append("<legend>Your credentials</legend>\n")
+          .append("<p>\n")
+          .append("<label for=\"access_token\">Keycloak access token</label>\n")
+          .append("<input type=\"password\" id=\"access_token\" name=\"access_token\"\n")
+          .append("       autocomplete=\"off\" required\n")
+          .append("       aria-describedby=\"access_token_hint\">\n")
+          .append("<span id=\"access_token_hint\">Paste an access token for the user\n")
+          .append("who should own this agent.</span>\n")
+          .append("</p>\n")
+          .append("</fieldset>\n")
+          .append("<p>\n")
+          .append("<button type=\"submit\" name=\"decision\" value=\"approve\">Approve</button>\n")
+          .append("<button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button>\n")
+          .append("</p>\n")
+          .append("</form>\n");
     }
-    html.append("</body></html>");
-    return Response.ok(html.toString()).build();
+    html.append("</main>\n")
+        .append("</body>\n")
+        .append("</html>\n");
+    return Response.ok(html.toString())
+        .header("Set-Cookie",
+            "agent_auth_csrf=" + csrfToken
+                + "; Path=" + verifyCookiePath()
+                + "; HttpOnly; SameSite=Strict"
+                + (isSecureRequest() ? "; Secure" : ""))
+        .build();
+  }
+
+  private static String generateCsrfToken() {
+    byte[] bytes = new byte[16];
+    USER_CODE_RNG.nextBytes(bytes);
+    return java.util.HexFormat.of().formatHex(bytes);
+  }
+
+  private String verifyCookiePath() {
+    return session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
+        .path("verify").build().getPath();
+  }
+
+  private boolean isSecureRequest() {
+    try {
+      return "https".equalsIgnoreCase(
+          session.getContext().getUri().getBaseUri().getScheme());
+    } catch (Exception ignored) {
+      return false;
+    }
   }
 
   /**
@@ -2644,7 +2701,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @FormParam("user_code") String userCode,
       @FormParam("decision") String decision,
       @FormParam("access_token") String accessTokenFormField,
-      @HeaderParam("Authorization") String authHeader) {
+      @FormParam("csrf_token") String csrfFormToken,
+      @HeaderParam("Authorization") String authHeader,
+      @jakarta.ws.rs.CookieParam("agent_auth_csrf") String csrfCookieToken) {
     if (userCode == null || userCode.isBlank() || decision == null) {
       return htmlPage(400, "Missing user_code or decision",
           "Please go back to the approval page and fill in both fields.");
@@ -2657,6 +2716,18 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     if ((authHeader == null || authHeader.isBlank())
         && accessTokenFormField != null && !accessTokenFormField.isBlank()) {
       explicitToken = accessTokenFormField;
+    }
+    // Double-submit CSRF guard: any browser-style submission (neither Bearer header nor
+    // access_token form field) MUST carry a csrf_token that matches the cookie we planted on
+    // the GET. Bearer-authenticated API callers already prove intent with the token itself, so
+    // we only enforce CSRF on cookie-style flows. This matches the same-origin attack model of
+    // OAuth browser flows and §8.11's "no session cookie alone" stance.
+    boolean bearerAuth = (authHeader != null && !authHeader.isBlank()) || explicitToken != null;
+    if (!bearerAuth && (csrfFormToken == null || csrfCookieToken == null
+        || !csrfFormToken.equals(csrfCookieToken))) {
+      return htmlPage(403, "CSRF check failed",
+          "This request did not carry a matching CSRF token. Reload the approval page"
+              + " and try again.");
     }
     Map<String, Object> body = new HashMap<>();
     body.put("user_code", userCode);

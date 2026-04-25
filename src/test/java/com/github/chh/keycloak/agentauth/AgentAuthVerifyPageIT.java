@@ -164,7 +164,9 @@ class AgentAuthVerifyPageIT extends BaseKeycloakIT {
   }
 
   @Test
-  void postVerifyFormWithoutAuth_returns401Html() {
+  void postVerifyFormWithoutAuthOrCsrf_returns403CsrfRejection() {
+    // No Bearer header, no access_token form field, no CSRF cookie/token — the CSRF guard
+    // rejects the request first. Bearer-authenticated submissions bypass CSRF (covered above).
     given()
         .baseUri(issuerUrl())
         .contentType(ContentType.URLENC)
@@ -173,9 +175,71 @@ class AgentAuthVerifyPageIT extends BaseKeycloakIT {
         .when()
         .post("/verify")
         .then()
-        .statusCode(401)
+        .statusCode(403)
         .contentType(ContentType.HTML)
-        .body(containsString("Authentication required"));
+        .body(containsString("CSRF check failed"));
+  }
+
+  @Test
+  void postVerifyFormWithMismatchedCsrf_returns403() {
+    given()
+        .baseUri(issuerUrl())
+        .cookie("agent_auth_csrf", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .contentType(ContentType.URLENC)
+        .formParam("user_code", "AAAA-BBBB")
+        .formParam("decision", "approve")
+        .formParam("csrf_token", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .when()
+        .post("/verify")
+        .then()
+        .statusCode(403)
+        .body(containsString("CSRF check failed"));
+  }
+
+  @Test
+  void getVerifyPageEmitsCsrfCookieAndHiddenInput() {
+    // Render with a real pending user_code so the main form path runs.
+    String cap = registerApprovalCap("verifypage_csrf_" + suffix());
+    Response regResp = registerPending(cap);
+    String userCode = regResp.jsonPath().getString("approval.user_code");
+
+    Response resp = given()
+        .baseUri(issuerUrl())
+        .queryParam("user_code", userCode)
+        .when()
+        .get("/verify");
+    resp.then()
+        .statusCode(200)
+        .cookie("agent_auth_csrf", org.hamcrest.Matchers.notNullValue())
+        .body(containsString("name=\"csrf_token\""));
+  }
+
+  @Test
+  void getVerifyPage_hasZeroCssAndAccessibleStructure() {
+    // Per product decision: pure HTML, zero CSS. Accessibility stays solid via semantic
+    // elements + aria attributes.
+    String cap = registerApprovalCap("verifypage_a11y_" + suffix());
+    Response regResp = registerPending(cap);
+    String userCode = regResp.jsonPath().getString("approval.user_code");
+
+    String html = given()
+        .baseUri(issuerUrl())
+        .queryParam("user_code", userCode)
+        .when()
+        .get("/verify")
+        .then()
+        .statusCode(200)
+        .extract()
+        .asString();
+    assertThat(html).doesNotContain("<style");
+    assertThat(html).doesNotContain("style=");
+    assertThat(html).contains("<main");
+    assertThat(html).contains("<fieldset");
+    assertThat(html).contains("<legend");
+    assertThat(html).contains("aria-describedby");
+    assertThat(html).contains("aria-label");
+    assertThat(html).contains("<label for=\"access_token\"");
+    assertThat(html).contains("id=\"access_token\"");
   }
 
   @Test
