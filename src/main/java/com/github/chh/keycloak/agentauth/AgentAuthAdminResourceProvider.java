@@ -706,6 +706,273 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     return Response.status(201).entity(hostData).build();
   }
 
+  // --- Org-self-serve agent environments ---
+  // Privileged op: creating a confidential client + binding its SA to the org + pre-registering
+  // the host, all from a manage-organization caller. The client is locked down structurally so
+  // org admins can't repurpose it for OIDC flows or escalate privilege; clients are tagged so
+  // cleanup and audit are queryable.
+
+  /** Hard cap on managed clients per org. Tunable later if a real limit emerges. */
+  private static final int MAX_MANAGED_CLIENTS_PER_ORG = 50;
+
+  private static final String MANAGED_ATTR = "agent_auth_managed";
+  private static final String MANAGED_ORG_ATTR = "agent_auth_organization_id";
+
+  /**
+   * Org-self-serve agent environment provisioning. Creates a locked-down confidential client with a
+   * service-account user, adds the SA to the path's org, and pre-registers the host — all under a
+   * single {@code manage-organization} call. Returns the {@code client_secret} once; it's not
+   * retrievable afterward (rotate by deleting + recreating).
+   *
+   * <p>
+   * Lockdown: the created client has all OIDC flows disabled and no redirect URIs. The only thing
+   * it can do is mint client_credentials tokens for its SA user, which is exactly what the workload
+   * needs to operate as the host owner. These flags are hard-coded and cannot be overridden via
+   * this endpoint's body — only {@code name} and {@code host_public_key} are accepted.
+   *
+   * <p>
+   * Audit/cleanup: every managed client is tagged with {@code agent_auth_managed=true} and
+   * {@code agent_auth_organization_id=<orgId>}. The DELETE counterpart uses these tags to scope the
+   * operation; KC's native admin can still mutate these clients out-of-band, but the extension's
+   * own surface won't.
+   */
+  @POST
+  @Path("organizations/{orgId}/agent-environments")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response createOrgAgentEnvironment(@PathParam("orgId") String orgId,
+      Map<String, Object> requestBody) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
+    org.keycloak.models.OrganizationModel targetOrg = requireOrgAdmin(orgId);
+
+    if (requestBody == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
+    }
+    Object rawKey = requestBody.get("host_public_key");
+    if (!(rawKey instanceof Map)) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Missing host_public_key"))
+          .build();
+    }
+    Map<String, Object> hostPublicKeyMap = (Map<String, Object>) rawKey;
+
+    String hostId;
+    try {
+      hostId = OctetKeyPair.parse(hostPublicKeyMap).computeThumbprint().toString();
+    } catch (Exception e) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Invalid host_public_key"))
+          .build();
+    }
+
+    AgentAuthStorage storage = storage();
+    if (storage.getHost(hostId) != null) {
+      return Response.status(409)
+          .entity(Map.of("error", "host_exists", "message", "Host already registered")).build();
+    }
+
+    RealmModel realm = session.getContext().getRealm();
+    long managedCount = realm.getClientsStream()
+        .filter(c -> "true".equals(c.getAttribute(MANAGED_ATTR))
+            && orgId.equals(c.getAttribute(MANAGED_ORG_ATTR)))
+        .count();
+    if (managedCount >= MAX_MANAGED_CLIENTS_PER_ORG) {
+      return Response.status(429)
+          .entity(Map.of("error", "quota_exceeded",
+              "message", "Org has reached the managed-environment limit ("
+                  + MAX_MANAGED_CLIENTS_PER_ORG + ")"))
+          .build();
+    }
+
+    Object rawName = requestBody.get("name");
+    String envName = (rawName instanceof String && !((String) rawName).isBlank())
+        ? (String) rawName
+        : null;
+
+    String clientIdSuffix = java.util.UUID.randomUUID().toString().replace("-", "").substring(0,
+        12);
+    String clientId = "agentauth-" + clientIdSuffix;
+    String clientSecret = generateClientSecret();
+
+    org.keycloak.models.ClientModel client;
+    try {
+      org.keycloak.representations.idm.ClientRepresentation rep = new org.keycloak.representations.idm.ClientRepresentation();
+      rep.setClientId(clientId);
+      rep.setEnabled(true);
+      rep.setPublicClient(false);
+      rep.setServiceAccountsEnabled(true);
+      rep.setStandardFlowEnabled(false);
+      rep.setImplicitFlowEnabled(false);
+      rep.setDirectAccessGrantsEnabled(false);
+      rep.setAuthorizationServicesEnabled(false);
+      rep.setProtocol("openid-connect");
+      rep.setSecret(clientSecret);
+      rep.setRedirectUris(List.of());
+      rep.setRootUrl("");
+      rep.setBaseUrl("");
+      Map<String, String> attrs = new HashMap<>();
+      attrs.put(MANAGED_ATTR, "true");
+      attrs.put(MANAGED_ORG_ATTR, orgId);
+      rep.setAttributes(attrs);
+      if (envName != null) {
+        rep.setName(envName);
+      }
+      client = org.keycloak.models.utils.RepresentationToModel.createClient(session, realm, rep);
+      // Explicit SA provisioning: createClient() persists serviceAccountsEnabled=true on the
+      // ClientModel but doesn't auto-create the SA user; ClientManager.enableServiceAccount() is
+      // what actually provisions service-account-<clientId>.
+      new org.keycloak.services.managers.ClientManager(
+          new org.keycloak.services.managers.RealmManager(session)).enableServiceAccount(client);
+    } catch (Exception e) {
+      return Response.status(500)
+          .entity(Map.of("error", "client_creation_failed", "message", e.getMessage()))
+          .build();
+    }
+
+    try {
+      org.keycloak.models.UserModel saUser = session.users().getServiceAccount(client);
+      if (saUser == null) {
+        throw new IllegalStateException(
+            "Service-account user not auto-provisioned by Keycloak");
+      }
+      org.keycloak.organization.OrganizationProvider orgProvider = session.getProvider(
+          org.keycloak.organization.OrganizationProvider.class);
+      if (!orgProvider.isMember(targetOrg, saUser)) {
+        orgProvider.addMember(targetOrg, saUser);
+      }
+
+      String nowTs = Instant.now().toString();
+      Map<String, Object> hostData = new HashMap<>();
+      hostData.put("host_id", hostId);
+      hostData.put("public_key", hostPublicKeyMap);
+      hostData.put("status", "active");
+      hostData.put("created_at", nowTs);
+      hostData.put("updated_at", nowTs);
+      hostData.put("user_id", saUser.getId());
+      hostData.put("service_account_client_id", clientId);
+      if (envName != null) {
+        hostData.put("name", envName);
+      }
+      storage.putHost(hostId, hostData);
+
+      // Audit event deliberately omits client_secret — events are persisted, secret must not be.
+      emitAdminEvent("agent-auth/organization/" + orgId + "/agent-environment/" + clientId,
+          OperationType.CREATE, Map.of(
+              "client_id", clientId,
+              "host_id", hostId,
+              "service_account_user_id", saUser.getId(),
+              "organization_id", orgId));
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("client_id", clientId);
+      response.put("client_secret", clientSecret);
+      response.put("host_id", hostId);
+      response.put("service_account_user_id", saUser.getId());
+      response.put("organization_id", orgId);
+      if (envName != null) {
+        response.put("name", envName);
+      }
+      return Response.status(201).entity(response).build();
+    } catch (Exception e) {
+      // Best-effort rollback — orphaned managed clients are queryable via the tag attributes,
+      // so a janitor can clean them up later if rollback also fails.
+      try {
+        realm.removeClient(client.getId());
+      } catch (Exception ignored) {
+        // swallow; the partially-created client will surface on next list/audit
+      }
+      return Response.status(500)
+          .entity(Map.of("error", "environment_setup_failed", "message", e.getMessage()))
+          .build();
+    }
+  }
+
+  /**
+   * Delete a managed agent environment: removes the KC client, which cascades to the SA user, which
+   * fires {@code UserRemovedEvent} and triggers
+   * {@link AgentAuthUserEventListenerProviderFactory#handleUserRemoved} to revoke the host and all
+   * agents under it.
+   *
+   * <p>
+   * Returns 404 for clients that aren't tagged as managed by this org (don't leak existence of
+   * unrelated clients to org admins).
+   */
+  @DELETE
+  @Path("organizations/{orgId}/agent-environments/{clientId}")
+  public Response deleteOrgAgentEnvironment(@PathParam("orgId") String orgId,
+      @PathParam("clientId") String clientId) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
+    requireOrgAdmin(orgId);
+
+    RealmModel realm = session.getContext().getRealm();
+    org.keycloak.models.ClientModel client = realm.getClientByClientId(clientId);
+    if (client == null
+        || !"true".equals(client.getAttribute(MANAGED_ATTR))
+        || !orgId.equals(client.getAttribute(MANAGED_ORG_ATTR))) {
+      return Response.status(404)
+          .entity(Map.of("error", "environment_not_found",
+              "message", "Managed environment not found in this organization"))
+          .build();
+    }
+
+    // Explicit revocation: don't rely on the UserRemovedEvent cascade through KC's in-process
+    // client/SA deletion — its eventing behavior in this code path is brittle. Find the host
+    // by service_account_client_id and revoke it directly; the user-removed listener still acts
+    // as a safety net if the timing differs.
+    org.keycloak.models.UserModel saUser = session.users().getServiceAccount(client);
+    if (saUser != null) {
+      String saUserId = saUser.getId();
+      String nowTs = Instant.now().toString();
+      AgentAuthStorage storage = storage();
+      for (Map<String, Object> hostData : storage.findHostsByUser(saUserId)) {
+        String hostId = (String) hostData.get("host_id");
+        if (hostId == null) {
+          continue;
+        }
+        String status = (String) hostData.get("status");
+        if ("revoked".equals(status) || "rejected".equals(status) || "claimed".equals(status)) {
+          continue;
+        }
+        // Revoke any non-terminal agents under this host first, then the host itself.
+        for (Map<String, Object> agentData : storage.findAgentsByHost(hostId)) {
+          String agentId = (String) agentData.get("agent_id");
+          String agentStatus = (String) agentData.get("status");
+          if (agentId == null
+              || "revoked".equals(agentStatus)
+              || "rejected".equals(agentStatus)
+              || "claimed".equals(agentStatus)) {
+            continue;
+          }
+          agentData.put("status", "revoked");
+          agentData.put("updated_at", nowTs);
+          storage.putAgent(agentId, agentData);
+        }
+        hostData.put("status", "revoked");
+        hostData.put("updated_at", nowTs);
+        storage.putHost(hostId, hostData);
+      }
+    }
+
+    realm.removeClient(client.getId());
+    emitAdminEvent("agent-auth/organization/" + orgId + "/agent-environment/" + clientId,
+        OperationType.DELETE, Map.of("client_id", clientId, "organization_id", orgId));
+    return Response.noContent().build();
+  }
+
+  private static String generateClientSecret() {
+    byte[] bytes = new byte[32];
+    new java.security.SecureRandom().nextBytes(bytes);
+    return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+  }
+
   // --- Phase 5: org-admin self-service capability endpoints ---
 
   /**
