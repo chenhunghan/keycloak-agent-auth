@@ -38,6 +38,7 @@ class AgentAuthVerifyPageIT extends BaseKeycloakIT {
   void getVerifyPageWithoutUserCode_rendersPrompt() {
     given()
         .baseUri(issuerUrl())
+        .header("Accept", "*/*")
         .when()
         .get("/verify")
         .then()
@@ -45,6 +46,62 @@ class AgentAuthVerifyPageIT extends BaseKeycloakIT {
         .contentType(ContentType.HTML)
         .body(containsString("user_code"))
         .body(containsString("<form"));
+  }
+
+  @Test
+  void getVerifyAsBrowserWithoutCookie_redirectsToKcLogin() {
+    // §8.11 / §7.1: a browser landing on the verification URI without a KC session cookie should
+    // be sent through the realm login flow before seeing the approval form. Other accept
+    // patterns (curl, programmatic clients) keep the form rendering inline.
+    Response resp = given()
+        .baseUri(issuerUrl())
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9")
+        .redirects().follow(false)
+        .when()
+        .get("/verify");
+    resp.then().statusCode(307);
+    String location = resp.getHeader("Location");
+    assertThat(location)
+        .as("redirect must point at the realm OIDC auth endpoint")
+        .contains("/realms/" + REALM + "/protocol/openid-connect/auth")
+        .contains("client_id=agent-auth-test-client")
+        .contains("response_type=code")
+        .contains("scope=openid")
+        .contains("state=");
+  }
+
+  @Test
+  void getVerifyAsBrowserWithIdentityCookie_rendersForm() {
+    // Cookie value is irrelevant for our presence check at GET time — the auth layer validates
+    // freshness when an actual approval is submitted.
+    given()
+        .baseUri(issuerUrl())
+        .header("Accept", "text/html")
+        .cookie("KEYCLOAK_IDENTITY", "stub.identity.cookie.value")
+        .redirects().follow(false)
+        .when()
+        .get("/verify")
+        .then()
+        .statusCode(200)
+        .contentType(ContentType.HTML)
+        .body(containsString("<form"));
+  }
+
+  @Test
+  void getVerifyWithUserCodeQueryPreserved_inLoginRedirect() {
+    Response resp = given()
+        .baseUri(issuerUrl())
+        .header("Accept", "text/html")
+        .queryParam("user_code", "ABCD-EFGH")
+        .redirects().follow(false)
+        .when()
+        .get("/verify");
+    resp.then().statusCode(307);
+    // user_code must round-trip via redirect_uri so the post-login bounce lands on the right
+    // approval form.
+    assertThat(resp.getHeader("Location"))
+        .contains("user_code")
+        .contains("ABCD-EFGH");
   }
 
   @Test

@@ -2565,7 +2565,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @GET
   @Path("verify")
   @Produces(MediaType.TEXT_HTML)
-  public Response verifyPage(@QueryParam("user_code") String userCode) {
+  public Response verifyPage(
+      @QueryParam("user_code") String userCode,
+      @HeaderParam("Accept") String acceptHeader) {
+    // §8.11 + §7.1 browser flow: when the request looks like a browser navigation (Accept
+    // includes text/html) and there is no fresh KC identity cookie, bounce through the realm's
+    // standard login flow so the user authenticates first. The redirect comes back here with
+    // the cookie set, at which point we render the approval form.
+    if (acceptsHtml(acceptHeader) && !hasKeycloakIdentityCookie()) {
+      return Response.temporaryRedirect(buildLoginRedirectUri(userCode)).build();
+    }
     String normalized = normalizeUserCode(userCode);
     Map<String, Object> pendingAgent = normalized == null
         ? null
@@ -2670,6 +2679,60 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     byte[] bytes = new byte[16];
     USER_CODE_RNG.nextBytes(bytes);
     return java.util.HexFormat.of().formatHex(bytes);
+  }
+
+  private static boolean acceptsHtml(String acceptHeader) {
+    return acceptHeader != null && acceptHeader.toLowerCase(Locale.ROOT).contains("text/html");
+  }
+
+  /**
+   * Cheap presence check for the KC browser-session identity cookie. We don't validate freshness
+   * here — that's the auth layer's job at POST time. We only need a boolean signal to decide
+   * whether to bounce the browser through the login redirect on GET.
+   */
+  private boolean hasKeycloakIdentityCookie() {
+    try {
+      var cookies = session.getContext().getRequestHeaders().getCookies();
+      return cookies != null
+          && (cookies.containsKey("KEYCLOAK_IDENTITY")
+              || cookies.containsKey("KEYCLOAK_IDENTITY_LEGACY"));
+    } catch (RuntimeException ignored) {
+      return false;
+    }
+  }
+
+  /**
+   * Default OIDC client used for the browser login bounce. Operators can override by setting the
+   * SPI config key {@code login-redirect-client-id} on the realm-resource provider; the test realm
+   * ships with this client (public, directAccessGrants on, redirectUris="*") so the IT can exercise
+   * the redirect direction end to end.
+   */
+  static final String LOGIN_REDIRECT_CLIENT_ID = "agent-auth-test-client";
+
+  /**
+   * Build the OIDC auth-endpoint URL the browser is redirected to when it hits {@code GET
+   * /verify} unauthenticated. The {@code redirect_uri} comes back to {@code /verify}, preserving
+   * any {@code user_code} query so the approval form renders correctly after login.
+   */
+  private URI buildLoginRedirectUri(String userCode) {
+    var verifyBuilder = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
+        .path("verify");
+    if (userCode != null && !userCode.isBlank()) {
+      verifyBuilder.queryParam("user_code", userCode);
+    }
+    String redirectUri = verifyBuilder.build().toString();
+    byte[] stateBytes = new byte[16];
+    USER_CODE_RNG.nextBytes(stateBytes);
+    return session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(session.getContext().getRealm().getName())
+        .path("protocol/openid-connect/auth")
+        .queryParam("client_id", LOGIN_REDIRECT_CLIENT_ID)
+        .queryParam("redirect_uri", redirectUri)
+        .queryParam("response_type", "code")
+        .queryParam("scope", "openid")
+        .queryParam("state", java.util.HexFormat.of().formatHex(stateBytes))
+        .build();
   }
 
   private String verifyCookiePath() {
