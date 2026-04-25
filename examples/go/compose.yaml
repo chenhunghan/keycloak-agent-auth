@@ -1,0 +1,26 @@
+# Self-contained compose for the Go example.
+#
+# Includes the repo-root compose (Keycloak + extension) and adds the
+# resource server alongside it on the same compose network. Run this
+# instead of the root compose when you want to exercise the demo:
+#
+#   cd examples/go
+#   docker compose up -d
+#   go run ./cmd/demo
+#
+# If your Docker Compose is too old for `include:` (< 2.20), you can use
+# two -f flags instead:
+#
+#   docker compose -f ../../docker-compose.yml -f compose.yaml up -d
+
+include:
+  - path: ../../docker-compose.yml
+
+services:
+  resource-server:
+    build:
+      context: .
+    environment:
+      PORT: "3000"
+    # Not published to the host — Keycloak reaches it via the compose
+    # network at http://resource-server:3000.

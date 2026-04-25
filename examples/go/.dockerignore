@@ -1,0 +1,7 @@
+README.md
+.git
+.gitignore
+.dockerignore
+compose.yaml
+**/*.md
+**/.DS_Store

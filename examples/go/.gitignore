@@ -1,0 +1,15 @@
+# Compiled binaries
+/rs
+/demo
+/bin/
+
+# Go build cache / test artifacts
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

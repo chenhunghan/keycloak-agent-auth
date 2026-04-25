@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aap-examples-py"
+version = "0.1.0"
+description = "Minimal Python walk-through of Agent Auth Protocol roles (Client, Agent, Resource Server) against the Keycloak extension."
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=42.0.0",
+    "PyJWT[crypto]>=2.8.0",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+aap-demo = "aap_demo.demo:main"
+aap-rs-standalone = "aap_demo.rs_standalone:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

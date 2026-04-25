@@ -1,0 +1,32 @@
+[package]
+name = "aap-demo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Minimal Rust walk-through of Agent Auth Protocol roles (Client, Agent, Resource Server) against the Keycloak extension."
+publish = false
+
+[[bin]]
+name = "demo"
+path = "src/bin/demo.rs"
+
+[[bin]]
+name = "rs"
+path = "src/bin/rs.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
