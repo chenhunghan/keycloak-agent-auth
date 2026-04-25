@@ -299,6 +299,136 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
         .body("status", equalTo("active"));
   }
 
+  /**
+   * Org-scoped SA-host pre-registration succeeds when the SA user is already a member of the path's
+   * org. Mirrors {@link #preRegisterHostWithClientIdSetsServiceAccountUserId} but exercises the
+   * org-self-service path: org admins can stand up SA-hosts without realm-admin once the SA is in
+   * the org.
+   */
+  @Test
+  void registerOrgHostBindsSAWhenSAIsOrgMember() {
+    String clientId = "p5orgsa-ok-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createConfidentialClientWithSA(clientId);
+    String saUserId = serviceAccountUserId(clientId);
+    addUserToOrganization(acmeOrgId, saUserId);
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+
+    Response resp = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostPublicKey,
+            "client_id", clientId,
+            "name", "Org-scoped SA host"))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/hosts");
+    resp.then().statusCode(201);
+    assertThat(resp.jsonPath().getString("user_id")).isEqualTo(saUserId);
+    assertThat(resp.jsonPath().getString("service_account_client_id")).isEqualTo(clientId);
+  }
+
+  /**
+   * The org-scoped endpoint requires {@code client_id} — without it, the path makes no sense
+   * (org-self-service exists specifically to bind hosts to SA users).
+   */
+  @Test
+  void registerOrgHostMissingClientIdReturns400() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of("host_public_key", hostPublicKey))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/hosts")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  /**
+   * SA-belongs-to-org gate: an SA user that isn't a member of the path's org can't be bound through
+   * the org-scoped endpoint. Without this, an org admin could bind hosts to any client's SA in the
+   * realm — including SAs operated by an unrelated tenant.
+   */
+  @Test
+  void registerOrgHostWithSANotInOrgReturns400() {
+    String clientId = "p5orgsa-noorg-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createConfidentialClientWithSA(clientId);
+    // Deliberately skip addUserToOrganization — the SA is not in any org.
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostPublicKey,
+            "client_id", clientId))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/hosts")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("sa_not_in_org"));
+  }
+
+  /**
+   * Cross-tenant safety: even with the SA enrolled in Globex, Acme's path can't bind it. Together
+   * with the previous test this confirms membership is checked against the path's org specifically,
+   * not "any org."
+   */
+  @Test
+  void registerOrgHostWithSAInDifferentOrgReturns400() {
+    String clientId = "p5orgsa-xorg-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createConfidentialClientWithSA(clientId);
+    String saUserId = serviceAccountUserId(clientId);
+    addUserToOrganization(globexOrgId, saUserId);
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostPublicKey,
+            "client_id", clientId))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/hosts")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("sa_not_in_org"));
+  }
+
+  /**
+   * Path's {@code orgId} must resolve to a real org — handled by
+   * {@link AgentAuthAdminResourceProvider#requireOrgAdmin}, returning 404.
+   */
+  @Test
+  void registerOrgHostFor404OrgReturns404() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostPublicKey,
+            "client_id", "irrelevant"))
+        .when()
+        .post("/organizations/00000000-0000-0000-0000-000000000000/hosts")
+        .then()
+        .statusCode(404);
+  }
+
   // --- helpers ---
 
   private static String createOrganization(String alias) {
@@ -338,6 +468,33 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
         .post("/organizations/" + orgId + "/capabilities")
         .then()
         .statusCode(201);
+  }
+
+  private static String serviceAccountUserId(String clientId) {
+    return given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("username", "service-account-" + clientId.toLowerCase(java.util.Locale.ROOT))
+        .queryParam("exact", true)
+        .when()
+        .get("/admin/realms/" + REALM + "/users")
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getString("[0].id");
+  }
+
+  private static void addUserToOrganization(String orgId, String userId) {
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(userId)
+        .when()
+        .post("/admin/realms/" + REALM + "/organizations/" + orgId + "/members")
+        .then()
+        .statusCode(org.hamcrest.Matchers.anyOf(equalTo(201), equalTo(204)));
   }
 
   private static void createConfidentialClientWithSA(String clientId) {

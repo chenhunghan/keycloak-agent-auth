@@ -580,6 +580,128 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
   }
 
+  /**
+   * Org-scoped SA-host pre-registration. Mirrors {@link #preRegisterHost} but path-scoped to a
+   * specific org and gated by {@link #requireOrgAdmin}, so org admins can self-serve SA-host
+   * provisioning without going through realm-admin every time. Differences vs the realm-admin
+   * endpoint:
+   *
+   * <ul>
+   * <li>{@code client_id} is required (the org-scoped path implies SA-as-host).</li>
+   * <li>The resolved service-account user must already be a member of the path's org. Org admins
+   * have {@code manage-organization}, so they can add the SA user to their own org via standard KC
+   * org-membership APIs; the existing Phase 4 {@code handleOrgMemberLeave} listener cascades grant
+   * revocations for free if the SA is later removed.</li>
+   * </ul>
+   *
+   * The realm-admin {@link #preRegisterHost} stays available and unchanged for headless setups
+   * where the SA isn't (yet) part of any org.
+   */
+  @POST
+  @Path("organizations/{orgId}/hosts")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
+  public Response registerOrgHost(@PathParam("orgId") String orgId,
+      Map<String, Object> requestBody) {
+    org.keycloak.models.OrganizationModel org = requireOrgAdmin(orgId);
+    if (requestBody == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
+    }
+
+    Object rawKey = requestBody.get("host_public_key");
+    if (!(rawKey instanceof Map)) {
+      return Response.status(400).entity(Map.of("error", "invalid_request", "message",
+          "Missing host_public_key")).build();
+    }
+    Map<String, Object> hostPublicKeyMap = (Map<String, Object>) rawKey;
+
+    Object rawClientId = requestBody.get("client_id");
+    if (!(rawClientId instanceof String) || ((String) rawClientId).isBlank()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "client_id is required for org-scoped host registration"))
+          .build();
+    }
+    String clientId = (String) rawClientId;
+
+    String hostId;
+    try {
+      hostId = OctetKeyPair.parse(hostPublicKeyMap).computeThumbprint().toString();
+    } catch (Exception e) {
+      return Response.status(400).entity(Map.of("error", "invalid_request", "message",
+          "Invalid host_public_key")).build();
+    }
+
+    RealmModel realm = session.getContext().getRealm();
+    org.keycloak.models.ClientModel client = realm == null
+        ? null
+        : realm.getClientByClientId(clientId);
+    if (client == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "client_id does not resolve to a realm client"))
+          .build();
+    }
+    if (!client.isServiceAccountsEnabled()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "client_id does not have service accounts enabled"))
+          .build();
+    }
+    org.keycloak.models.UserModel saUser = session.users().getServiceAccount(client);
+    if (saUser == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "service account user not provisioned for client"))
+          .build();
+    }
+
+    // SA-belongs-to-org gate: the SA must already be a member of the path's org. Without this,
+    // an org admin could bind a host to any client's SA in the realm — including SAs an
+    // unrelated tenant operates.
+    org.keycloak.organization.OrganizationProvider orgProvider = session.getProvider(
+        org.keycloak.organization.OrganizationProvider.class);
+    if (!orgProvider.isMember(org, saUser)) {
+      return Response.status(400)
+          .entity(Map.of("error", "sa_not_in_org",
+              "message",
+              "Service-account user is not a member of the target organization"))
+          .build();
+    }
+
+    AgentAuthStorage storage = storage();
+    if (storage.getHost(hostId) != null) {
+      return Response.status(409).entity(Map.of("error", "host_exists", "message",
+          "Host already registered")).build();
+    }
+
+    String nowTs = Instant.now().toString();
+    Map<String, Object> hostData = new HashMap<>();
+    hostData.put("host_id", hostId);
+    hostData.put("public_key", hostPublicKeyMap);
+    hostData.put("status", "active");
+    hostData.put("created_at", nowTs);
+    hostData.put("updated_at", nowTs);
+    hostData.put("user_id", saUser.getId());
+    hostData.put("service_account_client_id", clientId);
+
+    Object name = requestBody.get("name");
+    if (name instanceof String && !((String) name).isBlank()) {
+      hostData.put("name", name);
+    }
+    Object description = requestBody.get("description");
+    if (description instanceof String && !((String) description).isBlank()) {
+      hostData.put("description", description);
+    }
+
+    storage.putHost(hostId, hostData);
+    emitAdminEvent("agent-auth/organization/" + orgId + "/host/" + hostId,
+        OperationType.CREATE, hostData);
+    return Response.status(201).entity(hostData).build();
+  }
+
   // --- Phase 5: org-admin self-service capability endpoints ---
 
   /**
