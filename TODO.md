@@ -212,13 +212,22 @@ cascade (Phase 4). Phases 5–6 are quality-of-life and still pending.
    resulting `putAgent`. With Phase 2's lazy re-eval at introspect
    on role drift, this completes Q4's hybrid cascade.
 
-5. **Phase 5 — Org-admin self-service + SA-as-host pattern.** New
-   admin endpoints scoped under
-   `/admin/realms/{realm}/organizations/{orgId}/capabilities`,
-   mintable by `manage-organization` holders (org_id derived from
-   path, never request body). Document the recommended SA-per-
-   confidential-client pattern; admin endpoint to register an
-   autonomous host with an SA owner.
+5. **Phase 5 — Org-admin self-service + SA-as-host pattern.** ✅
+   Shipped 2026-04-25. Added four org-scoped admin endpoints under
+   `/admin/realms/{realm}/agent-auth/organizations/{orgId}/capabilities`
+   (POST, GET list, PUT, DELETE). `organization_id` is taken from the
+   path — body is overridden, preventing tenant-confusion writes.
+   Auth gate (`requireOrgAdmin`) accepts realm-admin (super-user) or
+   `manage-organization` realm-management role + org membership;
+   non-members hitting an org's endpoints get 403, missing orgs get
+   404. Cross-org PUT/DELETE attempts get 404, never modifying the
+   target. SA-as-host pattern landed via an optional `client_id`
+   field on `POST /admin/.../hosts`: the endpoint resolves the
+   confidential client's service-account user and stores it as the
+   pre-registered host's `user_id`, so autonomous workloads can
+   skip the post-claim approval flow. The recommended pattern is
+   one SA per confidential client; operators provision the client
+   with `serviceAccountsEnabled=true` and pass the client_id.
 
 6. **Phase 6 — Remaining storage normalization.** Folds the existing
    "Storage" entry above. Typed columns on host/agent/capability,

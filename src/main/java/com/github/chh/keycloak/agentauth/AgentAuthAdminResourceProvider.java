@@ -354,6 +354,40 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       hostData.put("description", description);
     }
 
+    // Phase 5 SA-as-host pattern: optionally resolve a confidential client's service-account
+    // user as the host's owner. The recommended pattern (see TODO.md) is one SA per
+    // confidential client; the operator pre-registers the client with serviceAccountsEnabled
+    // and passes the client_id here so the host's user_id is set up-front, skipping the
+    // post-claim /verify/approve flow that delegated agents normally need.
+    Object rawClientId = requestBody.get("client_id");
+    if (rawClientId instanceof String clientId && !clientId.isBlank()) {
+      RealmModel realm = session.getContext().getRealm();
+      org.keycloak.models.ClientModel client = realm == null
+          ? null
+          : realm.getClientByClientId(clientId);
+      if (client == null) {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request",
+                "message", "client_id does not resolve to a realm client"))
+            .build();
+      }
+      if (!client.isServiceAccountsEnabled()) {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request",
+                "message", "client_id does not have service accounts enabled"))
+            .build();
+      }
+      org.keycloak.models.UserModel saUser = session.users().getServiceAccount(client);
+      if (saUser == null) {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request",
+                "message", "service account user not provisioned for client"))
+            .build();
+      }
+      hostData.put("user_id", saUser.getId());
+      hostData.put("service_account_client_id", clientId);
+    }
+
     storage.putHost(hostId, hostData);
     emitAdminEvent("agent-auth/host/" + hostId, OperationType.CREATE, hostData);
     return Response.status(201).entity(hostData).build();
@@ -544,6 +578,200 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (auth != null) {
       auth.realm().requireManageRealm();
     }
+  }
+
+  // --- Phase 5: org-admin self-service capability endpoints ---
+
+  /**
+   * Phase 5: register a capability scoped to an organization. {@code organization_id} is taken from
+   * the path — body cannot override. Authorized for realm-admins or
+   * {@code manage-organization}-role holders who are members of the org.
+   */
+  @POST
+  @Path("organizations/{orgId}/capabilities")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response registerOrgCapability(@PathParam("orgId") String orgId,
+      Map<String, Object> requestBody) {
+    requireOrgAdmin(orgId);
+    if (requestBody == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
+    }
+    String name = (String) requestBody.get("name");
+    if (name == null || name.isBlank()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Missing name")).build();
+    }
+    if (!CAPABILITY_NAME_PATTERN.matcher(name).matches()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "Capability name must match [a-zA-Z0-9_]+"))
+          .build();
+    }
+    String visibility = (String) requestBody.getOrDefault("visibility", "authenticated");
+    if (!"authenticated".equals(visibility) && !"public".equals(visibility)) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Invalid visibility")).build();
+    }
+    Response gateValidation = validateGateFields(requestBody);
+    if (gateValidation != null) {
+      return gateValidation;
+    }
+
+    // Force org_id from path. Body cannot override the tenant scope.
+    Map<String, Object> capabilityToStore = new HashMap<>(requestBody);
+    capabilityToStore.put("organization_id", orgId);
+
+    if (storage().putCapabilityIfAbsent(name, capabilityToStore) != null) {
+      return Response.status(409)
+          .entity(Map.of("error", "capability_exists", "message", "Capability already exists"))
+          .build();
+    }
+    emitAdminEvent("agent-auth/organization/" + orgId + "/capability/" + name,
+        OperationType.CREATE, capabilityToStore);
+    return Response.status(201).entity(capabilityToStore).build();
+  }
+
+  /**
+   * Phase 5: list capabilities scoped to one organization. Authorized for realm-admins or
+   * org-admins. Returns only caps whose {@code organization_id} matches the path; never leaks
+   * NULL-org or other-org caps.
+   */
+  @GET
+  @Path("organizations/{orgId}/capabilities")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response listOrgCapabilities(@PathParam("orgId") String orgId) {
+    requireOrgAdmin(orgId);
+    List<Map<String, Object>> filtered = new java.util.ArrayList<>();
+    for (Map<String, Object> cap : storage().listCapabilities()) {
+      if (orgId.equals(cap.get("organization_id"))) {
+        filtered.add(cap);
+      }
+    }
+    return Response.ok(Map.of("capabilities", filtered)).build();
+  }
+
+  /**
+   * Phase 5: update an org-scoped capability. The caller must be authorized for the path's org AND
+   * the target capability must already belong to that org — caps with a different
+   * {@code organization_id} are not editable through this endpoint (org-admins can't sneak in
+   * cross-tenant edits).
+   */
+  @PUT
+  @Path("organizations/{orgId}/capabilities/{name}")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response updateOrgCapability(@PathParam("orgId") String orgId,
+      @PathParam("name") String name, Map<String, Object> requestBody) {
+    requireOrgAdmin(orgId);
+    if (requestBody == null) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request", "message", "Empty body")).build();
+    }
+    AgentAuthStorage storage = storage();
+    Map<String, Object> existing = storage.getCapability(name);
+    if (existing == null || !orgId.equals(existing.get("organization_id"))) {
+      return Response.status(404)
+          .entity(Map.of("error", "capability_not_found",
+              "message", "Capability not found in this organization"))
+          .build();
+    }
+    Response gateValidation = validateGateFields(requestBody);
+    if (gateValidation != null) {
+      return gateValidation;
+    }
+    Map<String, Object> updated = new HashMap<>(requestBody);
+    updated.put("name", name);
+    updated.put("organization_id", orgId);
+    storage.putCapability(name, updated);
+    emitAdminEvent("agent-auth/organization/" + orgId + "/capability/" + name,
+        OperationType.UPDATE, updated);
+    return Response.ok(updated).build();
+  }
+
+  /**
+   * Phase 5: delete an org-scoped capability. Same ownership check as update — only org members (or
+   * realm-admin) can delete, and only if the cap belongs to the path's org.
+   */
+  @DELETE
+  @Path("organizations/{orgId}/capabilities/{name}")
+  public Response deleteOrgCapability(@PathParam("orgId") String orgId,
+      @PathParam("name") String name) {
+    requireOrgAdmin(orgId);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> existing = storage.getCapability(name);
+    if (existing == null || !orgId.equals(existing.get("organization_id"))) {
+      return Response.status(404)
+          .entity(Map.of("error", "capability_not_found",
+              "message", "Capability not found in this organization"))
+          .build();
+    }
+    storage.removeCapability(name);
+    emitAdminEvent("agent-auth/organization/" + orgId + "/capability/" + name,
+        OperationType.DELETE, existing);
+    return Response.noContent().build();
+  }
+
+  /**
+   * Phase 5 of the multi-tenant authz plan: gate the {@code /organizations/{orgId}/capabilities}
+   * endpoints. Returns the resolved {@link OrganizationModel} on success; throws
+   * {@code WebApplicationException} on failure (404 if the org doesn't exist, 403 otherwise).
+   * Allowed callers are realm-admins (legacy super-user privilege) OR realm-management
+   * {@code manage-organization}-role holders who are also members of the target org. The
+   * org-membership check prevents an admin with realm-wide {@code manage-organization} from writing
+   * to an org they don't belong to.
+   */
+  private org.keycloak.models.OrganizationModel requireOrgAdmin(String orgId) {
+    if (auth == null || auth.adminAuth() == null || auth.adminAuth().getUser() == null) {
+      throw new jakarta.ws.rs.ForbiddenException("Admin authentication required");
+    }
+    RealmModel realm = session.getContext().getRealm();
+    if (realm == null) {
+      throw new jakarta.ws.rs.InternalServerErrorException("Realm not in context");
+    }
+    org.keycloak.organization.OrganizationProvider orgProvider;
+    try {
+      orgProvider = session.getProvider(org.keycloak.organization.OrganizationProvider.class);
+    } catch (RuntimeException e) {
+      throw new jakarta.ws.rs.InternalServerErrorException(
+          "Organizations feature unavailable on this realm");
+    }
+    if (orgProvider == null || !realm.isOrganizationsEnabled()) {
+      throw new jakarta.ws.rs.InternalServerErrorException(
+          "Organizations feature not enabled on this realm");
+    }
+    org.keycloak.models.OrganizationModel org = orgProvider.getById(orgId);
+    if (org == null) {
+      throw new jakarta.ws.rs.NotFoundException("Organization not found");
+    }
+    org.keycloak.models.UserModel user = auth.adminAuth().getUser();
+    // Realm-admin override: if the caller has manage-realm, skip the per-org membership/role
+    // checks. Manage-realm is super-user-equivalent; gating it on org membership would be
+    // strictly weaker than today's /capabilities endpoints.
+    boolean isRealmAdmin = false;
+    try {
+      auth.realm().requireManageRealm();
+      isRealmAdmin = true;
+    } catch (RuntimeException denied) {
+      isRealmAdmin = false; // NOPMD: not a realm-admin; fall through to org-admin checks below
+    }
+    if (!isRealmAdmin) {
+      org.keycloak.models.ClientModel realmManagement = realm.getClientByClientId(
+          "realm-management");
+      org.keycloak.models.RoleModel manageOrg = realmManagement == null
+          ? null
+          : realmManagement.getRole("manage-organization");
+      if (manageOrg == null || !user.hasRole(manageOrg)) {
+        throw new jakarta.ws.rs.ForbiddenException(
+            "Caller lacks manage-organization role");
+      }
+      if (!orgProvider.isMember(org, user)) {
+        throw new jakarta.ws.rs.ForbiddenException(
+            "Caller is not a member of the target organization");
+      }
+    }
+    return org;
   }
 
   /**
