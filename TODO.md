@@ -56,28 +56,6 @@ Living list of things we want to come back to. Each item carries enough context 
 
 ## §5.2 capability listing — spec gaps
 
-- [ ] **Host-JWT capability listing should filter by the host's linked user.**
-  Spec §5.2: a host JWT on `/capability/list` should return "capabilities
-  available to the host's linked user. Used before agent registration."
-  Our `AgentAuthRealmResourceProvider.listCapabilities` accepts a host+jwt
-  but returns the full union of public + authenticated capabilities,
-  with no consideration of `host.user_id` or the host's
-  `default_capability_grants`. Once host linking landed (§2.9, commit
-  78760f6) the substrate for filtering is now in place — needs to be
-  wired in. Behavior today is more permissive than the spec, not less,
-  so this is correctness/intent rather than user-visible breakage.
-
-- [ ] **Verify the host+jwt signature on read-only discovery endpoints.**
-  `listCapabilities` currently treats `typ=host+jwt` as authenticated
-  on a header-tag check alone — no signature verification, no host
-  lookup. The agent+jwt branch right above does full verification. The
-  asymmetry was deliberate (read-only discovery has a low security bar)
-  but it means anyone can craft a `host+jwt`-typed unsigned token and
-  see every `authenticated`-visibility capability. Tighten the host+jwt
-  branch to at least parse `host_public_key`, verify the signature, and
-  confirm `iss` matches the JWK thumbprint. Same fix applies to
-  `describeCapability` (line 1746+) which inherits the same loose check.
-
 - [ ] **Add a fixture-less-realm test for the §5.2 "no public caps →
   401" branch.** When we dropped the non-spec `?visibility=authenticated`
   query param, the test that used it was deleted because its fixture
@@ -88,6 +66,19 @@ Living list of things we want to come back to. Each item carries enough context 
   it with a separate realm fixture that registers only authenticated-
   visibility capabilities (or none), then asserts an unauthenticated
   `/capability/list` returns 401 `authentication_required`.
+
+- [ ] **Promote host-defaults filtering on `/capability/list` into
+  full user-entitlement gating.** The current §5.2 filter narrows the
+  authenticated-visibility view for verified host JWTs from linked
+  hosts to those caps in `host.default_capability_grants` — a host-
+  scoped pre-approval. The spec wording is "capabilities available to
+  the host's linked user", which implies a user-level entitlement
+  model that crosses hosts (e.g. caps the user has approved for any
+  agent under any of their hosts, or caps gated by their roles/orgs).
+  The full implementation depends on resolving authz Q3 in the
+  "AAP ↔ Keycloak authorization integration" draft below
+  (organization vs. role gating). Until then the host-defaults filter
+  is the safe interim narrowing.
 
 ## DRAFT — AAP ↔ Keycloak authorization integration
 

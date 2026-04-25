@@ -1615,6 +1615,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @QueryParam("cursor") String cursor,
       @QueryParam("limit") Integer limit) {
     String agentId = null;
+    String verifiedHostId = null;
     boolean isAuthenticated = false;
 
     if (authHeader != null && authHeader.startsWith("Bearer ")) {
@@ -1638,7 +1639,19 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             }
           }
         } else if ("host+jwt".equals(jwtType)) {
-          isAuthenticated = true;
+          Map<String, Object> hostKeyMap = jwt.getJWTClaimsSet()
+              .getJSONObjectClaim("host_public_key");
+          if (hostKeyMap != null) {
+            OctetKeyPair hostKey = OctetKeyPair.parse(hostKeyMap);
+            JWSVerifier verifier = new Ed25519Verifier(hostKey);
+            if (jwt.verify(verifier)) {
+              String iss = jwt.getJWTClaimsSet().getIssuer();
+              if (iss != null && hostKey.computeThumbprint().toString().equals(iss)) {
+                verifiedHostId = iss;
+                isAuthenticated = true;
+              }
+            }
+          }
         }
       } catch (Exception e) {
         isAuthenticated = false; // NOPMD: invalid JWT treated as unauthenticated
@@ -1649,10 +1662,45 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         storage().listCapabilities());
     capabilities.sort(Comparator.comparing(cap -> String.valueOf(cap.get("name"))));
 
+    // §5.2: when the caller is a verified host with a linked user and
+    // pre-approved default grants, scope the authenticated-visibility view to
+    // that pre-approval list. Hosts without a linked user, or without any
+    // defaults, keep the broader authenticated view until layer-2 user-
+    // entitlement gating (authz Q3 in TODO.md) lands.
+    Set<String> hostDefaultCapNames = null;
+    if (verifiedHostId != null) {
+      Map<String, Object> hostData = storage().getHost(verifiedHostId);
+      if (hostData != null && hostData.get("user_id") != null) {
+        Object rawDefaults = hostData.get("default_capability_grants");
+        if (rawDefaults instanceof List<?> list && !list.isEmpty()) {
+          Set<String> names = new LinkedHashSet<>();
+          for (Object item : list) {
+            if (item instanceof Map<?, ?> grant) {
+              Object capName = grant.get("capability");
+              if (capName instanceof String capStr) {
+                names.add(capStr);
+              }
+            }
+          }
+          if (!names.isEmpty()) {
+            hostDefaultCapNames = names;
+          }
+        }
+      }
+    }
+
     List<Map<String, Object>> visibleCapabilities = new ArrayList<>();
     for (Map<String, Object> cap : capabilities) {
       String visibility = (String) cap.get("visibility");
-      if (!isAuthenticated && !"public".equals(visibility)) {
+      if ("public".equals(visibility)) {
+        visibleCapabilities.add(cap);
+        continue;
+      }
+      if (!isAuthenticated) {
+        continue;
+      }
+      if (hostDefaultCapNames != null
+          && !hostDefaultCapNames.contains(String.valueOf(cap.get("name")))) {
         continue;
       }
       visibleCapabilities.add(cap);
@@ -1778,7 +1826,18 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             }
           }
         } else if ("host+jwt".equals(jwtType)) {
-          isAuthenticated = true;
+          Map<String, Object> hostKeyMap = jwt.getJWTClaimsSet()
+              .getJSONObjectClaim("host_public_key");
+          if (hostKeyMap != null) {
+            OctetKeyPair hostKey = OctetKeyPair.parse(hostKeyMap);
+            JWSVerifier verifier = new Ed25519Verifier(hostKey);
+            if (jwt.verify(verifier)) {
+              String iss = jwt.getJWTClaimsSet().getIssuer();
+              if (iss != null && hostKey.computeThumbprint().toString().equals(iss)) {
+                isAuthenticated = true;
+              }
+            }
+          }
         }
       } catch (Exception e) {
         isAuthenticated = false; // NOPMD: invalid JWT treated as unauthenticated

@@ -17,6 +17,7 @@ import io.restassured.http.ContentType;
 import io.restassured.response.Response;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeAll;
@@ -586,5 +587,129 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("name", equalTo(publicCapability))
         .body("description", equalTo("Public balance lookup"));
+  }
+
+  /**
+   * Verifies §5.2 host+jwt signature verification: a {@code host+jwt} whose typ header is correct
+   * but whose signature does not verify against the embedded {@code host_public_key} must be
+   * treated as unauthenticated. The previous header-tag-only check accepted any token claiming
+   * {@code typ=host+jwt}, exposing every {@code authenticated}-visibility capability to forged
+   * tokens.
+   */
+  @Test
+  void listCapabilitiesWithTamperedHostJwtTreatedAsUnauthenticated() {
+    String validJwt = TestJwts.hostJwt(hostKey, issuerUrl());
+    int lastDot = validJwt.lastIndexOf('.');
+    int sigLen = validJwt.length() - lastDot - 1;
+    String tamperedJwt = validJwt.substring(0, lastDot + 1) + "A".repeat(sigLen);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + tamperedJwt)
+        .when()
+        .get("/capability/list")
+        .then()
+        .statusCode(200)
+        .body("capabilities.name", hasItem(publicCapability))
+        .body("capabilities.name", org.hamcrest.Matchers.not(hasItem(authenticatedCapability)));
+  }
+
+  /**
+   * Same §5.2 hardening applied to {@code GET /capability/describe}: a tampered {@code host+jwt}
+   * must not unlock the authenticated-visibility capability. The describe endpoint returns 403 to
+   * unauthenticated callers asking for an authenticated cap.
+   */
+  @Test
+  void describeAuthenticatedCapabilityWithTamperedHostJwtReturns403() {
+    String validJwt = TestJwts.hostJwt(hostKey, issuerUrl());
+    int lastDot = validJwt.lastIndexOf('.');
+    int sigLen = validJwt.length() - lastDot - 1;
+    String tamperedJwt = validJwt.substring(0, lastDot + 1) + "A".repeat(sigLen);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + tamperedJwt)
+        .queryParam("name", authenticatedCapability)
+        .when()
+        .get("/capability/describe")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("access_denied"));
+  }
+
+  /**
+   * Verifies §5.2 host-linked-user filtering: when a host+jwt comes from a host whose {@code
+   * user_id} is set and whose {@code default_capability_grants} pre-approve a specific subset of
+   * authenticated-visibility capabilities, the response must include only those caps (plus all
+   * public caps), excluding other authenticated-visibility caps in the registry.
+   *
+   * <p>
+   * This is the layer-1 narrowing toward the spec's "capabilities available to the host's linked
+   * user" wording — implemented as host-pre-approval filtering until full user-entitlement gating
+   * (authz Q3 in TODO.md) lands.
+   */
+  @Test
+  void listCapabilitiesWithLinkedHostJwtFiltersByHostDefaults() {
+    String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String extraAuthCap = "extra_filter_target_" + suffix;
+    registerCapability(extraAuthCap, "Extra auth cap not in host defaults", "authenticated", false);
+
+    OctetKeyPair freshHostKey = TestKeys.generateEd25519();
+    OctetKeyPair freshAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(freshHostKey, freshAgentKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Filter Test Agent",
+              "host_name": "filter-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "B-filter test"
+            }
+            """, authenticatedCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200);
+
+    String hostId = TestKeys.thumbprint(freshHostKey);
+    String userId = createTestUser("filter-test-user-" + suffix);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_id", userId))
+        .when()
+        .post("/hosts/" + hostId + "/link")
+        .then()
+        .statusCode(200);
+
+    String hostJwt = TestJwts.hostJwt(freshHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .when()
+        .get("/capability/list")
+        .then()
+        .statusCode(200)
+        .body("capabilities.name", hasItems(publicCapability, authenticatedCapability))
+        .body("capabilities.name", org.hamcrest.Matchers.not(hasItem(extraAuthCap)));
+  }
+
+  private static String createTestUser(String username) {
+    String token = adminAccessToken();
+    Response resp = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("username", username, "enabled", true))
+        .when()
+        .post("/admin/realms/" + REALM + "/users");
+    resp.then().statusCode(201);
+    String location = resp.getHeader("Location");
+    return location.substring(location.lastIndexOf('/') + 1);
   }
 }
