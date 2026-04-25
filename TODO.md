@@ -54,34 +54,45 @@ Living list of things we want to come back to. Each item carries enough context 
   multi-tenant), so the trigger will be obvious. Until then the blob
   is fine.
 
+  **Scheduling note (2026-04-25):** the multi-tenant authz plan below
+  splits this entry across Phase 3 (agent grants → join table — needed
+  for efficient cascade queries) and Phase 6 (remaining typed columns
+  + real FKs). Phase 4's eager cascade on org-membership changes is
+  the trigger that makes the agent-grants table painful to keep as a
+  blob; that's when this work starts in earnest.
+
 ## §5.2 capability listing — spec gaps
 
-- [ ] **Promote host-defaults filtering on `/capability/list` into
-  full user-entitlement gating.** The current §5.2 filter narrows the
+- [ ] **Reconcile the §5.2 host-defaults filter with Phase 1's user-
+  entitlement gate.** The current §5.2 filter narrows the
   authenticated-visibility view for verified host JWTs from linked
   hosts to those caps in `host.default_capability_grants` — a host-
-  scoped pre-approval. The spec wording is "capabilities available to
-  the host's linked user", which implies a user-level entitlement
-  model that crosses hosts (e.g. caps the user has approved for any
-  agent under any of their hosts, or caps gated by their roles/orgs).
-  The full implementation depends on resolving authz Q3 in the
-  "AAP ↔ Keycloak authorization integration" draft below
-  (organization vs. role gating). Until then the host-defaults filter
-  is the safe interim narrowing.
+  scoped pre-approval. Phase 1 of the multi-tenant authz plan below
+  adds a user-entitlement gate (`org_id` + `required_role`) that
+  filters by the spec's "capabilities available to the host's linked
+  user" wording. After Phase 1 ships, decide whether to keep the
+  host-defaults filter as additional narrowing (defensible: "what this
+  host has pre-approved") or remove it (the user-entitlement gate is
+  the spec-aligned answer). Either is defensible; pick one and document.
 
-## DRAFT — AAP ↔ Keycloak authorization integration
+## Multi-tenant AAP ↔ Keycloak authorization integration
 
-> **Status: design draft, not a plan.**
-> This section is a record of the open questions we've discussed but
-> not settled. Nothing here is a committed work item — the bullets
-> describe options, not decisions. The "Storage" typed-columns refactor
-> and the "§5.2 capability listing — spec gaps" entries above are
-> foundational regardless of how any of this resolves; treat them as
-> independent. We need more discussion (and probably a concrete
-> deployment scenario) before promoting any of this draft into a
-> committed plan.
+> **Status:** committed plan, phased delivery. Promoted from a design
+> draft on 2026-04-25 after walking a concrete deployment scenario:
+> 3 customer orgs in one Keycloak realm with isolated capability
+> registries. The seven design questions Q1–Q7 each resolved cleanly
+> under that scenario. The git history before that date preserves the
+> draft's full options analysis if anyone wants to see what was
+> considered.
 
-### Framing — three layers, three auth modes
+### Scenario
+
+3 customer orgs (e.g. Acme, Globex, Initech) coexist in one Keycloak
+realm. Each org has its own capability registry — Acme caps invisible
+to non-Acme users. Each user belongs to one or more orgs. Hosts and
+agents inherit a tenant boundary from their owner user.
+
+### Three layers, three auth modes (orientation)
 
 Every AAP-related call decomposes into three layers, and the layers
 map onto Keycloak primitives differently:
@@ -89,190 +100,116 @@ map onto Keycloak primitives differently:
 | Layer | What it answers | Auth proof | Where the answer lives |
 |---|---|---|---|
 | **1. Cryptographic identity** | "who is the principal" (host, agent) | `host+jwt` / `agent+jwt`, signature checked against the JWT-embedded public key | AAP-only; KC identity tables not consulted. |
-| **2. Resource access** | "may this principal touch this capability/host/agent" | derived from the principal → owner user → KC roles / groups / orgs | KC's identity tables, queried via FK. *This is the layer that's mostly unwritten today.* |
+| **2. Resource access** | "may this principal touch this capability/host/agent" | derived from the principal → owner user → KC roles / groups / orgs | KC's identity tables, queried via FK. *This is the layer this plan is mostly about.* |
 | **3. Runtime state** | "is the principal in the right state right now" | status flags, grants, constraints | AAP runtime tables. |
 
 Three corresponding auth modes in play across the protocol surface:
 
 - **AAP cryptographic** (`host+jwt`, `agent+jwt`) on the protocol-side endpoints.
 - **KC user OIDC** on `/verify/approve` and `/verify/deny` — the user IS the bearer, identity is direct.
-- **KC admin OIDC + role** on the admin API — `manage-realm` for realm-wide ops, `manage-organization` for org-scoped (proposed).
+- **KC admin OIDC + role** on the admin API — `manage-realm` for realm-wide ops, `manage-organization` for org-scoped (Phase 5).
 
-Today our impl does layer 1 and layer 3 well. The "fit into KC's authz
-model" question is mostly about layer 2 — making the principal → user
-link load-bearing so that role / group / org mappings naturally gate
-who can be granted what.
+Today the impl does layer 1 and layer 3 well. The phased plan below
+makes layer 2 load-bearing — the principal → user link gates who can
+be granted what via KC role and organization mappings.
 
-### Open questions
+### Decisions
 
-Each of these blocks gates the design but doesn't have a settled
-answer. Options are described, not endorsed.
+| Q | Decision | Why |
+|---|---|---|
+| **Q1** FK coupling | Real FKs on `realm_id`, `user_id`, `organization_id` (where set) | Tenant isolation is a security boundary; integrity must be data-layer-enforced — soft refs lose to a single missing `WHERE org_id = ?`. |
+| **Q2** Host owner mandatory | Yes, always; autonomous hosts use a service-account user | A host without a user has no tenant — "Globex's host" stops being meaningful under multi-tenancy. |
+| **Q3** Gate primitive | KC Organizations (tenant boundary) + KC Roles (intra-tenant gate) — combination | Native KC primitives. UMA is overkill; AAP-native ACL duplicates what KC already does. |
+| **Q4** Cascade | Hybrid: eager on user-delete + org-membership changes; lazy on role changes | Org changes move the tenant boundary (eager-worthy); role drift acceptable until execute time. |
+| **Q5** SA mapping | One SA per confidential client; client belongs to one org | Fleet-level tenant attribution. Per-host SA gives unnecessary granularity; per-realm SA crosses tenant boundaries. |
+| **Q6** `/verify/approve` layer-2 check | Wire it (Phase 2) | Without it, users can be tricked into approving cross-tenant caps — a tenant-boundary violation, not just permissiveness. |
+| **Q7** Capability registration | Realm-admin + org-admin self-service | Tenants own their schema; realm-admin handles platform-wide caps. |
 
-#### Q1. How tightly should AAP entities couple to KC's schema?
+### Sub-decisions
 
-- **Real foreign keys** into `KEYCLOAK_USER`, `KEYCLOAK_REALM`,
-  optionally `KEYCLOAK_ORG`. Pro: indexed joins, native
-  `ON DELETE CASCADE`, referential integrity. Con: hard schema
-  coupling — if a future KC version renames a table we follow.
-- **Soft references** (store user_id / realm_id as strings, integrity
-  enforced by application code). Pro: portable, decouples AAP storage
-  from KC schema evolution. Con: integrity bugs on app errors,
-  joins are ad-hoc.
-- **Mixed** — real FK on `realm_id` (we already depend on KC's per-
-  realm SPI mounting), soft string for `user_id` (so AAP entities
-  could in principle survive being lifted out of KC).
+**Realm-wide caps (`organization_id IS NULL`).** Visible to all
+authenticated users in the realm. Composition with `visibility`:
 
-Worth deciding before any column-level work, since it's the call that
-shapes the migration.
+| visibility × org_id | Visible to |
+|---|---|
+| `public`, NULL | anonymous + everyone |
+| `public`, set | anonymous (org filter is skipped without an identity) |
+| `authenticated`, NULL | any authenticated user |
+| `authenticated`, set | only authenticated org members |
 
-#### Q2. Must every host have an owner user?
+Org gating applies only to authenticated callers — there's no identity
+to org-match against for anonymous traffic, so `(public, set)` reduces
+to "anonymous can see it." Only realm-admin can mint or edit NULL-org
+caps; the org-admin endpoint derives `organization_id` from the
+admin's scope and never accepts it from the request body. Migration
+of existing caps is a no-op semantically — they're all NULL today,
+which under this rule means "visible to all", matching today's
+behavior.
 
-- **Yes, always** — `host.user_id NOT NULL`, with autonomous hosts
-  pointing at a Keycloak service-account user (existing KC primitive).
-  Pro: every host is queryable through KC's identity model; cascade
-  semantics are uniform; group/org membership flows transitively.
-  Con: migration cost (existing unlinked hosts need an owner assigned).
-- **No, owner is optional** — keep `host.user_id` nullable, accept
-  that some hosts have no KC identity attached. Pro: simpler migration,
-  matches AAP §2.7's "host MAY exist without any linked user". Con:
-  layer 2 has to handle the "no user" case as a special path; admin
-  UIs and audit reports degrade.
-- **Yes for delegated, optional for autonomous** — middle ground that
-  matches the spec's wording most literally.
+**Cross-org users at grant time.** No "justifying_org" column on
+grants — the cap's `organization_id` is the source of truth.
+Authorization is `(cap.org_id ∈ user.orgs at evaluation time) AND
+(cap.required_role ⊆ user.roles at evaluation time)`. If Alice is in
+both Acme and Globex, she has access to both registries; if she
+later leaves Acme, grants for `org_id=Acme` caps cascade-revoke (Q4
+eager) regardless of when they were created. Lazy re-check of role
+drift happens at `/agent/introspect` — the response strips grants
+whose cap fails the gate against current user state.
 
-This question gates almost everything else in this section, because
-"who's the owner user" is what the rest of the layer-2 model hangs
-off of.
+### Phased delivery
 
-#### Q3. Where does the gate for "user U is allowed to grant capability C" live?
+Phases 1–4 are the multi-tenancy MVP — until Phase 4 ships, the
+tenant boundary leaks under user-side state changes. Phases 5–6 are
+quality-of-life.
 
-This is the core architectural question. Today there's effectively no
-gate: a user (or admin) approves anything they're asked to. Options:
+1. **Phase 1 — Capability schema + listing filter.** Add
+   `organization_id` and `required_role` to the capability payload
+   (JSON-blob fields, no Liquibase migration needed for this phase).
+   Wire `/capability/list` and `/capability/describe` to filter by
+   them when caller is authenticated. Realm-admin write endpoints
+   accept the new fields. No mutating-side enforcement, no approval-
+   time check yet.
 
-- **KC realm/client roles** — capability gets a nullable
-  `required_role` column; user must hold the role (directly or via
-  group inheritance) to be granted. Pro: native KC primitive,
-  operators already manage roles. Con: another column to model,
-  role-name conventions need to be defined (e.g. `aap:cap:transfer_money`?).
-- **KC organizations** — capability scoped to an org via
-  `organization_id`; user must be a member to be granted. Pro: tenant
-  isolation falls out for free. Con: not granular enough for "users
-  in this org with the accountant role" — would need to combine with
-  roles.
-- **Combination** — both `organization_id` (multi-tenancy) and
-  `required_role` (intra-tenant authorization) on capability; gate is
-  `(org_id IS NULL OR user.orgs CONTAINS org_id) AND (required_role
-  IS NULL OR user.roles CONTAINS required_role)`.
-- **AAP-native ACL** — new tables (`AGENT_AUTH_CAP_ACL`) mapping
-  capabilities to authorized users/groups directly. Pro: doesn't
-  re-use KC primitives we might want to evolve separately. Con:
-  parallel authz system to maintain alongside KC's.
-- **UMA / Authorization Services** — capability as a UMA-protected
-  resource, grants as permission tickets, KC's policy engine evaluates.
-  Pro: maximum policy expressivity (time-based, JS, role aggregates).
-  Con: heavyweight, opaque to most operators, two parallel token
-  formats (UMA RPT vs AAP agent+jwt).
+2. **Phase 2 — Approval-time + introspect-time enforcement.** Wire
+   layer-2 check on `/verify/approve` and `/verify/deny` (reject if
+   caller lacks the cap's `org_id` ∩ `roles`). Wire lazy re-check on
+   `/agent/introspect` (filter dead grants from the response). Closes
+   the multi-tenant hole at both decision points.
 
-Currently leaning toward **combination of orgs + roles**. UMA looks
-overkill for the access shape we have. AAP-native ACL would
-double-work effort that KC already does. But this needs more thought
-— specifically whether `required_role` is the right level of
-abstraction or whether we want a richer policy hook.
+3. **Phase 3 — Grant join table (storage refactor, scoped).** Promote
+   `agent.agent_capability_grants` from JSON blob to
+   `AGENT_AUTH_AGENT_GRANT(agent_id FK, capability_name FK, status,
+   granted_by, constraints_json, …)`. One-shot migration: read each
+   agent's blob, populate the table, leave the blob in place as a
+   safety net for one release. Required because Phase 4's cascade
+   needs efficient `WHERE cap.org_id = X AND user_id = Y` queries.
 
-#### Q4. What's the cascade on user-side changes?
+4. **Phase 4 — Eager cascade on org-membership change.** KC event
+   listener for organization-membership-removed events. Find user's
+   agents → find grants whose cap's `organization_id` matches the
+   removed org → mark revoked. Strict cascade.
 
-When a user is deleted, has a role removed, or leaves an organization:
+5. **Phase 5 — Org-admin self-service + SA-as-host pattern.** New
+   admin endpoints scoped under
+   `/admin/realms/{realm}/organizations/{orgId}/capabilities`,
+   mintable by `manage-organization` holders (org_id derived from
+   path, never request body). Document the recommended SA-per-
+   confidential-client pattern; admin endpoint to register an
+   autonomous host with an SA owner.
 
-- **Strict cascade** — re-evaluate all that user's hosts/agents/grants;
-  revoke anything no longer authorized. Pro: tight security model,
-  promptness guarantees. Con: an event listener with potentially large
-  blast radius; failure modes around partial cascades.
-- **Lazy re-check** — keep grants in place, re-check authorization at
-  introspect / execute time. Pro: simpler implementation, naturally
-  consistent. Con: "I removed the role 5 minutes ago and the agent is
-  still running" — security people hate this.
-- **Hybrid** — strict cascade on user delete (per AAP §2.6's explicit
-  obligation), lazy re-check on role / group / org membership changes.
+6. **Phase 6 — Remaining storage normalization.** Folds the existing
+   "Storage" entry above. Typed columns on host/agent/capability,
+   real FKs from agent-auth tables to `KEYCLOAK_REALM`,
+   `KEYCLOAK_USER`, `KEYCLOAK_ORG`, drop JSON blobs. Defense-in-depth
+   layer: integrity now enforced at the data layer, not just app code.
 
-#### Q5. Service-account-as-host-owner — what's the mapping unit?
+### Open implementation items
 
-If we go with Q2-yes (every host has a user), autonomous daemons need
-a service-account user. Options:
-
-- **One service account per autonomous host** — N hosts, N service
-  accounts. Clearest audit trail.
-- **One service account per client app** — confidential client like
-  `acme-bank-mcp-client` has one SA, all hosts that client provisions
-  share it. Less clutter, less granular revocation.
-- **One service account per realm** ("system" user) — every unowned
-  host points at it. Simplest migration, weakest audit.
-
-Best answer probably depends on what operators actually deploy. We
-should pick a recommended pattern and document it; don't need to
-enforce it in code.
-
-#### Q6. Should the `/verify/approve` (device-flow) endpoint enforce the layer-2 access check now?
-
-Today any logged-in realm user can approve any pending agent's
-requested grants — there's no "is this user allowed to grant this
-capability" check. Options:
-
-- **Wire it now** with whatever Q3 answer we settle on, even
-  partially.
-- **Wait for the full integration** — accept that today's behavior is
-  permissive but functional; defer until we've thought through Q1–Q4.
-- **Add a coarse interim gate** — e.g. just "user must be a member of
-  the same realm as the host" (which is trivially true today but
-  becomes meaningful if hosts ever become cross-realm-discoverable).
-
-#### Q7. Organization-admin self-service for capability registration?
-
-- **Realm-admin only** (today) — only `manage-realm` holders can
-  write to the capability registry.
-- **Plus org-admin for org-scoped capabilities** — `manage-organization`
-  holders can write capabilities under their own `organization_id`,
-  but only NULL-org capabilities still require realm-admin.
-- **Plus user self-service for user-scoped capabilities** — collapses
-  to single-member orgs anyway; not recommended.
-
-Q7 effectively asks "are organizations real tenants in our model, or
-just a visibility filter?" — if real tenants, they need write
-authority over their own scope.
-
-### One specific direction (also a draft)
-
-The shape that's been kicking around in our discussion, written down
-not as a recommendation but so we can argue about it:
-
-- Q1: real FK on `realm_id`, real FK on `user_id`, real FK on
-  `organization_id` where present.
-- Q2: every host has a user (real or service-account).
-- Q3: combination — `organization_id` + `required_role` columns on
-  capability.
-- Q4: hybrid cascade — strict on user delete, lazy on role/org changes.
-- Q5: one service-account user per client app, picked at host
-  pre-registration time.
-- Q6: wire the layer-2 check at approval time once Q3 settles.
-- Q7: realm-admin + org-admin-self-service.
-
-If we pick that combination, the schema sketch from earlier discussion
-becomes coherent (typed columns, `realm_id` everywhere, `user_id`
-NOT NULL on host, `organization_id` + `required_role` on capability,
-`AGENT_AUTH_AGENT_GRANT` as a real join table). But each Q's choice
-ripples — answering them differently changes the schema and the
-runtime checks.
-
-### What we'd need before promoting any of this to a plan
-
-- A concrete deployment scenario that pushes the design (e.g., "we
-  want to onboard 3 customer orgs into one realm and need their
-  capability registries isolated").
-- A decision on Q1 (FK vs. soft) — everything else is contingent.
-- A decision on Q2 (host ownership requirement) — gates Q4 and Q5.
-- A decision on Q3 (the gate primitive) — gates Q6 and Q7.
-- An IT story that covers cross-tenant isolation, role-revocation
-  cascade, and service-account host ownership.
-
-Until those are answered, the existing committed items above (typed
-columns, §5.2 spec gaps) are the right next steps — they're useful
-no matter which way Q1–Q7 land.
+- Confirm the KC Organizations API surface (`OrganizationProvider`
+  membership-lookup call shape, availability on `provided`-scope
+  `keycloak-server-spi`). Phase 1 needs this for the listing filter.
+- Multi-org test fixture pattern — programmatic org creation +
+  membership via admin REST, reusable across the phase ITs.
+- After Phase 1 ships, decide whether to keep the §5.2 host-defaults
+  filter as additional narrowing or remove it (see the §5.2 entry
+  above).
