@@ -4,7 +4,7 @@ A Keycloak extension implementing the [Agent Auth Protocol](https://agent-auth-p
 
 ## Why Keycloak?
 
-Keycloak is a natural fit for Agent Auth because it already manages users, sessions, tokens, approvals, and audit logging. This extension adds agent-specific concepts (hosts, agents, capability grants) while reusing Keycloak's existing infrastructure for user identity, user-driven approval, and audit events. Device-authorization approval (AAP §7.1) is implemented on top of Keycloak user sessions; CIBA is still planned.
+Keycloak is a natural fit for Agent Auth because it already manages users, sessions, tokens, approvals, and audit logging. This extension adds agent-specific concepts (hosts, agents, capability grants) while reusing Keycloak's existing infrastructure for user identity, user-driven approval, and audit events. Device-authorization approval (AAP §7.1) and CIBA push (AAP §7.2 — email-based, with the in-realm `/inbox` poll as a fallback) are both implemented on top of Keycloak user sessions. The extension also integrates with Keycloak Organizations for multi-tenant capability registries — capabilities can be scoped to an org and/or gated on a realm role, with eager cascade revocation when a user leaves an org.
 
 ## Architecture
 
@@ -47,12 +47,15 @@ Solid edges always happen; dashed edges are mode-specific (gateway vs direct exe
 | Capability listing | `GET /capability/list` | List available capabilities |
 | Capability detail | `GET /capability/describe` | Get full capability schema |
 | Capability execution (gateway) | `POST /capability/execute` | Keycloak introspects the agent JWT, runs constraint checks, and proxies to `<capability.location>` |
-| Device-auth approve | `POST /verify/approve` | Authenticated realm user approves a pending agent via their `user_code` (AAP §7.1). Activates the agent and links the host to the approving user. |
+| Device-auth approve | `POST /verify/approve` | Authenticated realm user approves a pending agent via their `user_code` (AAP §7.1). Activates the agent and links the host to the approving user. Layer-2 gate: grants whose cap fails the user's org/role entitlement flip to `denied(insufficient_authority)` while passing grants go `active`. |
 | Device-auth deny | `POST /verify/deny` | Authenticated realm user denies a pending agent; terminal (subsequent approve attempts return 410). |
-| **Admin:** capability CRUD | `POST / PUT / DELETE /admin/.../agent-auth/capabilities[/{name}]` | Register, update, and delete capabilities |
+| CIBA inbox | `GET /agent-auth/inbox` | Authenticated realm user lists pending approvals routed to them via CIBA (§7.2). Used as the in-realm fallback when SMTP isn't available. |
+| **Admin:** capability CRUD (realm-wide) | `POST / PUT / DELETE /admin/.../agent-auth/capabilities[/{name}]` | Register, update, and delete capabilities. Realm-admin only. |
+| **Admin:** capability CRUD (org-scoped) | `POST / GET / PUT / DELETE /admin/.../agent-auth/organizations/{orgId}/capabilities[/{name}]` | Mintable by `manage-organization`-role holders who are members of the target org. `organization_id` is derived from the path; the body can't override it. Cross-org PUT/DELETE returns 404. |
 | **Admin:** approve grant | `POST /admin/.../agent-auth/agents/{id}/capabilities/{capability}/approve` | Approve a pending capability grant |
 | **Admin:** reject / expire agent | `POST /admin/.../agent-auth/agents/{id}/{reject\|expire}` | Reject a pending agent or force-expire an active one |
-| **Admin:** pre-register host | `POST /admin/.../agent-auth/hosts` | Pre-create a host record with an inline Ed25519 JWK (spec §2.8 "Pre-registration" flow) |
+| **Admin:** agent grants | `GET /admin/.../agent-auth/agents/{id}/grants` | Returns the rows from the `AGENT_AUTH_AGENT_GRANT` secondary index — useful for verifying the index stays in sync with the per-agent grant list. |
+| **Admin:** pre-register host | `POST /admin/.../agent-auth/hosts` | Pre-create a host record with an inline Ed25519 JWK (spec §2.8 "Pre-registration" flow). Optional `client_id` field resolves the confidential client's service-account user and stores it as the host's `user_id`, so autonomous workloads can skip the post-claim approval flow. |
 | **Admin:** fetch host | `GET /admin/.../agent-auth/hosts/{id}` | Fetch a host record by thumbprint |
 | **Admin:** link host to user | `POST /admin/.../agent-auth/hosts/{id}/link` | Bind a host to a Keycloak user (§2.9). Cascades: autonomous agents → `claimed` with grants revoked (§2.10); delegated agents inherit `user_id` (§3.2) |
 | **Admin:** unlink host | `DELETE /admin/.../agent-auth/hosts/{id}/link` | Remove the host→user binding. Revokes all delegated agents under the host (§2.9); autonomous agents stay `claimed` (terminal) |
@@ -109,6 +112,16 @@ Each capability has:
 - **input/output** -- JSON Schema for arguments and results
 - **visibility** -- who can see it (public, authenticated)
 - **requires_approval** -- whether user approval is needed before granting
+- **organization_id** (optional) -- Keycloak organization id (multi-tenant scope). When set, only authenticated callers who are members of that org see / can be granted the cap. NULL = realm-wide (visible to any authenticated user). Only realm-admin can mint NULL-org caps; org-admins set this implicitly via the `/organizations/{orgId}/capabilities` endpoints.
+- **required_role** (optional) -- realm role name (intra-tenant gate). When set, only callers holding that role can be granted. NULL = no role gate.
+
+### Multi-tenant capability registries
+
+Capabilities can be scoped to a Keycloak organization via `organization_id` (tenant boundary) and/or gated on a realm role via `required_role` (intra-tenant authorization). The two compose as `(cap.org_id IS NULL OR cap.org_id ∈ user.orgs) AND (cap.required_role IS NULL OR cap.required_role ∈ user.roles)`. Public-visibility caps bypass the gate (anonymous has no identity to match against).
+
+Enforcement runs at three points: discovery (`/capability/list` and `/capability/describe`), approval (`/verify/approve` flips gate-failed grants to `denied(insufficient_authority)`), and runtime introspection (`/agent/introspect` strips dead grants from its response, the lazy half of the cascade). On `OrganizationMemberLeaveEvent` the extension eagerly revokes a leaving user's grants whose cap belonged to that org, with `reason=org_membership_removed`.
+
+The Keycloak Organizations feature is required for org-scoped caps to work end-to-end. Without it, caps with `organization_id IS NULL` continue to work as before; caps with a set `organization_id` become invisible (fail-safe — no leakage when the feature isn't enabled).
 
 ### Capability Constraints
 
@@ -145,10 +158,10 @@ This extension does not sign protocol responses today, so discovery does not pub
 | Architecture | Hybrid (KC auth + external execution) | Avoids building a parallel auth system inside KC; lets KC do what it's good at |
 | Discovery | `/realms/{realm}/.well-known/agent-configuration` via WellKnownProvider SPI | Follows KC's own OpenID discovery pattern |
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on KC classpath, high-level API, well-audited |
-| Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; writes land in Keycloak's main persistence unit (H2 in dev, any KC-supported RDBMS in prod) | Survives Keycloak restarts and scales across replicas; selected by default via the `AgentAuthStorage` SPI (`kc.spi.agent-auth-storage.provider=in-memory` switches back to the process-local map for tests) |
+| Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; fully typed columns on all four agent-auth tables; writes land in Keycloak's main persistence unit (H2 in dev, any KC-supported RDBMS in prod) | Survives Keycloak restarts and scales across replicas. Indexed `ORGANIZATION_ID` and `REQUIRED_ROLE` on capability make multi-tenant filter + cascade SQL-efficient. The `AGENT_AUTH_AGENT_GRANT` join table is a sync-on-write secondary index over per-agent grants. Selected by default via the `AgentAuthStorage` SPI (`kc.spi.agent-auth-storage.provider=in-memory` switches back to the process-local map for tests). |
 | Scoping | Global env toggle + per-realm attribute override (planned) | Start simple, add granularity later |
-| Approval flows | Device-authorization (AAP §7.1) over Keycloak user sessions, plus admin-mediated HTTP approval; CIBA planned | Device-flow reuses KC's realm user auth to back the `user_code` approval step; admin path stays for headless setups |
-| Capabilities | Centralized in KC | Single source of truth; resource servers just execute |
+| Approval flows | Device-authorization (AAP §7.1) and CIBA push (AAP §7.2 — email + in-realm `/inbox` fallback) over Keycloak user sessions, plus admin-mediated HTTP approval | Device-flow reuses KC's realm user auth to back the `user_code` approval step; CIBA emails the linked user with a deep link to `/verify/approve`; admin path stays for headless setups |
+| Capabilities | Centralized in KC, optionally org-scoped | Single source of truth; resource servers just execute. Multi-tenancy via Keycloak Organizations + realm roles. |
 
 ## Protocol Reference
 
@@ -224,9 +237,10 @@ src/main/java/.../agentauth/
     jpa/
       AgentAuthJpaEntityProvider.java        # Registers entities + changelog with KC
       AgentAuthJpaEntityProviderFactory.java # JpaEntityProvider factory
-      HostEntity.java                        # AGENT_AUTH_HOST row
-      AgentEntity.java                       # AGENT_AUTH_AGENT row
-      CapabilityEntity.java                  # AGENT_AUTH_CAPABILITY row
+      HostEntity.java                        # AGENT_AUTH_HOST row (typed columns)
+      AgentEntity.java                       # AGENT_AUTH_AGENT row (typed columns)
+      AgentGrantEntity.java                  # AGENT_AUTH_AGENT_GRANT row (composite PK secondary index)
+      CapabilityEntity.java                  # AGENT_AUTH_CAPABILITY row (typed columns; ORG_ID + ROLE indexed)
       RotatedHostEntity.java                 # AGENT_AUTH_ROTATED_HOST row
       JpaStorage.java                        # AgentAuthStorage backed by EntityManager
       JpaStorageFactory.java                 # Default AgentAuthStorage factory (order=100)
@@ -251,7 +265,21 @@ src/test/java/.../agentauth/
   AgentAuthCapabilityExecuteIT.java          # §5.11 Execute capability
   AgentAuthIntrospectIT.java                 # §5.12 Token introspection
   AgentAuthErrorResponseIT.java              # §5.13–§5.14 Error format + WWW-Authenticate
-  AgentAuthAdminCapabilityRegistrationIT.java# Admin capability CRUD
+  AgentAuthAdminCapabilityRegistrationIT.java# Admin capability CRUD (realm-wide)
+  AgentAuthOrgAdminCapabilityIT.java         # Phase 5: org-scoped admin endpoints + SA-as-host
+  AgentAuthCatalogNoPublicCapsIT.java        # §5.2 "no public caps → 401" branch (isolated realm)
+  AgentAuthMultiTenantCapabilityIT.java      # Phase 1: org/role gate on /capability/list + /describe
+  AgentAuthMultiTenantApprovalIT.java        # Phase 2: approval-time + introspect-time enforcement
+  AgentAuthOrgMembershipCascadeIT.java       # Phase 4: eager cascade on KC org-membership leave
+  AgentAuthCapabilityWithoutOrgsIT.java      # Phase 1 robustness: realm-level orgs disabled
+  AgentAuthGrantTableSyncIT.java             # Phase 3: AGENT_AUTH_AGENT_GRANT secondary index sync
+  AgentAuthHostLinkIT.java                   # §2.9/§2.10/§3.2 host linking + cascades
+  AgentAuthUserDeletionCascadeIT.java        # §2.6 user-deletion cascade
+  AgentAuthDeviceApprovalIT.java             # §7.1 device-authorization approval
+  AgentAuthCibaApprovalIT.java               # §7.2 CIBA push approval (email + /inbox fallback)
+  AgentAuthVerifyPageIT.java                 # /verify HTML approval page rendering
+  AgentAuthPendingCleanupIT.java             # §7.1 pending-agent GC sweep
+  AgentAuthWriteCapableGrantIT.java          # §8.11 write-capable grant proof-of-presence
   AgentAuthKeycloakIT.java                   # Sanity check (Keycloak starts, extension loads)
   AgentAuthFullJourneyE2E.java               # Full delegated/autonomous journey (Postgres-backed)
   AgentAuthRestartSurvivalE2E.java           # State survives Keycloak restart (Postgres)
