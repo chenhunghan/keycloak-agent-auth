@@ -248,7 +248,7 @@ Both paths converge in the same verification logic; the choice is per-identity, 
 | Admin grant approve / reject / expire | `AgentAuthAdminResourceProvider.approveCapability` / `.rejectAgent` / `.expireAgent` |
 | Admin grants secondary-index probe | `AgentAuthAdminResourceProvider.getAgentGrants` |
 | SA-as-host (Phase 5) | `AgentAuthAdminResourceProvider.preRegisterHost` — optional `client_id` resolves the confidential client's service-account user as host owner |
-| Org-self-serve agent environments | `AgentAuthAdminResourceProvider.createOrgAgentEnvironment` / `.deleteOrgAgentEnvironment` — creates a locked-down KC client + binds its SA to the path's org + pre-registers the host in one `manage-organization` call. Lockdown flags are hard-coded; managed clients are tagged `agent_auth_managed=true` and `agent_auth_organization_id=<orgId>` for queryable audit/cleanup. Quota: 50 managed clients per org. |
+| Org-self-serve agent environments | `AgentAuthAdminResourceProvider.createOrgAgentEnvironment` / `.listOrgAgentEnvironments` / `.deleteOrgAgentEnvironment` — creates a locked-down KC client + binds its SA to the path's org + pre-registers the host in one `manage-organization` call. Lockdown flags are hard-coded; managed clients are tagged `agent_auth_managed=true` and `agent_auth_organization_id=<orgId>` for queryable audit/cleanup. List returns the org's envs without `client_secret` (secrets are one-time-only on create). Quota: 50 managed clients per org. |
 | Storage | `storage/AgentAuthStorage` + `storage/jpa/*` (typed columns + `AGENT_AUTH_AGENT_GRANT` secondary index) + `storage/InMemoryStorage` |
 | Liquibase schema | `META-INF/agent-auth-changelog.xml` |
 

@@ -893,6 +893,55 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   }
 
   /**
+   * List managed agent environments for an organization. Returns the tagged clients owned by the
+   * path's org with their resolved SA user and bound host. {@code client_secret} is intentionally
+   * never included — secrets are returned exactly once at creation and aren't retrievable later;
+   * the right rotation path is delete + recreate.
+   */
+  @GET
+  @Path("organizations/{orgId}/agent-environments")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response listOrgAgentEnvironments(@PathParam("orgId") String orgId) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
+    requireOrgAdmin(orgId);
+
+    RealmModel realm = session.getContext().getRealm();
+    AgentAuthStorage storage = storage();
+    List<Map<String, Object>> envs = new java.util.ArrayList<>();
+    realm.getClientsStream()
+        .filter(c -> "true".equals(c.getAttribute(MANAGED_ATTR))
+            && orgId.equals(c.getAttribute(MANAGED_ORG_ATTR)))
+        .forEach(c -> {
+          Map<String, Object> env = new HashMap<>();
+          env.put("client_id", c.getClientId());
+          env.put("organization_id", orgId);
+          if (c.getName() != null && !c.getName().isBlank()) {
+            env.put("name", c.getName());
+          }
+          org.keycloak.models.UserModel saUser = session.users().getServiceAccount(c);
+          if (saUser != null) {
+            env.put("service_account_user_id", saUser.getId());
+            // Resolve the host by SA owner. There should be exactly one managed host per env;
+            // if there's none (e.g. host was admin-revoked but client wasn't deleted) we still
+            // return the env, just without a host_id — surfaces the inconsistency for ops.
+            for (Map<String, Object> host : storage.findHostsByUser(saUser.getId())) {
+              if (c.getClientId().equals(host.get("service_account_client_id"))) {
+                env.put("host_id", host.get("host_id"));
+                env.put("host_status", host.get("status"));
+                break;
+              }
+            }
+          }
+          envs.add(env);
+        });
+
+    return Response.ok(Map.of("agent_environments", envs)).build();
+  }
+
+  /**
    * Delete a managed agent environment: removes the KC client, which cascades to the SA user, which
    * fires {@code UserRemovedEvent} and triggers
    * {@link AgentAuthUserEventListenerProviderFactory#handleUserRemoved} to revoke the host and all

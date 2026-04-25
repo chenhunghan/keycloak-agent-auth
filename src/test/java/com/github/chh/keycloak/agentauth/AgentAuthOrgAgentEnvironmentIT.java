@@ -310,6 +310,78 @@ class AgentAuthOrgAgentEnvironmentIT extends BaseKeycloakIT {
         .body("error", equalTo("invalid_request"));
   }
 
+  /**
+   * List shows envs for the path's org with their resolved client_id, host_id, and SA user.
+   * client_secret is intentionally never present — secrets are returned exactly once on create and
+   * the only way to "rotate" is delete + recreate.
+   */
+  @Test
+  void listEnvironmentsReturnsCreatedEnvWithoutSecret() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Response create = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostKey.toPublicJWK().toJSONObject(),
+            "name", "Listed env"))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/agent-environments");
+    create.then().statusCode(201);
+    String clientId = create.jsonPath().getString("client_id");
+    String hostId = create.jsonPath().getString("host_id");
+
+    Response list = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/organizations/" + acmeOrgId + "/agent-environments");
+    list.then().statusCode(200);
+
+    List<Map<String, Object>> envs = list.jsonPath().getList("agent_environments");
+    Map<String, Object> created = envs.stream()
+        .filter(e -> clientId.equals(e.get("client_id")))
+        .findFirst()
+        .orElseThrow();
+    assertThat(created.get("host_id")).isEqualTo(hostId);
+    assertThat(created.get("host_status")).isEqualTo("active");
+    assertThat(created.get("organization_id")).isEqualTo(acmeOrgId);
+    assertThat(created.get("name")).isEqualTo("Listed env");
+    assertThat(created.get("service_account_user_id")).isNotNull();
+    assertThat(created).as("client_secret must never appear in list responses")
+        .doesNotContainKey("client_secret");
+  }
+
+  /**
+   * Cross-tenant filter: an env created in Globex must not appear in Acme's list. Together with the
+   * delete-cross-tenant test this confirms tag-based scoping holds across both read and write.
+   */
+  @Test
+  void listEnvironmentsDoesNotIncludeOtherOrgsEnvs() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Response create = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostKey.toPublicJWK().toJSONObject(),
+            "name", "Globex-only env"))
+        .when()
+        .post("/organizations/" + globexOrgId + "/agent-environments");
+    create.then().statusCode(201);
+    String globexClientId = create.jsonPath().getString("client_id");
+
+    Response list = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/organizations/" + acmeOrgId + "/agent-environments");
+    list.then().statusCode(200);
+
+    List<Map<String, Object>> envs = list.jsonPath().getList("agent_environments");
+    assertThat(envs).noneMatch(e -> globexClientId.equals(e.get("client_id")));
+  }
+
   // --- helpers ---
 
   private static void assertNotEnabled(Response clientResponse, String path) {
