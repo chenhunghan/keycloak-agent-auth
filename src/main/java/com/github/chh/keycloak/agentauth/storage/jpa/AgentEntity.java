@@ -19,7 +19,8 @@ import jakarta.persistence.Table;
     @NamedQuery(name = "AgentEntity.findByHost", query = "select a from AgentEntity a where a.hostId = :hostId"),
     @NamedQuery(name = "AgentEntity.findByKeyAndHost", query = "select a from AgentEntity a "
         + "where a.hostId = :hostId and a.keyThumbprint = :keyThumbprint"),
-    @NamedQuery(name = "AgentEntity.findByUserCode", query = "select a from AgentEntity a where a.userCode = :userCode")
+    @NamedQuery(name = "AgentEntity.findByUserCode", query = "select a from AgentEntity a where a.userCode = :userCode"),
+    @NamedQuery(name = "AgentEntity.findByUserId", query = "select a from AgentEntity a where a.userId = :userId")
 })
 public class AgentEntity {
 

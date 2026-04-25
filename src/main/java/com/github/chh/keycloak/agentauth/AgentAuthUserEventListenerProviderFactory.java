@@ -13,6 +13,7 @@ import org.keycloak.events.EventListenerProviderFactory;
 import org.keycloak.events.admin.AdminEvent;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
+import org.keycloak.models.OrganizationModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 
@@ -84,6 +85,15 @@ public class AgentAuthUserEventListenerProviderFactory implements EventListenerP
           // for reasons unrelated to agent-auth state.
           LOG.log(Level.WARNING,
               "agent-auth: user-deletion cascade failed; continuing", e);
+        }
+      } else if (providerEvent instanceof OrganizationModel.OrganizationMemberLeaveEvent left) {
+        try {
+          handleOrgMemberLeave(left);
+        } catch (RuntimeException e) {
+          // Same containment as user-removed: never abort KC's transaction over an agent-auth
+          // bookkeeping failure.
+          LOG.log(Level.WARNING,
+              "agent-auth: org-membership cascade failed; continuing", e);
         }
       }
     });
@@ -183,6 +193,84 @@ public class AgentAuthUserEventListenerProviderFactory implements EventListenerP
 
   private static boolean isTerminal(String status) {
     return "claimed".equals(status) || "revoked".equals(status) || "rejected".equals(status);
+  }
+
+  /**
+   * Phase 4 of the multi-tenant authz plan: eager cascade on KC org-membership removal. When a user
+   * leaves an organization, every {@code active} grant they hold whose capability was scoped to
+   * that organization is marked {@code revoked} with {@code reason=org_membership_removed}. Grants
+   * on capabilities scoped to other orgs (or with {@code organization_id IS NULL}) are left
+   * untouched. The agent itself stays {@code active} — losing one org's grants doesn't terminate
+   * the agent, just narrows what it can do.
+   *
+   * <p>
+   * This is the eager half of Q4's hybrid cascade. Role drift remains lazy via Phase 2's
+   * {@code /agent/introspect} re-evaluation.
+   */
+  @SuppressWarnings("unchecked")
+  private static void handleOrgMemberLeave(OrganizationModel.OrganizationMemberLeaveEvent event) {
+    KeycloakSession session = event.getSession();
+    UserModel user = event.getUser();
+    OrganizationModel org = event.getOrganization();
+    if (session == null || user == null || org == null) {
+      return;
+    }
+    String userId = user.getId();
+    String orgId = org.getId();
+    if (userId == null || orgId == null) {
+      return;
+    }
+
+    AgentAuthStorage storage;
+    try {
+      storage = session.getProvider(AgentAuthStorage.class);
+    } catch (RuntimeException e) {
+      LOG.log(Level.FINE,
+          () -> "agent-auth: storage provider unavailable; skipping org-leave cascade");
+      return;
+    }
+    if (storage == null) {
+      return;
+    }
+
+    String nowTs = Instant.now().toString();
+    for (Map<String, Object> agent : storage.findAgentsByUser(userId)) {
+      String agentId = (String) agent.get("agent_id");
+      if (agentId == null) {
+        continue;
+      }
+      Object rawGrants = agent.get("agent_capability_grants");
+      if (!(rawGrants instanceof List<?> grantList)) {
+        continue;
+      }
+      boolean modified = false;
+      for (Object rawGrant : grantList) {
+        if (!(rawGrant instanceof Map<?, ?>)) {
+          continue;
+        }
+        Map<String, Object> grant = (Map<String, Object>) rawGrant;
+        if (!"active".equals(grant.get("status"))) {
+          continue;
+        }
+        Object capName = grant.get("capability");
+        if (!(capName instanceof String)) {
+          continue;
+        }
+        Map<String, Object> registeredCap = storage.getCapability((String) capName);
+        if (registeredCap == null) {
+          continue;
+        }
+        if (orgId.equals(registeredCap.get("organization_id"))) {
+          grant.put("status", "revoked");
+          grant.put("reason", "org_membership_removed");
+          modified = true;
+        }
+      }
+      if (modified) {
+        agent.put("updated_at", nowTs);
+        storage.putAgent(agentId, agent);
+      }
+    }
   }
 
   /**

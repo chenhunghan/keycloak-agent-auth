@@ -158,9 +158,10 @@ whose cap fails the gate against current user state.
 
 ### Phased delivery
 
-Phases 1–4 are the multi-tenancy MVP — until Phase 4 ships, the
-tenant boundary leaks under user-side state changes. Phases 5–6 are
-quality-of-life.
+Phases 1–4 are the multi-tenancy MVP — ✅ all shipped 2026-04-25.
+The tenant boundary is now enforced end-to-end: visibility (Phase 1),
+approval and lazy re-eval (Phase 2), grants index (Phase 3), eager
+cascade (Phase 4). Phases 5–6 are quality-of-life and still pending.
 
 1. **Phase 1 — Capability schema + listing filter.** ✅ Shipped
    2026-04-25. Added `organization_id` and `required_role` to the
@@ -198,10 +199,18 @@ quality-of-life.
    the sync. Phase 4's eager cascade and future Phase 6 read-path
    swaps will query this table directly.
 
-4. **Phase 4 — Eager cascade on org-membership change.** KC event
-   listener for organization-membership-removed events. Find user's
-   agents → find grants whose cap's `organization_id` matches the
-   removed org → mark revoked. Strict cascade.
+4. **Phase 4 — Eager cascade on org-membership change.** ✅ Shipped
+   2026-04-25. `AgentAuthUserEventListenerProviderFactory.postInit`
+   now also subscribes to `OrganizationModel.OrganizationMemberLeave
+   Event` (KC's native ProviderEvent). When a user leaves an org, the
+   handler walks their agents (via the new `findAgentsByUser` SPI
+   method backed by the indexed `AGENT_AUTH_AGENT.USER_ID` column),
+   inspects each `active` grant's cap, and marks grants whose
+   `organization_id` matches the removed org as `revoked` with
+   `reason=org_membership_removed`. Grants on other orgs (or
+   NULL-org caps) untouched. Phase 3's secondary index syncs on the
+   resulting `putAgent`. With Phase 2's lazy re-eval at introspect
+   on role drift, this completes Q4's hybrid cascade.
 
 5. **Phase 5 — Org-admin self-service + SA-as-host pattern.** New
    admin endpoints scoped under

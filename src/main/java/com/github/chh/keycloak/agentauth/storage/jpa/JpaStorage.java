@@ -201,6 +201,22 @@ public class JpaStorage implements AgentAuthStorage {
   }
 
   @Override
+  public List<Map<String, Object>> findAgentsByUser(String userId) {
+    if (userId == null) {
+      return new ArrayList<>();
+    }
+    List<AgentEntity> rows = em()
+        .createNamedQuery("AgentEntity.findByUserId", AgentEntity.class)
+        .setParameter("userId", userId)
+        .getResultList();
+    List<Map<String, Object>> out = new ArrayList<>(rows.size());
+    for (AgentEntity row : rows) {
+      out.add(deserialize(row.getPayload()));
+    }
+    return out;
+  }
+
+  @Override
   public List<Map<String, Object>> findHostsByUser(String userId) {
     if (userId == null) {
       return new ArrayList<>();

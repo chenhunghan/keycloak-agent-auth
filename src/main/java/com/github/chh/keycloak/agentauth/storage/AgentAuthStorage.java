@@ -43,6 +43,15 @@ public interface AgentAuthStorage extends Provider {
   List<Map<String, Object>> findHostsByUser(String userId);
 
   /**
+   * All agents whose {@code user_id} field equals {@code userId}. Used by the Phase 4 eager cascade
+   * on org-membership changes — finds the user's agents independently of which host they sit under
+   * (autonomous-claimed agents may have a {@code user_id} that doesn't match the host's). Empty
+   * list when no agent matches. The JPA implementation hits the indexed
+   * {@code AGENT_AUTH_AGENT.USER_ID} column.
+   */
+  List<Map<String, Object>> findAgentsByUser(String userId);
+
+  /**
    * The agent whose {@code user_code} payload field equals {@code userCode}, or {@code null} when
    * no match exists. Used by the AAP §7.1 device-authorization verify endpoints to resolve a
    * pending agent from the code the user enters.
