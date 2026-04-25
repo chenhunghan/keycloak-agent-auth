@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +36,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.organization.OrganizationProvider;
 import org.keycloak.services.resource.RealmResourceProvider;
 import org.keycloak.urls.UrlType;
 import org.keycloak.util.JsonSerialization;
@@ -1662,29 +1667,40 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         storage().listCapabilities());
     capabilities.sort(Comparator.comparing(cap -> String.valueOf(cap.get("name"))));
 
+    // Resolve the caller's owning KC user once: agent → agent.user_id, host → host.user_id.
+    // Re-loaded after the auth block to keep the verification logic readable.
+    Map<String, Object> verifiedAgentData = agentId == null ? null : storage().getAgent(agentId);
+    Map<String, Object> verifiedHostData = verifiedHostId == null
+        ? null
+        : storage().getHost(verifiedHostId);
+    String effectiveUserId = resolveEffectiveUserId(verifiedAgentData, verifiedHostData);
+
+    // Phase 1 of the multi-tenant authz plan: snapshot the caller's KC org memberships
+    // and realm-roles for the user-entitlement gate below. May be null when the host or
+    // agent isn't yet linked to a KC user (in which case caps with org_id or required_role
+    // are invisible — matches the "no entitlements" case).
+    UserEntitlement entitlement = loadUserEntitlement(effectiveUserId);
+
     // §5.2: when the caller is a verified host with a linked user and
     // pre-approved default grants, scope the authenticated-visibility view to
     // that pre-approval list. Hosts without a linked user, or without any
-    // defaults, keep the broader authenticated view until layer-2 user-
-    // entitlement gating (authz Q3 in TODO.md) lands.
+    // defaults, keep the broader authenticated view (until reconciled per the
+    // §5.2 follow-up TODO entry, post-Phase-1).
     Set<String> hostDefaultCapNames = null;
-    if (verifiedHostId != null) {
-      Map<String, Object> hostData = storage().getHost(verifiedHostId);
-      if (hostData != null && hostData.get("user_id") != null) {
-        Object rawDefaults = hostData.get("default_capability_grants");
-        if (rawDefaults instanceof List<?> list && !list.isEmpty()) {
-          Set<String> names = new LinkedHashSet<>();
-          for (Object item : list) {
-            if (item instanceof Map<?, ?> grant) {
-              Object capName = grant.get("capability");
-              if (capName instanceof String capStr) {
-                names.add(capStr);
-              }
+    if (verifiedHostData != null && verifiedHostData.get("user_id") != null) {
+      Object rawDefaults = verifiedHostData.get("default_capability_grants");
+      if (rawDefaults instanceof List<?> list && !list.isEmpty()) {
+        Set<String> names = new LinkedHashSet<>();
+        for (Object item : list) {
+          if (item instanceof Map<?, ?> grant) {
+            Object capName = grant.get("capability");
+            if (capName instanceof String capStr) {
+              names.add(capStr);
             }
           }
-          if (!names.isEmpty()) {
-            hostDefaultCapNames = names;
-          }
+        }
+        if (!names.isEmpty()) {
+          hostDefaultCapNames = names;
         }
       }
     }
@@ -1697,6 +1713,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         continue;
       }
       if (!isAuthenticated) {
+        continue;
+      }
+      if (!userEntitlementAllows(cap, entitlement)) {
         continue;
       }
       if (hostDefaultCapNames != null
@@ -1803,6 +1822,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
 
     String agentId = null;
+    String verifiedHostId = null;
     boolean isAuthenticated = false;
 
     if (authHeader != null && authHeader.startsWith("Bearer ")) {
@@ -1834,6 +1854,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             if (jwt.verify(verifier)) {
               String iss = jwt.getJWTClaimsSet().getIssuer();
               if (iss != null && iss.equals(hostKey.computeThumbprint().toString())) {
+                verifiedHostId = iss;
                 isAuthenticated = true;
               }
             }
@@ -1848,6 +1869,23 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       return Response.status(403)
           .entity(Map.of("error", "access_denied", "message", "Authentication required"))
           .build();
+    }
+
+    // Phase 1 user-entitlement gate: org/role gates apply only to authenticated-visibility
+    // caps for authenticated callers. Public caps bypass entirely (anonymous can see them).
+    // Failed gate returns 404 capability_not_found to avoid leaking the cap's existence.
+    if (isAuthenticated && "authenticated".equals(cap.get("visibility"))) {
+      Map<String, Object> verifiedAgentData = agentId == null ? null : storage().getAgent(agentId);
+      Map<String, Object> verifiedHostData = verifiedHostId == null
+          ? null
+          : storage().getHost(verifiedHostId);
+      String effectiveUserId = resolveEffectiveUserId(verifiedAgentData, verifiedHostData);
+      UserEntitlement entitlement = loadUserEntitlement(effectiveUserId);
+      if (!userEntitlementAllows(cap, entitlement)) {
+        return Response.status(404)
+            .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
+            .build();
+      }
     }
 
     Map<String, Object> result = new HashMap<>(cap);
@@ -3547,6 +3585,88 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
     }
     return null;
+  }
+
+  /**
+   * Phase 1 of the multi-tenant authz plan: resolve the caller's owning KC user from whichever
+   * principal type was verified. Agent's user_id is set during register (delegated) or claim
+   * (autonomous); host's user_id is set when an admin or approval flow links the host. Returns null
+   * when the principal isn't yet linked to a KC user.
+   */
+  private static String resolveEffectiveUserId(Map<String, Object> agentData,
+      Map<String, Object> hostData) {
+    if (agentData != null) {
+      Object uid = agentData.get("user_id");
+      if (uid instanceof String uidStr && !uidStr.isBlank()) {
+        return uidStr;
+      }
+    }
+    if (hostData != null) {
+      Object uid = hostData.get("user_id");
+      if (uid instanceof String uidStr && !uidStr.isBlank()) {
+        return uidStr;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Snapshot of the KC user's realm-roles and organization memberships used by the Phase 1
+   * user-entitlement gate on {@code /capability/list} and {@code /capability/describe}.
+   */
+  private record UserEntitlement(Set<String> orgs, Set<String> roles) {
+  }
+
+  /**
+   * Loads the entitlement snapshot for the given user_id. Returns null when the id is null or the
+   * user no longer exists; callers treat null as "no orgs, no roles" — which makes any cap with an
+   * org_id or required_role gate invisible to the caller. If KC Organizations isn't enabled on this
+   * realm, the org set is empty (org-scoped caps become effectively invisible — operators that mint
+   * org-scoped caps without enabling the feature are misconfigured).
+   */
+  private UserEntitlement loadUserEntitlement(String userId) {
+    if (userId == null || userId.isBlank()) {
+      return null;
+    }
+    RealmModel realm = session.getContext().getRealm();
+    if (realm == null) {
+      return null;
+    }
+    UserModel user = session.users().getUserById(realm, userId);
+    if (user == null) {
+      return null;
+    }
+    Set<String> roles = new HashSet<>();
+    user.getRealmRoleMappingsStream().map(RoleModel::getName).forEach(roles::add);
+    Set<String> orgs = new HashSet<>();
+    if (realm.isOrganizationsEnabled()) {
+      OrganizationProvider orgProvider = session.getProvider(OrganizationProvider.class);
+      if (orgProvider != null) {
+        orgProvider.getByMember(user).map(org -> org.getId()).forEach(orgs::add);
+      }
+    }
+    return new UserEntitlement(orgs, roles);
+  }
+
+  /**
+   * Phase 1 user-entitlement gate. Returns true iff the cap is grantable to the entitlement:
+   * {@code (cap.organization_id IS NULL OR org_id ∈ entitlement.orgs)} AND
+   * {@code (cap.required_role IS NULL OR required_role ∈ entitlement.roles)}. A null entitlement
+   * (user not linked or not found) only passes caps with both gates unset.
+   */
+  private static boolean userEntitlementAllows(Map<String, Object> cap,
+      UserEntitlement entitlement) {
+    Object rawOrgId = cap.get("organization_id");
+    if (rawOrgId instanceof String orgId && !orgId.isBlank()
+        && (entitlement == null || !entitlement.orgs().contains(orgId))) {
+      return false;
+    }
+    Object rawRequiredRole = cap.get("required_role");
+    if (rawRequiredRole instanceof String role && !role.isBlank()
+        && (entitlement == null || !entitlement.roles().contains(role))) {
+      return false;
+    }
+    return true;
   }
 
   @Override

@@ -8,6 +8,7 @@
   "resetPasswordAllowed": false,
   "editUsernameAllowed": false,
   "bruteForceProtected": false,
+  "organizationsEnabled": true,
   "clients": [
     {
       "clientId": "agent-auth-test-client",

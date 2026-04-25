@@ -22,6 +22,7 @@ public final class TestcontainersSupport {
     return new KeycloakContainer(KEYCLOAK_IMAGE)
         .withProviderClassesFrom("target/classes")
         .withProviderLibsFrom(providerLibs())
+        .withFeaturesEnabled("organization")
         .withRealmImportFile(TEST_REALM_IMPORT);
   }
 

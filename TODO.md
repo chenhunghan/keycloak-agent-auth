@@ -162,13 +162,16 @@ Phases 1–4 are the multi-tenancy MVP — until Phase 4 ships, the
 tenant boundary leaks under user-side state changes. Phases 5–6 are
 quality-of-life.
 
-1. **Phase 1 — Capability schema + listing filter.** Add
-   `organization_id` and `required_role` to the capability payload
-   (JSON-blob fields, no Liquibase migration needed for this phase).
-   Wire `/capability/list` and `/capability/describe` to filter by
-   them when caller is authenticated. Realm-admin write endpoints
-   accept the new fields. No mutating-side enforcement, no approval-
-   time check yet.
+1. **Phase 1 — Capability schema + listing filter.** ✅ Shipped
+   2026-04-25. Added `organization_id` and `required_role` to the
+   capability payload (JSON-blob fields, no Liquibase migration).
+   Realm-admin write endpoints accept and validate the new fields.
+   `/capability/list` and `/capability/describe` apply the gate when
+   the caller is authenticated; describe returns 404 (not 403) on
+   gate failure to avoid leaking the cap's existence. Test fixture
+   uses KC native Organizations (feature flag enabled in
+   `TestcontainersSupport`, realm-level toggle in the test realm
+   import).
 
 2. **Phase 2 — Approval-time + introspect-time enforcement.** Wire
    layer-2 check on `/verify/approve` and `/verify/deny` (reject if

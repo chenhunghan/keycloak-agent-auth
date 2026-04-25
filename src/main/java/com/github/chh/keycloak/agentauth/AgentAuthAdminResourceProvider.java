@@ -81,6 +81,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .entity(Map.of("error", "invalid_request", "message", "Invalid visibility")).build();
     }
 
+    Response gateValidation = validateGateFields(requestBody);
+    if (gateValidation != null) {
+      return gateValidation;
+    }
+
     if (storage().putCapabilityIfAbsent(name, requestBody) != null) {
       return Response.status(409)
           .entity(Map.of("error", "capability_exists", "message", "Capability already exists"))
@@ -109,6 +114,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(404)
           .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
           .build();
+    }
+
+    Response gateValidation = validateGateFields(requestBody);
+    if (gateValidation != null) {
+      return gateValidation;
     }
 
     Map<String, Object> updatedCapability = new HashMap<>(requestBody);
@@ -520,6 +530,32 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (auth != null) {
       auth.realm().requireManageRealm();
     }
+  }
+
+  /**
+   * Phase 1 of the multi-tenant authz plan: validate the optional {@code organization_id} and
+   * {@code required_role} gate fields. Both are nullable. When present, they must be non-blank
+   * strings; existence-against-KC validation (org id resolves to a real KC org, role name resolves
+   * to a real realm role) is deferred until the use case asks for it.
+   */
+  private static Response validateGateFields(Map<String, Object> requestBody) {
+    Object rawOrgId = requestBody.get("organization_id");
+    if (rawOrgId != null
+        && (!(rawOrgId instanceof String) || ((String) rawOrgId).isBlank())) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "organization_id must be a non-blank string"))
+          .build();
+    }
+    Object rawRequiredRole = requestBody.get("required_role");
+    if (rawRequiredRole != null
+        && (!(rawRequiredRole instanceof String) || ((String) rawRequiredRole).isBlank())) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "required_role must be a non-blank string"))
+          .build();
+    }
+    return null;
   }
 
   /**
