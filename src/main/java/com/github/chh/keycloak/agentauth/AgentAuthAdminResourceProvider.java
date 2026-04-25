@@ -604,6 +604,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @SuppressWarnings("unchecked")
   public Response registerOrgHost(@PathParam("orgId") String orgId,
       Map<String, Object> requestBody) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
     org.keycloak.models.OrganizationModel org = requireOrgAdmin(orgId);
     if (requestBody == null) {
       return Response.status(400)
@@ -715,6 +719,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Produces(MediaType.APPLICATION_JSON)
   public Response registerOrgCapability(@PathParam("orgId") String orgId,
       Map<String, Object> requestBody) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
     requireOrgAdmin(orgId);
     if (requestBody == null) {
       return Response.status(400)
@@ -764,6 +772,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Path("organizations/{orgId}/capabilities")
   @Produces(MediaType.APPLICATION_JSON)
   public Response listOrgCapabilities(@PathParam("orgId") String orgId) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
     requireOrgAdmin(orgId);
     List<Map<String, Object>> filtered = new java.util.ArrayList<>();
     for (Map<String, Object> cap : storage().listCapabilities()) {
@@ -786,6 +798,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Produces(MediaType.APPLICATION_JSON)
   public Response updateOrgCapability(@PathParam("orgId") String orgId,
       @PathParam("name") String name, Map<String, Object> requestBody) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
     requireOrgAdmin(orgId);
     if (requestBody == null) {
       return Response.status(400)
@@ -820,6 +836,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Path("organizations/{orgId}/capabilities/{name}")
   public Response deleteOrgCapability(@PathParam("orgId") String orgId,
       @PathParam("name") String name) {
+    Response orgsErr = orgsEnabledOrError();
+    if (orgsErr != null) {
+      return orgsErr;
+    }
     requireOrgAdmin(orgId);
     AgentAuthStorage storage = storage();
     Map<String, Object> existing = storage.getCapability(name);
@@ -852,6 +872,9 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (realm == null) {
       throw new jakarta.ws.rs.InternalServerErrorException("Realm not in context");
     }
+    // Callers must run orgsEnabledOrError() first; we still defend-in-depth here, but the explicit
+    // guard at the endpoint is what produces a 501 response — RestEasy's WebApplicationException
+    // mapping inside KC's pipeline collapses thrown 501s to a generic 500.
     org.keycloak.organization.OrganizationProvider orgProvider;
     try {
       orgProvider = session.getProvider(org.keycloak.organization.OrganizationProvider.class);
@@ -894,6 +917,37 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       }
     }
     return org;
+  }
+
+  /**
+   * Returns a 501 Not Implemented response when KC's Organizations feature is unavailable on this
+   * realm, or {@code null} when orgs are usable. Org-scoped endpoints call this before
+   * {@link #requireOrgAdmin} so clients see 501 (with a structured {@code
+   * organizations_feature_disabled} error) instead of a generic 500. Returning a response rather
+   * than throwing avoids RestEasy/KC mapping the wrapped status to 500 inside this pipeline.
+   *
+   * <p>
+   * Distinct from 404 (org not found) so clients can tell "feature off" from "wrong orgId" via
+   * status alone.
+   */
+  private Response orgsEnabledOrError() {
+    RealmModel realm = session.getContext().getRealm();
+    if (realm == null) {
+      return null; // requireOrgAdmin will surface the realm-missing case as 500
+    }
+    org.keycloak.organization.OrganizationProvider orgProvider;
+    try {
+      orgProvider = session.getProvider(org.keycloak.organization.OrganizationProvider.class);
+    } catch (RuntimeException e) {
+      orgProvider = null;
+    }
+    if (orgProvider == null || !realm.isOrganizationsEnabled()) {
+      return Response.status(501)
+          .entity(Map.of("error", "organizations_feature_disabled",
+              "message", "Organizations feature not enabled on this realm"))
+          .build();
+    }
+    return null;
   }
 
   /**

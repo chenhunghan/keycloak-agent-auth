@@ -105,6 +105,45 @@ class AgentAuthCapabilityWithoutOrgsIT extends BaseKeycloakIT {
         .body("capabilities.name", hasItem(publicCap));
   }
 
+  /**
+   * When Organizations is disabled on the realm, every {@code /organizations/{orgId}/...} admin
+   * endpoint must return 501 Not Implemented with a structured
+   * {@code organizations_feature_disabled} error — distinct from 404 (org-not-found) so clients can
+   * tell the difference between "feature off" and "wrong orgId."
+   */
+  @Test
+  void orgScopedCapabilityEndpointReturns501WhenOrgsDisabled() {
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl() + "/admin/realms/" + REALM + "/agent-auth")
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body("{\"name\":\"x\",\"visibility\":\"authenticated\","
+            + "\"requires_approval\":false,\"location\":\"https://x/x\","
+            + "\"input\":{\"type\":\"object\"},\"output\":{\"type\":\"object\"}}")
+        .when()
+        .post("/organizations/00000000-0000-0000-0000-000000000000/capabilities")
+        .then()
+        .statusCode(501)
+        .body("error", org.hamcrest.Matchers.equalTo("organizations_feature_disabled"));
+  }
+
+  @Test
+  void orgScopedHostEndpointReturns501WhenOrgsDisabled() {
+    OctetKeyPair k = TestKeys.generateEd25519();
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl() + "/admin/realms/" + REALM + "/agent-auth")
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", k.toPublicJWK().toJSONObject(),
+            "client_id", "irrelevant"))
+        .when()
+        .post("/organizations/00000000-0000-0000-0000-000000000000/hosts")
+        .then()
+        .statusCode(501)
+        .body("error", org.hamcrest.Matchers.equalTo("organizations_feature_disabled"));
+  }
+
   // --- helpers ---
 
   private static void disableOrganizationsOnRealm() {
