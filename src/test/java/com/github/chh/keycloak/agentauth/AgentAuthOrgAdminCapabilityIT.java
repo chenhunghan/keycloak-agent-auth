@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
 import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
+import com.github.chh.keycloak.agentauth.support.TestJwts;
+import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import io.restassured.http.ContentType;
 import io.restassured.response.Response;
@@ -197,6 +199,104 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
         .then()
         .statusCode(400)
         .body("error", equalTo("invalid_request"));
+  }
+
+  /**
+   * SA-hosts have no human consent channel, so a delegated-mode registration would never receive a
+   * usable approval (CIBA email goes to a service-account user with no inbox; no realm user can
+   * post a device-flow user_code on its behalf). Reject at register time with a clear error rather
+   * than letting the agent stall in {@code pending} forever.
+   */
+  @Test
+  void registerDelegatedAgentUnderSAHostIsRejected() {
+    String clientId = "p5sa-deleg-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createConfidentialClientWithSA(clientId);
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostPublicKey,
+            "client_id", clientId,
+            "name", "SA host for delegated guard"))
+        .when()
+        .post("/hosts")
+        .then()
+        .statusCode(201);
+
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "delegated-under-sa",
+              "host_name": "sa-host",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_mode_for_sa_host"));
+  }
+
+  /**
+   * Companion to the reject test: autonomous-mode agents under an SA-host must register cleanly
+   * (active immediately, no approval flow). Locks in the intended path so a future change to the
+   * guard can't accidentally tighten past mode=delegated.
+   */
+  @Test
+  void registerAutonomousAgentUnderSAHostSucceeds() {
+    String clientId = "p5sa-auton-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createConfidentialClientWithSA(clientId);
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    Map<String, Object> hostPublicKey = hostKey.toPublicJWK().toJSONObject();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "host_public_key", hostPublicKey,
+            "client_id", clientId,
+            "name", "SA host for autonomous"))
+        .when()
+        .post("/hosts")
+        .then()
+        .statusCode(201);
+
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "autonomous-under-sa",
+              "host_name": "sa-host",
+              "capabilities": [],
+              "mode": "autonomous"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("mode", equalTo("autonomous"))
+        .body("status", equalTo("active"));
   }
 
   // --- helpers ---

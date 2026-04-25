@@ -396,6 +396,18 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           return Response.status(403)
               .entity(Map.of("error", "host_rejected", "message", "Host is rejected")).build();
         }
+        // SA-host + delegated is a misconfiguration: the SA user has no human consent
+        // channel, so a CIBA-email or device-flow approval would never land and the agent
+        // would be stuck `pending`. Hosts pre-registered with `client_id` must run
+        // autonomous-mode agents.
+        if (hostData.get("service_account_client_id") != null && "delegated".equals(mode)) {
+          return Response.status(400)
+              .entity(Map.of("error", "invalid_mode_for_sa_host",
+                  "message",
+                  "Host is bound to a service-account client; "
+                      + "agents under SA-hosts must use mode=autonomous"))
+              .build();
+        }
       }
 
       Map<String, Object> existingAgent = storage().findAgentByKeyAndHost(agentKeyThumb, hostId);
