@@ -58,6 +58,20 @@ public interface AgentAuthStorage extends Provider {
    */
   int deletePendingAgentsOlderThan(long thresholdEpochMs);
 
+  /**
+   * Phase 3 of the multi-tenant authz plan: returns the {@code AGENT_AUTH_AGENT_GRANT} rows
+   * mirroring this agent's {@code agent_capability_grants} blob array. Each map carries the
+   * normalized grant fields ({@code agent_id}, {@code capability}, {@code status},
+   * {@code granted_by}, {@code reason}, {@code constraints}) — a strict subset of what the blob
+   * would contain. Empty list when the agent has no grants or doesn't exist.
+   *
+   * <p>
+   * For the JPA implementation this hits the indexed table (no JSON parse). For the in-memory
+   * implementation it derives the same shape from the blob. Used by Phase 4's eager cascade and by
+   * tests that want to verify the secondary index stays in sync.
+   */
+  List<Map<String, Object>> findGrantsByAgent(String agentId);
+
   // --- Capabilities (keyed by name) ---
 
   Map<String, Object> getCapability(String name);

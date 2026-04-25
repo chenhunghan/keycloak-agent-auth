@@ -114,6 +114,7 @@ public class JpaStorage implements AgentAuthStorage {
       entity.setUserCode(userCode);
       entity.setUpdatedAt(now);
     }
+    syncAgentGrants(em, agentId, agent, now);
   }
 
   @Override
@@ -131,7 +132,15 @@ public class JpaStorage implements AgentAuthStorage {
 
   @Override
   public int deletePendingAgentsOlderThan(long thresholdEpochMs) {
-    return em()
+    EntityManager em = em();
+    // Phase 3: cascade the bulk delete to the grants table. JPQL bulk-delete bypasses JPA
+    // cascade, so the grants are removed explicitly first.
+    em.createQuery("delete from AgentGrantEntity g where g.agentId in ("
+        + "select a.id from AgentEntity a where a.status = 'pending' and a.createdAt < :threshold"
+        + ")")
+        .setParameter("threshold", thresholdEpochMs)
+        .executeUpdate();
+    return em
         .createQuery("delete from AgentEntity a where a.status = 'pending'"
             + " and a.createdAt < :threshold")
         .setParameter("threshold", thresholdEpochMs)
@@ -158,6 +167,35 @@ public class JpaStorage implements AgentAuthStorage {
     List<Map<String, Object>> out = new ArrayList<>(results.size());
     for (AgentEntity e : results) {
       out.add(deserialize(e.getPayload()));
+    }
+    return out;
+  }
+
+  @Override
+  public List<Map<String, Object>> findGrantsByAgent(String agentId) {
+    if (agentId == null) {
+      return new ArrayList<>();
+    }
+    List<AgentGrantEntity> rows = em()
+        .createNamedQuery("AgentGrantEntity.findByAgent", AgentGrantEntity.class)
+        .setParameter("agentId", agentId)
+        .getResultList();
+    List<Map<String, Object>> out = new ArrayList<>(rows.size());
+    for (AgentGrantEntity row : rows) {
+      Map<String, Object> grant = new java.util.HashMap<>();
+      grant.put("agent_id", row.getAgentId());
+      grant.put("capability", row.getCapabilityName());
+      grant.put("status", row.getStatus());
+      if (row.getGrantedBy() != null) {
+        grant.put("granted_by", row.getGrantedBy());
+      }
+      if (row.getReason() != null) {
+        grant.put("reason", row.getReason());
+      }
+      if (row.getConstraintsJson() != null) {
+        grant.put("constraints", deserialize(row.getConstraintsJson()));
+      }
+      out.add(grant);
     }
     return out;
   }
@@ -264,6 +302,48 @@ public class JpaStorage implements AgentAuthStorage {
     entity.setNewHostId(newHostId);
     entity.setRotatedAt(System.currentTimeMillis());
     em.persist(entity);
+  }
+
+  /**
+   * Phase 3 of the multi-tenant authz plan: keep the {@code AGENT_AUTH_AGENT_GRANT} secondary index
+   * in sync with the per-agent grants array nested in the JSON payload. Called from
+   * {@link #putAgent} on every save. Strategy is delete-then-insert: simpler than upsert
+   * reconciliation and acceptable at the per-agent scale (typically &lt; 50 grants).
+   */
+  @SuppressWarnings("unchecked")
+  private static void syncAgentGrants(
+      EntityManager em, String agentId, Map<String, Object> agent, long now) {
+    em.createNamedQuery("AgentGrantEntity.deleteByAgent")
+        .setParameter("agentId", agentId)
+        .executeUpdate();
+    Object rawGrants = agent.get("agent_capability_grants");
+    if (!(rawGrants instanceof List<?>)) {
+      return;
+    }
+    for (Object rawGrant : (List<?>) rawGrants) {
+      if (!(rawGrant instanceof Map<?, ?>)) {
+        continue;
+      }
+      Map<String, Object> grant = (Map<String, Object>) rawGrant;
+      String capName = stringField(grant, "capability");
+      String status = stringField(grant, "status");
+      if (capName == null || status == null) {
+        continue;
+      }
+      AgentGrantEntity row = new AgentGrantEntity();
+      row.setAgentId(agentId);
+      row.setCapabilityName(capName);
+      row.setStatus(status);
+      row.setGrantedBy(stringField(grant, "granted_by"));
+      row.setReason(stringField(grant, "reason"));
+      Object constraints = grant.get("constraints");
+      if (constraints instanceof Map<?, ?>) {
+        row.setConstraintsJson(serialize((Map<String, Object>) constraints));
+      }
+      row.setCreatedAt(now);
+      row.setUpdatedAt(now);
+      em.persist(row);
+    }
   }
 
   // --- JSON helpers ---

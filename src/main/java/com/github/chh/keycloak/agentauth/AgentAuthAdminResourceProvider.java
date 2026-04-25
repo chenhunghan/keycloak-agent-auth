@@ -386,6 +386,20 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   }
 
   /**
+   * Phase 3 of the multi-tenant authz plan: returns the {@code AGENT_AUTH_AGENT_GRANT} secondary-
+   * index rows for an agent, distinct from the JSON-blob grants in {@link #getAgent}. Used to
+   * verify the sync-on-write index stays consistent with the blob; Phase 4's eager cascade and
+   * future Phase 6 read-path swaps will query this table directly.
+   */
+  @GET
+  @Path("agents/{id}/grants")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getAgentGrants(@PathParam("id") String id) {
+    requireManageRealm();
+    return Response.ok(Map.of("grants", storage().findGrantsByAgent(id))).build();
+  }
+
+  /**
    * AAP §7.1: "Servers SHOULD periodically clean up agents that remain in pending state beyond a
    * server-defined threshold ... Cleaned-up pending agents are deleted, not revoked — they never
    * became active." This endpoint gives operators a manual trigger for the sweep (the extension

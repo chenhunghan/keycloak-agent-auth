@@ -13,6 +13,7 @@ public class AgentAuthJpaEntityProvider implements JpaEntityProvider {
     return Arrays.asList(
         HostEntity.class,
         AgentEntity.class,
+        AgentGrantEntity.class,
         CapabilityEntity.class,
         RotatedHostEntity.class);
   }

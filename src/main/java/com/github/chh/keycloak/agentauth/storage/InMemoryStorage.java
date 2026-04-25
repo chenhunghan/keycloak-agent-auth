@@ -65,6 +65,44 @@ public class InMemoryStorage implements AgentAuthStorage {
   }
 
   @Override
+  @SuppressWarnings("unchecked")
+  public List<Map<String, Object>> findGrantsByAgent(String agentId) {
+    List<Map<String, Object>> out = new ArrayList<>();
+    if (agentId == null) {
+      return out;
+    }
+    Map<String, Object> agent = AGENTS.get(agentId);
+    if (agent == null) {
+      return out;
+    }
+    Object rawGrants = agent.get("agent_capability_grants");
+    if (!(rawGrants instanceof List<?>)) {
+      return out;
+    }
+    for (Object rawGrant : (List<?>) rawGrants) {
+      if (!(rawGrant instanceof Map<?, ?>)) {
+        continue;
+      }
+      Map<String, Object> grant = (Map<String, Object>) rawGrant;
+      Map<String, Object> projected = new java.util.HashMap<>();
+      projected.put("agent_id", agentId);
+      projected.put("capability", grant.get("capability"));
+      projected.put("status", grant.get("status"));
+      if (grant.get("granted_by") != null) {
+        projected.put("granted_by", grant.get("granted_by"));
+      }
+      if (grant.get("reason") != null) {
+        projected.put("reason", grant.get("reason"));
+      }
+      if (grant.get("constraints") != null) {
+        projected.put("constraints", grant.get("constraints"));
+      }
+      out.add(projected);
+    }
+    return out;
+  }
+
+  @Override
   public List<Map<String, Object>> findHostsByUser(String userId) {
     List<Map<String, Object>> matches = new ArrayList<>();
     if (userId == null) {

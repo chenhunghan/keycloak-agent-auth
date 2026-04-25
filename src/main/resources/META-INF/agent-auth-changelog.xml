@@ -150,4 +150,57 @@
             <column name="USER_CODE"/>
         </createIndex>
     </changeSet>
+
+    <!--
+        Phase 3 of the multi-tenant authz plan: promote agent.agent_capability_grants from a JSON
+        blob nested in AGENT_AUTH_AGENT.PAYLOAD into a normalized join table. The blob continues
+        to be the source of truth for application reads in this phase; the grants table is a
+        sync-on-write secondary index, populated by JpaStorage.putAgent. Phase 4's cascade and
+        future Phase 6 reads can query this table by capability_name + status. Composite PK
+        prevents duplicate grants per (agent, capability).
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.3.0-agent-grant">
+        <preConditions onFail="MARK_RAN">
+            <not><tableExists tableName="AGENT_AUTH_AGENT_GRANT"/></not>
+        </preConditions>
+        <createTable tableName="AGENT_AUTH_AGENT_GRANT">
+            <column name="AGENT_ID" type="VARCHAR(36)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="CAPABILITY_NAME" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="STATUS" type="VARCHAR(32)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="GRANTED_BY" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="REASON" type="VARCHAR(64)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="CONSTRAINTS_JSON" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="CREATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="UPDATED_AT" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addPrimaryKey tableName="AGENT_AUTH_AGENT_GRANT"
+                       columnNames="AGENT_ID,CAPABILITY_NAME"
+                       constraintName="PK_AGENT_AUTH_AGENT_GRANT"/>
+        <createIndex indexName="IDX_AGENT_AUTH_AGENT_GRANT_CAP"
+                     tableName="AGENT_AUTH_AGENT_GRANT">
+            <column name="CAPABILITY_NAME"/>
+            <column name="STATUS"/>
+        </createIndex>
+        <createIndex indexName="IDX_AGENT_AUTH_AGENT_GRANT_AGENT"
+                     tableName="AGENT_AUTH_AGENT_GRANT">
+            <column name="AGENT_ID"/>
+            <column name="STATUS"/>
+        </createIndex>
+    </changeSet>
 </databaseChangeLog>

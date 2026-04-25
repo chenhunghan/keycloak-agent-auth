@@ -184,13 +184,19 @@ quality-of-life.
    the lazy half of Q4's hybrid cascade. Eager cascade on
    org-membership changes still owed by Phase 4.
 
-3. **Phase 3 — Grant join table (storage refactor, scoped).** Promote
-   `agent.agent_capability_grants` from JSON blob to
-   `AGENT_AUTH_AGENT_GRANT(agent_id FK, capability_name FK, status,
-   granted_by, constraints_json, …)`. One-shot migration: read each
-   agent's blob, populate the table, leave the blob in place as a
-   safety net for one release. Required because Phase 4's cascade
-   needs efficient `WHERE cap.org_id = X AND user_id = Y` queries.
+3. **Phase 3 — Grant join table (storage refactor, scoped).** ✅
+   Shipped 2026-04-25. Added `AGENT_AUTH_AGENT_GRANT(agent_id,
+   capability_name, status, granted_by, reason, constraints_json,
+   created_at, updated_at)` with composite PK + indexes on
+   `(capability_name, status)` and `(agent_id, status)`. The blob
+   nested in `AGENT_AUTH_AGENT.PAYLOAD` remains the source of truth
+   for application reads — the new table is a sync-on-write secondary
+   index that `JpaStorage.putAgent` maintains via delete-and-replace
+   on every save. `deletePendingAgentsOlderThan` cascades the bulk
+   delete to grants. New `findGrantsByAgent` SPI method exposes the
+   table; admin endpoint `GET /agents/{id}/grants` lets ITs verify
+   the sync. Phase 4's eager cascade and future Phase 6 read-path
+   swaps will query this table directly.
 
 4. **Phase 4 — Eager cascade on org-membership change.** KC event
    listener for organization-membership-removed events. Find user's
