@@ -377,15 +377,42 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
 
+      // Prevent duplicate active agents (and load host so the entitlement gate below can read
+      // host.user_id without a second storage lookup)
+      String agentKeyThumb = OctetKeyPair.parse(agentPublicKeyMap).computeThumbprint().toString();
+      String hostId = iss;
+      Map<String, Object> hostData = storage().getHost(hostId);
+
+      // Phase 1 user-entitlement gate at register: caps with org/role gates are only assignable
+      // when the host's owning user satisfies them. Without this, autonomous agents (or any flow
+      // that ends with status=active grants because requires_approval=false) could mint a grant
+      // by naming a cap whose org the owner isn't a member of — bypassing the visibility filter
+      // on /capability/list. For delegated agents on unlinked hosts the existing approval flow
+      // gates by approver entitlement, so the register-time gate is skipped there to preserve
+      // today's behavior. Autonomous agents are always gated (no approval flow to catch later).
+      String hostOwnerForGate = hostData == null ? null : (String) hostData.get("user_id");
+      boolean shouldRunRegisterGate = "autonomous".equals(mode)
+          || (hostOwnerForGate != null && !hostOwnerForGate.isBlank());
+      if (shouldRunRegisterGate) {
+        UserEntitlement hostOwnerEntitlement = loadUserEntitlement(hostOwnerForGate);
+        List<Map<String, Object>> entitledGrants = new ArrayList<>();
+        for (Map<String, Object> grant : grants) {
+          String capName = (String) grant.get("capability");
+          Map<String, Object> registeredCap = storage().getCapability(capName);
+          if (registeredCap != null
+              && !userEntitlementAllows(registeredCap, hostOwnerEntitlement)) {
+            invalidCaps.add(capName);
+            continue;
+          }
+          entitledGrants.add(grant);
+        }
+        grants = entitledGrants;
+      }
+
       if (!invalidCaps.isEmpty()) {
         return Response.status(400).entity(Map.of("error", "invalid_capabilities", "message",
             "Invalid capabilities", "invalid_capabilities", invalidCaps)).build();
       }
-
-      // Prevent duplicate active agents
-      String agentKeyThumb = OctetKeyPair.parse(agentPublicKeyMap).computeThumbprint().toString();
-      String hostId = iss;
-      Map<String, Object> hostData = storage().getHost(hostId);
       if (hostData != null) {
         String hostStatus = (String) hostData.get("status");
         if ("revoked".equals(hostStatus)) {
@@ -2101,6 +2128,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       boolean requiresApproval = false;
       int alreadyActiveCount = 0;
 
+      // Phase 1 entitlement gate at request-capability: block scoped caps the agent's effective
+      // user can't satisfy. Mirrors the gate added at /agent/register; closes the same gap on
+      // post-registration cap requests.
+      String requestCapMode = (String) agentData.get("mode");
+      String requestCapHostOwner = (String) hostData.get("user_id");
+      boolean shouldRunRequestGate = "autonomous".equals(requestCapMode)
+          || (requestCapHostOwner != null && !requestCapHostOwner.isBlank());
+      UserEntitlement requestCapEntitlement = shouldRunRequestGate
+          ? loadUserEntitlement(resolveEffectiveUserId(agentData, hostData))
+          : null;
+
       for (Object capObj : requestedCaps) {
         String capName;
         Map<String, Object> requestedConstraints = null;
@@ -2141,6 +2179,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
         Map<String, Object> registeredCap = storage().getCapability(capName);
         if (registeredCap == null) {
+          invalidCaps.add(capName);
+          continue;
+        }
+
+        if (shouldRunRequestGate
+            && !userEntitlementAllows(registeredCap, requestCapEntitlement)) {
           invalidCaps.add(capName);
           continue;
         }
@@ -2477,6 +2521,20 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.status(403)
             .entity(Map.of("error", "capability_not_granted",
                 "message", "Agent does not hold an active grant for this capability"))
+            .build();
+      }
+
+      // Phase 2 lazy entitlement re-eval at execute (gateway mode). Mirrors the introspect
+      // re-eval in direct mode: a grant that was active at register/approve time may no longer
+      // satisfy the current org/role gate (e.g. role removed without firing the eager
+      // org-leave cascade). Strip stale grants here so gateway-mode flows fail closed.
+      UserEntitlement executeEntitlement = loadUserEntitlement(
+          resolveEffectiveUserId(agentData, hostData));
+      if (!userEntitlementAllows(registeredCap, executeEntitlement)) {
+        return Response.status(403)
+            .entity(Map.of("error", "insufficient_authority",
+                "message",
+                "Agent's owner no longer satisfies the capability's org/role gate"))
             .build();
       }
 
