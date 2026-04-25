@@ -237,7 +237,7 @@ public class JpaStorage implements AgentAuthStorage {
   @Override
   public Map<String, Object> getCapability(String name) {
     CapabilityEntity entity = em().find(CapabilityEntity.class, name);
-    return entity == null ? null : deserialize(entity.getPayload());
+    return entity == null ? null : capabilityToMap(entity);
   }
 
   @Override
@@ -245,14 +245,14 @@ public class JpaStorage implements AgentAuthStorage {
     EntityManager em = em();
     CapabilityEntity existing = em.find(CapabilityEntity.class, name);
     if (existing != null) {
-      return deserialize(existing.getPayload());
+      return capabilityToMap(existing);
     }
     long now = System.currentTimeMillis();
     CapabilityEntity entity = new CapabilityEntity();
     entity.setName(name);
-    entity.setPayload(serialize(capability));
     entity.setCreatedAt(now);
     entity.setUpdatedAt(now);
+    applyCapabilityFields(entity, capability);
     em.persist(entity);
     return null;
   }
@@ -262,17 +262,16 @@ public class JpaStorage implements AgentAuthStorage {
     EntityManager em = em();
     CapabilityEntity entity = em.find(CapabilityEntity.class, name);
     long now = System.currentTimeMillis();
-    String json = serialize(capability);
     if (entity == null) {
       entity = new CapabilityEntity();
       entity.setName(name);
       entity.setCreatedAt(now);
-      entity.setPayload(json);
       entity.setUpdatedAt(now);
+      applyCapabilityFields(entity, capability);
       em.persist(entity);
     } else {
-      entity.setPayload(json);
       entity.setUpdatedAt(now);
+      applyCapabilityFields(entity, capability);
     }
   }
 
@@ -292,9 +291,77 @@ public class JpaStorage implements AgentAuthStorage {
         .getResultList();
     List<Map<String, Object>> out = new ArrayList<>(entities.size());
     for (CapabilityEntity e : entities) {
-      out.add(deserialize(e.getPayload()));
+      out.add(capabilityToMap(e));
     }
     return out;
+  }
+
+  /**
+   * Phase 6a: project a {@link CapabilityEntity} back to the protocol-shaped map. Null columns are
+   * omitted so unset fields don't surface as explicit nulls in JSON responses.
+   */
+  private static Map<String, Object> capabilityToMap(CapabilityEntity entity) {
+    Map<String, Object> map = new java.util.HashMap<>();
+    map.put("name", entity.getName());
+    if (entity.getDescription() != null) {
+      map.put("description", entity.getDescription());
+    }
+    if (entity.getLocation() != null) {
+      map.put("location", entity.getLocation());
+    }
+    if (entity.getVisibility() != null) {
+      map.put("visibility", entity.getVisibility());
+    }
+    if (entity.getRequiresApproval() != null) {
+      map.put("requires_approval", entity.getRequiresApproval());
+    }
+    if (entity.getAutoDeny() != null) {
+      map.put("auto_deny", entity.getAutoDeny());
+    }
+    if (entity.getWriteCapable() != null) {
+      map.put("write_capable", entity.getWriteCapable());
+    }
+    if (entity.getOrganizationId() != null) {
+      map.put("organization_id", entity.getOrganizationId());
+    }
+    if (entity.getRequiredRole() != null) {
+      map.put("required_role", entity.getRequiredRole());
+    }
+    if (entity.getInputSchema() != null) {
+      map.put("input", deserialize(entity.getInputSchema()));
+    }
+    if (entity.getOutputSchema() != null) {
+      map.put("output", deserialize(entity.getOutputSchema()));
+    }
+    return map;
+  }
+
+  /**
+   * Phase 6a: write protocol-shaped map fields onto a {@link CapabilityEntity}. Missing keys leave
+   * the column as-is (null on insert, or the prior value on update). This mirrors the blob-write
+   * semantics where the new map fully replaces the prior payload.
+   */
+  @SuppressWarnings("unchecked")
+  private static void applyCapabilityFields(CapabilityEntity entity, Map<String, Object> map) {
+    entity.setDescription(stringField(map, "description"));
+    entity.setLocation(stringField(map, "location"));
+    entity.setVisibility(stringField(map, "visibility"));
+    entity.setRequiresApproval(booleanField(map, "requires_approval"));
+    entity.setAutoDeny(booleanField(map, "auto_deny"));
+    entity.setWriteCapable(booleanField(map, "write_capable"));
+    entity.setOrganizationId(stringField(map, "organization_id"));
+    entity.setRequiredRole(stringField(map, "required_role"));
+    Object input = map.get("input");
+    entity.setInputSchema(
+        input instanceof Map<?, ?> ? serialize((Map<String, Object>) input) : null);
+    Object output = map.get("output");
+    entity.setOutputSchema(
+        output instanceof Map<?, ?> ? serialize((Map<String, Object>) output) : null);
+  }
+
+  private static Boolean booleanField(Map<String, Object> map, String key) {
+    Object value = map == null ? null : map.get(key);
+    return value instanceof Boolean ? (Boolean) value : null;
   }
 
   // --- Host-key rotation ---

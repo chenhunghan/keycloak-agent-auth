@@ -203,4 +203,57 @@
             <column name="STATUS"/>
         </createIndex>
     </changeSet>
+
+    <!--
+        Phase 6a of the multi-tenant authz plan: promote AGENT_AUTH_CAPABILITY from a JSON-blob
+        PAYLOAD column to typed columns. Pre-production schema, no existing data to migrate —
+        the columns are added and the PAYLOAD column dropped in the same changeset. Phase 1's
+        ORGANIZATION_ID and REQUIRED_ROLE get indexes for cap-list filter and Phase 4 cascade.
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.4.0-capability-typed-columns">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_CAPABILITY" columnName="VISIBILITY"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_CAPABILITY">
+            <column name="DESCRIPTION" type="VARCHAR(1024)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="LOCATION" type="VARCHAR(2048)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="VISIBILITY" type="VARCHAR(32)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="REQUIRES_APPROVAL" type="BOOLEAN">
+                <constraints nullable="true"/>
+            </column>
+            <column name="AUTO_DENY" type="BOOLEAN">
+                <constraints nullable="true"/>
+            </column>
+            <column name="WRITE_CAPABLE" type="BOOLEAN">
+                <constraints nullable="true"/>
+            </column>
+            <column name="ORGANIZATION_ID" type="VARCHAR(36)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="REQUIRED_ROLE" type="VARCHAR(255)">
+                <constraints nullable="true"/>
+            </column>
+            <column name="INPUT_SCHEMA" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="OUTPUT_SCHEMA" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <createIndex indexName="IDX_AGENT_AUTH_CAPABILITY_ORG"
+                     tableName="AGENT_AUTH_CAPABILITY">
+            <column name="ORGANIZATION_ID"/>
+        </createIndex>
+        <createIndex indexName="IDX_AGENT_AUTH_CAPABILITY_ROLE"
+                     tableName="AGENT_AUTH_CAPABILITY">
+            <column name="REQUIRED_ROLE"/>
+        </createIndex>
+        <dropColumn tableName="AGENT_AUTH_CAPABILITY" columnName="PAYLOAD"/>
+    </changeSet>
 </databaseChangeLog>
