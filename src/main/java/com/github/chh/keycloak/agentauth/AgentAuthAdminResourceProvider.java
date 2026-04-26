@@ -947,7 +947,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
 
     RealmModel realm = session.getContext().getRealm();
     AgentAuthStorage storage = storage();
-    List<Map<String, Object>> envs = new java.util.ArrayList<>();
+    List<Map<String, Object>> envs = new ArrayList<>();
     realm.getClientsStream()
         .filter(c -> "true".equals(c.getAttribute(MANAGED_ATTR))
             && orgId.equals(c.getAttribute(MANAGED_ORG_ATTR)))
@@ -1130,7 +1130,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return orgsErr;
     }
     requireOrgAdmin(orgId);
-    List<Map<String, Object>> filtered = new java.util.ArrayList<>();
+    List<Map<String, Object>> filtered = new ArrayList<>();
     for (Map<String, Object> cap : storage().listCapabilities()) {
       if (orgId.equals(cap.get("organization_id"))) {
         filtered.add(cap);
