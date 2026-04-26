@@ -30,35 +30,93 @@ Solid edges always happen; dashed edges are mode-specific (gateway vs direct exe
 
 ### What lives in Keycloak (this extension)
 
-| Concern | Endpoint | Description |
-|---------|----------|-------------|
-| Discovery | `GET /.well-known/agent-configuration` | Protocol discovery (WellKnownProvider SPI) |
-| Health | `GET /agent-auth/health` | Liveness probe; confirms the extension is loaded |
-| Registration | `POST /agent/register` | Register agent under a host |
-| Status | `GET /agent/status` | Check agent status + grants |
-| Grant status | `GET /agent/{agentId}/capabilities/{capabilityName}/status` | Poll a pending grant while it awaits approval |
-| Revocation | `POST /agent/revoke` | Permanently revoke an agent |
-| Reactivation | `POST /agent/reactivate` | Reactivate an expired agent |
-| Introspect | `POST /agent/introspect` | Validate agent JWT (RFC 7662 model) |
-| Key rotation | `POST /agent/rotate-key` | Replace agent's public key |
-| Host revocation | `POST /host/revoke` | Revoke host + cascade to all agents |
-| Host key rotation | `POST /host/rotate-key` | Replace host's public key |
-| Capability request | `POST /agent/request-capability` | Request additional capabilities |
-| Capability listing | `GET /capability/list` | List available capabilities |
-| Capability detail | `GET /capability/describe` | Get full capability schema |
-| Capability execution (gateway) | `POST /capability/execute` | Keycloak introspects the agent JWT, runs constraint checks, and proxies to `<capability.location>` |
-| Device-auth approve | `POST /verify/approve` | Authenticated realm user approves a pending agent via their `user_code` (AAP §7.1). Activates the agent and links the host to the approving user. Layer-2 gate: grants whose cap fails the user's org/role entitlement flip to `denied(insufficient_authority)` while passing grants go `active`. |
-| Device-auth deny | `POST /verify/deny` | Authenticated realm user denies a pending agent; terminal (subsequent approve attempts return 410). |
-| CIBA inbox | `GET /agent-auth/inbox` | Authenticated realm user lists pending approvals routed to them via CIBA (§7.2). Used as the in-realm fallback when SMTP isn't available. |
-| **Admin:** capability CRUD (realm-wide) | `POST / PUT / DELETE /admin/.../agent-auth/capabilities[/{name}]` | Register, update, and delete capabilities. Realm-admin only. |
-| **Admin:** capability CRUD (org-scoped) | `POST / GET / PUT / DELETE /admin/.../agent-auth/organizations/{orgId}/capabilities[/{name}]` | Mintable by `manage-organization`-role holders who are members of the target org. `organization_id` is derived from the path; the body can't override it. Cross-org PUT/DELETE returns 404. |
-| **Admin:** approve grant | `POST /admin/.../agent-auth/agents/{id}/capabilities/{capability}/approve` | Approve a pending capability grant |
-| **Admin:** reject / expire agent | `POST /admin/.../agent-auth/agents/{id}/{reject\|expire}` | Reject a pending agent or force-expire an active one |
-| **Admin:** agent grants | `GET /admin/.../agent-auth/agents/{id}/grants` | Returns the rows from the `AGENT_AUTH_AGENT_GRANT` secondary index — useful for verifying the index stays in sync with the per-agent grant list. |
-| **Admin:** pre-register host | `POST /admin/.../agent-auth/hosts` | Pre-create a host record with an inline Ed25519 JWK (spec §2.8 "Pre-registration" flow). Optional `client_id` field resolves the confidential client's service-account user and stores it as the host's `user_id`, so autonomous workloads can skip the post-claim approval flow. |
-| **Admin:** fetch host | `GET /admin/.../agent-auth/hosts/{id}` | Fetch a host record by thumbprint |
-| **Admin:** link host to user | `POST /admin/.../agent-auth/hosts/{id}/link` | Bind a host to a Keycloak user (§2.9). Cascades: autonomous agents → `claimed` with grants revoked (§2.10); delegated agents inherit `user_id` (§3.2) |
-| **Admin:** unlink host | `DELETE /admin/.../agent-auth/hosts/{id}/link` | Remove the host→user binding. Revokes all delegated agents under the host (§2.9); autonomous agents stay `claimed` (terminal) |
+Endpoints are grouped by who calls them. Two SPI roots host all paths; each subsection states its base.
+
+- **Realm-scoped:** `/realms/{realm}/agent-auth/` — protocol traffic from clients, agents, end users, and resource servers.
+- **Admin-scoped:** `/admin/realms/{realm}/agent-auth/` — administrative endpoints requiring `manage-realm` (realm admin) or `manage-organization` (org admin).
+- **Discovery** uses Keycloak's standard well-known mechanism, not the agent-auth path: `GET /realms/{realm}/.well-known/agent-configuration`.
+
+#### Liveness (anyone)
+
+Base: `/realms/{realm}/agent-auth/`
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `health` | Liveness probe; confirms the extension is loaded |
+
+#### Client / SDK (host or agent JWT)
+
+Base: `/realms/{realm}/agent-auth/`. Host-scoped calls carry a `host+jwt`; agent-scoped calls carry an `agent+jwt`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `agent/register` | Register agent under a host |
+| GET  | `agent/status` | Check agent status + grants |
+| GET  | `agent/{agentId}/capabilities/{capabilityName}/status` | Poll a pending grant while it awaits approval |
+| POST | `agent/revoke` | Permanently revoke an agent |
+| POST | `agent/reactivate` | Reactivate an expired agent |
+| POST | `agent/rotate-key` | Replace agent's public key (signed with the old key) |
+| POST | `agent/request-capability` | Request additional capabilities |
+| POST | `host/revoke` | Revoke host + cascade to all agents |
+| POST | `host/rotate-key` | Replace host's public key (signed with the old key) |
+| GET  | `capability/list` | List available capabilities |
+| GET  | `capability/describe` | Get full capability schema |
+| POST | `capability/execute` | Gateway execution: KC introspects the agent JWT, runs constraint checks, and proxies to `<capability.location>` |
+
+#### Resource server
+
+Base: `/realms/{realm}/agent-auth/`
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `agent/introspect` | Validate an agent JWT (RFC 7662 model). Optional `{capability, arguments}` runs constraint checks server-side. |
+
+#### End user (browser approval flow)
+
+Base: `/realms/{realm}/agent-auth/`. All endpoints require an authenticated realm user (KC identity cookie or `Authorization: Bearer <user-access-token>`).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET  | `verify` | Browser-facing HTML approval page (the URL published as `verification_uri`). Bounces through realm login when no fresh identity cookie, then renders an approval form bound to the supplied `user_code`. |
+| POST | `verify` | Form-encoded companion to the page: `user_code + decision + access_token` → HTML success/failure page. CSRF double-submit. |
+| POST | `verify/approve` | JSON approve (AAP §7.1). Activates the agent and links the host to the approving user. Layer-2 gate flips entitlement-failing grants to `denied(insufficient_authority)`. |
+| POST | `verify/deny` | JSON deny. Terminal — subsequent approve attempts return 410. |
+| GET  | `inbox` | Pending approvals routed to the user via CIBA push (§7.2). In-realm fallback when SMTP isn't configured. |
+
+#### Realm admin (`manage-realm`)
+
+Base: `/admin/realms/{realm}/agent-auth/`
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST   | `capabilities` | Register a realm-wide capability |
+| PUT    | `capabilities/{name}` | Update a realm-wide capability |
+| DELETE | `capabilities/{name}` | Delete a realm-wide capability |
+| POST   | `hosts` | Pre-register a host with an inline Ed25519 JWK (§2.8). Optional `client_id` resolves an SA user as the host owner so autonomous workloads skip the post-claim approval flow. |
+| GET    | `hosts/{id}` | Fetch a host record by thumbprint |
+| POST   | `hosts/{id}/link` | Bind host → user (§2.9). Cascades: autonomous agents → `claimed` with grants revoked (§2.10); delegated agents inherit `user_id` (§3.2). |
+| DELETE | `hosts/{id}/link` | Remove the host→user binding. Revokes delegated agents; autonomous agents stay `claimed` (terminal). |
+| GET    | `agents/{id}` | Fetch an agent record by id |
+| GET    | `agents/{id}/grants` | Rows from the `AGENT_AUTH_AGENT_GRANT` secondary index — verifies the index stays in sync with the per-agent grant blob |
+| POST   | `agents/{id}/capabilities/{capability}/approve` | Approve a pending capability grant |
+| POST   | `agents/{id}/expire` | Force-expire an active agent |
+| POST   | `agents/{id}/reject` | Reject a pending agent (terminal) |
+| POST   | `pending-agents/cleanup` | Manual GC sweep for stale pending agents (also runs hourly per JVM). Optional `?olderThanSeconds=` overrides the default threshold. |
+
+#### Org admin (`manage-organization` + member of the target org)
+
+Base: `/admin/realms/{realm}/agent-auth/`. `organization_id` is derived from the path; the body can't override it. Cross-org PUT/DELETE returns 404.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST   | `organizations/{orgId}/capabilities` | Register an org-scoped capability |
+| GET    | `organizations/{orgId}/capabilities` | List org-scoped capabilities |
+| PUT    | `organizations/{orgId}/capabilities/{name}` | Update an org-scoped capability |
+| DELETE | `organizations/{orgId}/capabilities/{name}` | Delete an org-scoped capability |
+| POST   | `organizations/{orgId}/hosts` | Pre-register a host. Org-admin counterpart to `POST /hosts` — resolves `client_id` against an SA user already in the org so SA-as-host inherits org-membership cascades. |
+| POST   | `organizations/{orgId}/agent-environments` | Self-serve provisioning: creates a locked-down confidential client (no redirect URIs, only `client_credentials`), adds its SA user to the org, and pre-registers the host. Returns `client_secret` once. Cap: 50 managed clients per org. |
+| GET    | `organizations/{orgId}/agent-environments` | List managed agent-environment clients |
+| DELETE | `organizations/{orgId}/agent-environments/{clientId}` | Delete a managed agent-environment client + its host record |
 
 ### What lives in the resource server
 
