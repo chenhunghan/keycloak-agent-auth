@@ -58,11 +58,40 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
   private static OctetKeyPair initialAgentKey;
   private static OctetKeyPair rotatedAgentKey;
   private static String agentId;
+  private static String lifecycleCap;
+
+  /**
+   * §4.3 resolved location URL of {@link #lifecycleCap} — the agent+jwt's {@code aud} claim MUST be
+   * set to this URL for execution-token introspection to succeed.
+   */
+  private static String lifecycleCapLocation() {
+    return "https://resource.example.test/lifecycle/" + lifecycleCap;
+  }
 
   @BeforeAll
   static void generateKeys() {
     currentHostKey = TestKeys.generateEd25519();
     initialAgentKey = TestKeys.generateEd25519();
+    lifecycleCap = "lifecycle_cap_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Lifecycle test capability (auto-approved)",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "https://resource.example.test/lifecycle/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, lifecycleCap, lifecycleCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
   }
 
   /**
@@ -86,15 +115,15 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
         .contentType(ContentType.JSON)
-        .body("""
+        .body(String.format("""
             {
               "name": "Lifecycle Test Agent",
               "host_name": "lifecycle-host",
-              "capabilities": [],
+              "capabilities": ["%s"],
               "mode": "delegated",
               "reason": "Lifecycle integration tests"
             }
-            """)
+            """, lifecycleCap))
         .when()
         .post("/agent/register")
         .then()
@@ -309,7 +338,8 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
   @Test
   @Order(8)
   void oldAgentKeyStopsWorkingImmediatelyAfterRotation() {
-    String oldAgentJwt = TestJwts.agentJwt(currentHostKey, initialAgentKey, agentId, issuerUrl());
+    String oldAgentJwt = TestJwts.agentJwt(currentHostKey, initialAgentKey, agentId,
+        lifecycleCapLocation());
 
     given()
         .baseUri(issuerUrl())
@@ -340,7 +370,8 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
   @Test
   @Order(9)
   void newAgentKeyWorksImmediatelyAfterRotation() {
-    String newAgentJwt = TestJwts.agentJwt(currentHostKey, rotatedAgentKey, agentId, issuerUrl());
+    String newAgentJwt = TestJwts.agentJwt(currentHostKey, rotatedAgentKey, agentId,
+        lifecycleCapLocation());
 
     given()
         .baseUri(issuerUrl())
@@ -1146,15 +1177,15 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
         .contentType(ContentType.JSON)
-        .body("""
+        .body(String.format("""
             {
               "name": "Reactivated Introspect Agent",
               "host_name": "expire-host",
-              "capabilities": [],
+              "capabilities": ["%s"],
               "mode": "delegated",
               "reason": "Reactivate then introspect test"
             }
-            """)
+            """, lifecycleCap))
         .when()
         .post("/agent/register")
         .then()
@@ -1179,7 +1210,8 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .then()
         .statusCode(200);
 
-    String agentJwt = TestJwts.agentJwt(expHostKey, expAgentKey, expiredAgentId, issuerUrl());
+    String agentJwt = TestJwts.agentJwt(expHostKey, expAgentKey, expiredAgentId,
+        lifecycleCapLocation());
     given()
         .baseUri(issuerUrl())
         .contentType(ContentType.JSON)
@@ -2447,15 +2479,15 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
         .contentType(ContentType.JSON)
-        .body("""
+        .body(String.format("""
             {
               "name": "Timestamp Agent",
               "host_name": "ts-host",
-              "capabilities": [],
+              "capabilities": ["%s"],
               "mode": "delegated",
               "reason": "Lifetime timestamp test"
             }
-            """)
+            """, lifecycleCap))
         .when()
         .post("/agent/register")
         .then()
@@ -2464,7 +2496,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .path("agent_id");
 
     // Perform an introspect call so the server records a last_used_at timestamp
-    String agentJwt = TestJwts.agentJwt(tsHostKey, tsAgentKey, tsAgentId, issuerUrl());
+    String agentJwt = TestJwts.agentJwt(tsHostKey, tsAgentKey, tsAgentId, lifecycleCapLocation());
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + TestJwts.hostJwt(tsHostKey, issuerUrl()))

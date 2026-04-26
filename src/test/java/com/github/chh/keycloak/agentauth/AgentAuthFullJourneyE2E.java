@@ -259,7 +259,10 @@ class AgentAuthFullJourneyE2E extends BasePostgresE2E {
 
   private static Response introspect(
       OctetKeyPair hostKey, OctetKeyPair agentKey, String agentId) {
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    // §4.3: agent+jwt aud MUST be the resolved location URL. Caps in this E2E declare
+    // location = http://127.0.0.1:<backendPort>/execute, so that's what introspect tokens carry.
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        "http://127.0.0.1:" + backendPort + "/execute");
     return given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))

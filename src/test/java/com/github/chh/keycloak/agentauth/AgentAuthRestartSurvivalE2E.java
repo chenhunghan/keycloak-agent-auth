@@ -198,7 +198,9 @@ class AgentAuthRestartSurvivalE2E {
 
   private static io.restassured.response.ValidatableResponse introspect(KeycloakContainer kc,
       OctetKeyPair hostKey, OctetKeyPair agentKey, String agentId) {
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl(kc));
+    // §4.3: agent+jwt aud MUST be the resolved location URL — the cap registered above declares
+    // location = http://127.0.0.1:1/execute (no real backend; introspect doesn't proxy).
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, "http://127.0.0.1:1/execute");
     return given()
         .baseUri(issuerUrl(kc))
         .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl(kc)))

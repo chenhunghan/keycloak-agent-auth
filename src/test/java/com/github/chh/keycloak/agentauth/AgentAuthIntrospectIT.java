@@ -71,6 +71,15 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
   private static String agentId;
   private static String grantedCapability;
 
+  /**
+   * §4.3 resolved location URL for capabilities registered via {@link #registerCapability(String)}
+   * — the agent+jwt's {@code aud} claim MUST be set to this URL (not the issuer URL) for
+   * execution-token introspection to succeed.
+   */
+  private static String capLocation(String name) {
+    return "https://resource.example.test/capabilities/" + name;
+  }
+
   @BeforeAll
   static void registerAgent() {
     hostKey = TestKeys.generateEd25519();
@@ -155,7 +164,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
    */
   @Test
   void introspectValidAgentJwtReturnsActive() {
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, capLocation(grantedCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -193,7 +202,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
    */
   @Test
   void introspectReturnsCompactCapabilityGrantsOnly() {
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, capLocation(grantedCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -232,7 +241,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         hostKey,
         agentKey,
         agentId,
-        issuerUrl(),
+        capLocation(grantedCapability),
         Map.of("capabilities", List.of(grantedCapability)));
 
     given()
@@ -314,12 +323,13 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
   }
 
   /**
-   * The server MUST verify that the agent JWT {@code aud} claim matches its own issuer URL; a JWT
-   * whose audience was set to a different URL MUST be rejected and return {@code {"active":
-   * false}}, preventing cross-server token reuse.
+   * Per §4.3 the agent+jwt's {@code aud} MUST be the resolved location URL — the capability's
+   * {@code location} if set, else the server's {@code default_location}. A JWT whose audience is
+   * any other URL (here a third-party host that isn't a registered cap location) MUST be rejected
+   * and return {@code {"active": false}}, preventing cross-server token reuse.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt">§4.3 Agent
-   *      JWT — {@code aud} MUST be the server's issuer URL</a>
+   *      JWT — {@code aud} MUST be the resolved location URL</a>
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#45-verification">§4.5
    *      Verification — step 3: audience verification</a>
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect">§5.12
@@ -338,6 +348,120 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
               "token": "%s"
             }
             """, wrongAudJwt))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(false));
+  }
+
+  /**
+   * Per §4.3 the agent+jwt's {@code aud} for a capability that does not declare its own
+   * {@code location} MUST be the server's {@code default_location} (advertised in §5.1 discovery).
+   * A JWT minted with {@code aud = default_location} for an agent whose grant points at a
+   * location-less cap MUST introspect as active. This pins the §5.11 gateway-as-default fallback
+   * path.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt">§4.3 Agent
+   *      JWT — {@code aud} fallback to {@code default_location}</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#511-execute-capability">§5.11
+   *      Execute — server's execute endpoint as default location</a>
+   */
+  @Test
+  void introspectAgentJwtWithDefaultLocationAudReturnsActive() {
+    String locationlessCap = "locationless_introspect_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Location-less cap (falls back to default_location)",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, locationlessCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    OctetKeyPair llHostKey = TestKeys.generateEd25519();
+    OctetKeyPair llAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(llHostKey, llAgentKey, issuerUrl());
+    String llAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Locationless Cap Agent",
+              "host_name": "locationless-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "default_location aud test"
+            }
+            """, locationlessCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    String defaultLocation = issuerUrl() + "/capability/execute";
+    String agentJwt = TestJwts.agentJwt(llHostKey, llAgentKey, llAgentId, defaultLocation);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(llHostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s"
+            }
+            """, agentJwt))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true))
+        .body("agent_capability_grants", hasSize(1))
+        .body("agent_capability_grants[0].capability", equalTo(locationlessCap));
+  }
+
+  /**
+   * Per §4.3 the agent+jwt's {@code aud} MUST address the resolved location URL of a capability the
+   * agent actually holds an active grant for. A token minted with {@code aud} pointing at the
+   * location of a capability the agent was never granted MUST introspect as inactive — even if that
+   * location is otherwise a valid registered cap on the server. This prevents an agent from passing
+   * off tokens that target capabilities outside its grant set.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt">§4.3 Agent
+   *      JWT — {@code aud} MUST match a granted cap's resolved location</a>
+   */
+  @Test
+  void introspectAgentJwtWithUngrantedCapLocationAudReturnsInactive() {
+    String otherCap = "other_cap_aud_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    registerCapability(otherCap);
+
+    String wrongCapAudJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, capLocation(otherCap));
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s"
+            }
+            """, wrongCapAudJwt))
         .when()
         .post("/agent/introspect")
         .then()
@@ -456,7 +580,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
   @Test
   void introspectReplayedAgentJwtReturnsInactive() {
     // Serialize once — both calls use the IDENTICAL string (same jti)
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, capLocation(grantedCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -680,7 +804,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .path("agent_id");
 
     String constrainedAgentJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId,
-        issuerUrl());
+        capLocation(constrainedCap));
 
     given()
         .baseUri(issuerUrl())
@@ -701,7 +825,8 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .body("agent_capability_grants[0].input", nullValue())
         .body("agent_capability_grants[0].output", nullValue());
 
-    String validArgsJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId, issuerUrl());
+    String validArgsJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId,
+        capLocation(constrainedCap));
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
@@ -724,7 +849,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .body("violations", hasSize(0));
 
     String violatingArgsJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId,
-        issuerUrl());
+        capLocation(constrainedCap));
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
@@ -821,7 +946,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         hostKey,
         agentKey,
         agentId,
-        issuerUrl(),
+        capLocation(grantedCapability),
         Map.of("capabilities", List.of(grantedCapability, ungrantedCap)));
 
     given()
@@ -1032,19 +1157,26 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     String regJwt = TestJwts.hostJwtForRegistration(revokedHostKey, revokedHostAgentKey,
         issuerUrl());
 
+    // Grant the agent a capability so the §4.3 aud check has something to match against —
+    // otherwise an aud-less agent would short-circuit to inactive before the host-status check
+    // we're trying to exercise.
+    String revokedHostCap = "revoked_host_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    registerCapability(revokedHostCap);
+
     String revokedHostAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
         .contentType(ContentType.JSON)
-        .body("""
+        .body(String.format("""
             {
               "name": "Revoked Host Agent",
               "host_name": "revoked-host",
-              "capabilities": [],
+              "capabilities": ["%s"],
               "mode": "delegated",
               "reason": "Revoked host introspect test"
             }
-            """)
+            """, revokedHostCap))
         .when()
         .post("/agent/register")
         .then()
@@ -1063,7 +1195,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .statusCode(200);
 
     String agentJwt = TestJwts.agentJwt(revokedHostKey, revokedHostAgentKey, revokedHostAgentId,
-        issuerUrl());
+        capLocation(revokedHostCap));
 
     given()
         .baseUri(issuerUrl())
@@ -1082,22 +1214,25 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
   }
 
   /**
-   * TODO: A JWT that carries a {@code capabilities} claim containing an empty list MUST result in
-   * an active response with an empty {@code capabilities} array, since the empty intersection of
-   * the granted set with an empty request set is well-defined per §4.3.
+   * A JWT that carries a {@code capabilities} claim containing an empty list authorizes zero
+   * capabilities and therefore has no resolved location URL it could legitimately address per §4.3
+   * — the server MUST treat such a token as inactive. The §4.3 aud rule "MUST be the resolved
+   * location URL — the capability's location if set, or the server's default_location" has no
+   * satisfiable value when the JWT explicitly authorizes no capabilities, so the server has nothing
+   * to introspect against and returns {@code {"active": false}}.
    *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt">§4.3 Agent
-   *      JWT — optional {@code capabilities} claim scoping</a>
+   *      JWT — {@code capabilities} claim scoping; aud MUST be a resolved location URL</a>
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect">§5.12
-   *      Introspect — capability intersection with empty claim</a>
+   *      Introspect — inactive when no granted cap matches the token</a>
    */
   @Test
-  void introspectJwtWithEmptyCapabilitiesClaimReturnsEmptyGrants() {
+  void introspectJwtWithEmptyCapabilitiesClaimReturnsInactive() {
     String agentJwt = TestJwts.agentJwt(
         hostKey,
         agentKey,
         agentId,
-        issuerUrl(),
+        capLocation(grantedCapability),
         Map.of("capabilities", List.of()));
 
     given()
@@ -1113,8 +1248,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .post("/agent/introspect")
         .then()
         .statusCode(200)
-        .body("active", equalTo(true))
-        .body("agent_capability_grants", hasSize(0));
+        .body("active", equalTo(false));
   }
 
   /**
@@ -1191,7 +1325,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .extract()
         .path("agent_id");
 
-    String minAgentJwt = TestJwts.agentJwt(hostKey, minAgentKey, minAgentId, issuerUrl());
+    String minAgentJwt = TestJwts.agentJwt(hostKey, minAgentKey, minAgentId, capLocation(minCap));
 
     given()
         .baseUri(issuerUrl())
@@ -1284,7 +1418,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
       JWTClaimsSet claims = new JWTClaimsSet.Builder()
           // no .issuer() — iss intentionally absent
           .subject(agentId)
-          .audience(issuerUrl())
+          .audience(capLocation(grantedCapability))
           .issueTime(new Date(now))
           .expirationTime(new Date(now + 60_000L))
           .jwtID("a-" + UUID.randomUUID())

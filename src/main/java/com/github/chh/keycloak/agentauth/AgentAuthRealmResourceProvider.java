@@ -602,12 +602,54 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-
+      // §4.3: an agent+jwt's `aud` MUST be the resolved location URL — `capability.location` if
+      // set, else `default_location` (which our discovery advertises as
+      // `<issuer>/capability/execute`). Agent+jwts only authorize execution, so introspectable
+      // tokens are always execution tokens. Accept the token if its `aud` matches the resolved
+      // location URL of any capability the agent currently holds an active grant for, optionally
+      // narrowed by the JWT's `capabilities` claim. This binds aud-acceptance to the agent's
+      // actual surface — a token minted with aud=X for a cap the agent doesn't hold isn't valid
+      // at the resource server anyway, so admitting it here would only mislead the caller.
+      String defaultLocation = issuerUrl() + "/capability/execute";
       List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
+      if (aud == null || aud.isEmpty()) {
+        return Response.ok(Map.of("active", false)).build();
+      }
+      List<Map<String, Object>> grantsForAud = (List<Map<String, Object>>) agentData
+          .get("agent_capability_grants");
+      List<String> jwtCapClaim = null;
+      Object rawJwtCaps = jwt.getJWTClaimsSet().getClaim("capabilities");
+      if (rawJwtCaps instanceof List<?> raw) {
+        jwtCapClaim = new ArrayList<>();
+        for (Object item : raw) {
+          if (item instanceof String s) {
+            jwtCapClaim.add(s);
+          }
+        }
+      }
+      boolean audMatchesAGrant = false;
+      if (grantsForAud != null) {
+        for (Map<String, Object> grant : grantsForAud) {
+          if (!"active".equals(grant.get("status"))) {
+            continue;
+          }
+          String grantCapName = (String) grant.get("capability");
+          if (jwtCapClaim != null && !jwtCapClaim.contains(grantCapName)) {
+            continue;
+          }
+          Map<String, Object> capForAud = storage().getCapability(grantCapName);
+          if (capForAud == null) {
+            continue;
+          }
+          String capLoc = (String) capForAud.get("location");
+          String resolved = (capLoc != null && !capLoc.isBlank()) ? capLoc : defaultLocation;
+          if (aud.contains(resolved)) {
+            audMatchesAGrant = true;
+            break;
+          }
+        }
+      }
+      if (!audMatchesAGrant) {
         return Response.ok(Map.of("active", false)).build();
       }
 

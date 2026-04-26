@@ -161,9 +161,13 @@ class AgentAuthMultiTenantApprovalIT extends BaseKeycloakIT {
         .then()
         .statusCode(200);
 
+    // §4.3: agent+jwt aud MUST be the resolved location URL. The cap registered above declares
+    // location = https://resource.example.test/<name>.
+    String mutableCapLocation = "https://resource.example.test/" + mutableCap;
+
     // First introspect: grant is visible (gate passes — cap has no org/role).
     Response introBefore = introspect(
-        TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl()));
+        TestJwts.agentJwt(hostKey, agentKey, agentId, mutableCapLocation));
     introBefore.then().statusCode(200).body("active", org.hamcrest.Matchers.equalTo(true));
     List<Map<String, Object>> grantsBefore = introBefore.jsonPath()
         .getList("agent_capability_grants");
@@ -173,10 +177,11 @@ class AgentAuthMultiTenantApprovalIT extends BaseKeycloakIT {
     // Mutate the cap: add organization_id=globexOrgId. Alice is in Acme, not Globex.
     updateCapability(mutableCap, "authenticated", true, globexOrgId, null);
 
-    // Second introspect: grant filtered, agent is still active but the offending cap is gone.
+    // Second introspect: aud check happens before the entitlement re-eval, so the token's aud
+    // still matches the cap's location and we reach the grant-filter step that strips the cap.
     // Generate a fresh JWT — the previous one's jti is consumed by the replay guard.
     Response introAfter = introspect(
-        TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl()));
+        TestJwts.agentJwt(hostKey, agentKey, agentId, mutableCapLocation));
     introAfter.then().statusCode(200).body("active", org.hamcrest.Matchers.equalTo(true));
     List<Map<String, Object>> grantsAfter = introAfter.jsonPath()
         .getList("agent_capability_grants");

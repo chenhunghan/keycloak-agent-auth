@@ -1578,14 +1578,14 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
           .baseUri(issuerUrl())
           .header("Authorization", "Bearer " + hostJwt)
           .contentType(ContentType.JSON)
-          .body("""
+          .body(String.format("""
               {
                 "name": "Agent JWKS Introspect",
                 "host_name": "jwks-host",
-                "capabilities": [],
+                "capabilities": ["%s"],
                 "mode": "delegated"
               }
-              """)
+              """, activeCapability))
           .when()
           .post("/agent/register")
           .then()
@@ -1593,8 +1593,10 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
           .extract()
           .path("agent_id");
 
+      // §4.3: aud MUST be the resolved location URL — the cap registered above declares
+      // location = https://resource.example.test/capabilities/<activeCapability>.
       String agentJwt = TestJwts.agentJwtWithKid(jwksHostKey, jwksAgentKey, jwksAgentId,
-          issuerUrl(), kid);
+          "https://resource.example.test/capabilities/" + activeCapability, kid);
 
       given()
           .baseUri(issuerUrl())
