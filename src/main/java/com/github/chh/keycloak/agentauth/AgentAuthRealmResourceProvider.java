@@ -299,6 +299,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       List<Map<String, Object>> grants = new ArrayList<>();
       boolean requiresApproval = false;
 
+      // §5.3 / §3.1: per-host TOFU defaults. A delegated agent that requests a capability already
+      // in this host's `default_capabilities` auto-grants without re-prompting the user (§5.3:
+      // "if the capabilities fall within its defaults, auto-approve"). Loaded before the cap
+      // loop so the per-grant status decision can consult it.
+      String hostId = iss;
+      Map<String, Object> hostData = storage().getHost(hostId);
+      List<String> hostDefaults = hostDefaultCapabilities(hostData);
+
       for (Object capObj : capabilities) {
         String capName;
         Map<String, Object> requestedConstraints = null;
@@ -348,8 +356,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
           boolean capReqApproval = Boolean.TRUE.equals(registeredCap.get("requires_approval"));
           boolean autoDeny = Boolean.TRUE.equals(registeredCap.get("auto_deny"));
+          // §5.3: TOFU auto-grant — a cap that's already in the host's defaults auto-approves
+          // even if the cap registry says requires_approval=true, because the linked user has
+          // approved it for this host before.
+          boolean inHostDefaults = hostDefaults.contains(capName);
+          boolean needsApproval = capReqApproval && !inHostDefaults;
           // Only mark as requiring approval if not auto-denied.
-          if (capReqApproval && !autoDeny)
+          if (needsApproval && !autoDeny)
             requiresApproval = true;
 
           Map<String, Object> grant = new HashMap<>();
@@ -357,7 +370,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           if (autoDeny) {
             grant.put("status", "denied");
             grant.put("reason", "Capability has auto_deny enabled");
-          } else if (capReqApproval) {
+          } else if (needsApproval) {
             grant.put("status", "pending");
           } else {
             grant.put("status", "active");
@@ -377,11 +390,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
 
-      // Prevent duplicate active agents (and load host so the entitlement gate below can read
-      // host.user_id without a second storage lookup)
+      // Prevent duplicate active agents — host data was loaded above before the cap loop so the
+      // §5.3 host-defaults auto-grant decision and the entitlement gate below can both read it.
       String agentKeyThumb = OctetKeyPair.parse(agentPublicKeyMap).computeThumbprint().toString();
-      String hostId = iss;
-      Map<String, Object> hostData = storage().getHost(hostId);
 
       // Phase 1 user-entitlement gate at register: caps with org/role gates are only assignable
       // when the host's owning user satisfies them. Without this, autonomous agents (or any flow
@@ -3147,6 +3158,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     String agentId = (String) agentData.get("agent_id");
     String hostId = (String) agentData.get("host_id");
     String nowTs = nowTimestamp();
+    // §3.1 TOFU collector — caps that flip pending → active here are the ones the linked user is
+    // approving on this host for the first time. Names are appended to the host's
+    // default_capabilities below so subsequent registrations auto-grant per §5.3
+    // ("if the capabilities fall within its defaults, auto-approve").
+    List<String> tofuAdds = new ArrayList<>();
 
     List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
         .get("agent_capability_grants");
@@ -3234,6 +3250,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
                 grant.put("output", registeredCap.get("output"));
               }
               grant.put("granted_by", userId);
+              tofuAdds.add(capName);
             } else {
               grant.put("status", "denied");
               grant.put("reason", "user_denied");
@@ -3268,14 +3285,34 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     agentData.remove("approval");
     storage.putAgent(agentId, agentData);
 
-    if (approve && !isCapabilityRequestApproval) {
-      // §2.9: linking happens on user approval of a delegated registration on an unlinked host.
-      // Capability-request approvals do not re-link — the host is already linked.
+    if (approve) {
+      // Two host-side updates can land here on approval, both keyed off the linked user:
+      // §2.9 linking — the first delegated approval on an unlinked host binds the host to the
+      // approving user. Capability-request approvals never re-link (host is already linked).
+      // §3.1 TOFU defaults — every cap the user just approved on this host gets appended to
+      // `default_capabilities` so future registrations auto-grant per §5.3.
+      // Both flows write the host record once.
       Map<String, Object> hostData = storage.getHost(hostId);
-      if (hostData != null && hostData.get("user_id") == null) {
-        hostData.put("user_id", userId);
-        hostData.put("updated_at", nowTs);
-        storage.putHost(hostId, hostData);
+      if (hostData != null) {
+        boolean dirty = false;
+        if (!isCapabilityRequestApproval && hostData.get("user_id") == null) {
+          hostData.put("user_id", userId);
+          dirty = true;
+        }
+        if (!tofuAdds.isEmpty()) {
+          List<String> existing = hostDefaultCapabilities(hostData);
+          for (String capName : tofuAdds) {
+            if (!existing.contains(capName)) {
+              existing.add(capName);
+              dirty = true;
+            }
+          }
+          hostData.put("default_capabilities", existing);
+        }
+        if (dirty) {
+          hostData.put("updated_at", nowTs);
+          storage.putHost(hostId, hostData);
+        }
       }
     }
 
@@ -3649,6 +3686,28 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     return "not_granted";
   }
 
+  /**
+   * §3.1 host.default_capabilities accessor. Returns a mutable snapshot list of cap names (always
+   * non-null; empty when the host has no defaults yet or {@code hostData} is null).
+   */
+  @SuppressWarnings("unchecked")
+  private static List<String> hostDefaultCapabilities(Map<String, Object> hostData) {
+    if (hostData == null) {
+      return new ArrayList<>();
+    }
+    Object raw = hostData.get("default_capabilities");
+    if (!(raw instanceof List<?>)) {
+      return new ArrayList<>();
+    }
+    List<String> out = new ArrayList<>();
+    for (Object item : (List<?>) raw) {
+      if (item instanceof String s && !s.isBlank()) {
+        out.add(s);
+      }
+    }
+    return out;
+  }
+
   private static List<Map<String, Object>> copyGrantDefaults(List<Map<String, Object>> grants) {
     List<Map<String, Object>> defaults = new ArrayList<>();
     for (Map<String, Object> grant : grants) {
@@ -3667,6 +3726,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     if (!(rawDefaults instanceof List<?>)) {
       return List.of();
     }
+    List<String> hostDefaults = hostDefaultCapabilities(hostData);
 
     List<Map<String, Object>> grants = new ArrayList<>();
     for (Object rawDefault : (List<?>) rawDefaults) {
@@ -3685,9 +3745,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         continue;
       }
 
+      // §5.6: "Determine the host's current default capabilities and grant them to the agent,
+      // following the same auto-approval logic as registration." Apply the same TOFU rule as
+      // registerAgent: cap auto-grants if !requires_approval OR it's in the host's
+      // default_capabilities (the per-host TOFU set populated by prior approvals).
+      boolean inHostDefaults = hostDefaults.contains(capName);
+      boolean needsApproval = Boolean.TRUE.equals(registeredCap.get("requires_approval"))
+          && !inHostDefaults;
       Map<String, Object> grant = new HashMap<>();
       grant.put("capability", capName);
-      if (Boolean.TRUE.equals(registeredCap.get("requires_approval"))) {
+      if (needsApproval) {
         grant.put("status", "pending");
         grant.put("status_url", buildGrantStatusUrl(agentId, capName));
       } else {

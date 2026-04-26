@@ -359,4 +359,22 @@
         </addColumn>
         <dropColumn tableName="AGENT_AUTH_AGENT" columnName="PAYLOAD"/>
     </changeSet>
+
+    <!--
+        AAP §3.1 host.default_capabilities: list of capability names auto-granted to delegated
+        agents under this host (TOFU — populated as user/admin approvals land). Stored as
+        serialized JSON string[]. Distinct from DEFAULT_CAPABILITY_GRANTS, which is a
+        constraint-preserving snapshot of the most recent registration's grant set used by the
+        reactivation flow.
+    -->
+    <changeSet author="agent-auth" id="agent-auth-1.5.0-host-default-capabilities">
+        <preConditions onFail="MARK_RAN">
+            <not><columnExists tableName="AGENT_AUTH_HOST" columnName="DEFAULT_CAPABILITIES"/></not>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_HOST">
+            <column name="DEFAULT_CAPABILITIES" type="TEXT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+    </changeSet>
 </databaseChangeLog>

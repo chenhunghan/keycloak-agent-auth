@@ -13,6 +13,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -274,6 +275,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(404).entity(Map.of("error", "grant_not_found")).build();
     }
 
+    boolean wasPending = "pending".equals(targetGrant.get("status"));
     targetGrant.put("status", "active");
     targetGrant.put("description", registeredCap.get("description"));
     if (registeredCap.containsKey("input")) {
@@ -299,9 +301,44 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
     agentData.put("updated_at", Instant.now().toString());
     storage.putAgent(id, agentData);
+
+    // §3.1 TOFU: admin approval is one of the auto-approval pathways. Append the cap to the
+    // host's `default_capabilities` so subsequent registrations under this host auto-grant per
+    // §5.3 ("if the capabilities fall within its defaults, auto-approve") without re-prompting.
+    if (wasPending) {
+      String hostId = (String) agentData.get("host_id");
+      if (hostId != null) {
+        Map<String, Object> hostData = storage.getHost(hostId);
+        if (hostData != null) {
+          List<String> existing = readHostDefaultCapabilities(hostData);
+          if (!existing.contains(capability)) {
+            existing.add(capability);
+            hostData.put("default_capabilities", existing);
+            hostData.put("updated_at", Instant.now().toString());
+            storage.putHost(hostId, hostData);
+          }
+        }
+      }
+    }
+
     emitAdminEvent("agent-auth/agent/" + id + "/capability/" + capability + "/approve",
         OperationType.ACTION, targetGrant);
     return Response.ok(targetGrant).build();
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<String> readHostDefaultCapabilities(Map<String, Object> hostData) {
+    Object raw = hostData.get("default_capabilities");
+    if (!(raw instanceof List<?>)) {
+      return new ArrayList<>();
+    }
+    List<String> out = new ArrayList<>();
+    for (Object item : (List<?>) raw) {
+      if (item instanceof String s && !s.isBlank()) {
+        out.add(s);
+      }
+    }
+    return out;
   }
 
   @POST

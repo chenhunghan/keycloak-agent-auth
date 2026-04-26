@@ -308,21 +308,35 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
   }
 
   @Test
-  void reactivateApproval_flipsExpiredAgentBackToActive() {
-    // §5.6 + §7: reactivate of an expired agent triggers approval again when reactivated grants
-    // require it. After the first approval the host is linked to the approver, so the
-    // reactivation approval follows the CIBA path (§7.3 — prefer CIBA when user is known);
-    // the user approves via agent_id rather than user_code.
-    String approvalCap = registerApprovalRequiredCapability("devauth_react_" + suffix());
+  void reactivateApproval_capInDefaultsAutoGrants_capNotInDefaultsRePrompts() {
+    // §5.6: "Determine the host's current default capabilities and grant them to the agent,
+    // following the same auto-approval logic as registration." Combined with §5.3
+    // ("if the capabilities fall within its defaults, auto-approve"), reactivation should:
+    // • auto-grant caps already in host.default_capabilities (TOFU — user approved before),
+    // • re-prompt approval for caps that haven't been approved on this host yet.
+    String approvedCap = registerApprovalRequiredCapability("devauth_react_known_" + suffix());
+    String unapprovedCap = registerApprovalRequiredCapability("devauth_react_new_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
 
-    // Register as delegated + capability requires approval → pending + device_authorization.
-    Response regResp = registerDelegatedAgent(hostKey, agentKey, approvalCap);
+    // Register requesting BOTH caps; only approve the first → only it lands in host defaults.
+    Response regResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "react agent",
+              "capabilities": ["%s", "%s"],
+              "mode": "delegated"
+            }
+            """, approvedCap, unapprovedCap))
+        .when()
+        .post("/agent/register");
     String agentId = regResp.jsonPath().getString("agent_id");
     String firstUserCode = regResp.jsonPath().getString("approval.user_code");
 
-    // First approval to get to active. This links the host to the approver.
     String username = "reactivate-approver-" + suffix();
     createTestUser(username);
     String userAccessToken = realmUserAccessToken(username);
@@ -330,13 +344,14 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + userAccessToken)
         .contentType(ContentType.JSON)
-        .body(Map.of("user_code", firstUserCode))
+        .body(Map.of("user_code", firstUserCode,
+            "capabilities", java.util.List.of(approvedCap)))
         .when()
         .post("/verify/approve")
         .then()
         .statusCode(200);
 
-    // Admin forces expiration of the agent.
+    // Force-expire so reactivate has work to do.
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -346,35 +361,38 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .then()
         .statusCode(200);
 
-    // Agent requests reactivation — default_capability_grants replay forces approval again.
-    // Host is now linked → CIBA approval.
-    String hostJwtForReact = TestJwts.hostJwt(hostKey, issuerUrl());
+    // Reactivate. host.default_capabilities = [approvedCap], so reactivation auto-grants that
+    // one. unapprovedCap is replayed by buildReactivationGrants from default_capability_grants
+    // (the constraint-preserving snapshot from first register) but is NOT in host defaults, so
+    // it gets re-prompted as pending. Agent itself stays pending until the new approval lands.
     Response reactResp = given()
         .baseUri(issuerUrl())
-        .header("Authorization", "Bearer " + hostJwtForReact)
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
         .contentType(ContentType.JSON)
         .body(Map.of("agent_id", agentId))
         .when()
         .post("/agent/reactivate");
     reactResp.then()
         .statusCode(200)
-        .body("status", org.hamcrest.Matchers.equalTo("pending"))
-        .body("approval.method", org.hamcrest.Matchers.equalTo("ciba"))
-        .body("approval.user_code", org.hamcrest.Matchers.nullValue())
-        .body("approval.verification_uri", org.hamcrest.Matchers.nullValue());
-
-    // Approve the reactivation via CIBA agent_id path.
-    given()
-        .baseUri(issuerUrl())
-        .header("Authorization", "Bearer " + realmUserAccessToken(username))
-        .contentType(ContentType.JSON)
-        .body(Map.of("agent_id", agentId))
-        .when()
-        .post("/verify/approve")
-        .then()
-        .statusCode(200);
-
-    assertThat(agentStatusBody(agentId, hostKey).get("status")).isEqualTo("active");
+        .body("status", org.hamcrest.Matchers.equalTo("pending"));
+    @SuppressWarnings("unchecked")
+    java.util.List<Map<String, Object>> grants = reactResp.jsonPath()
+        .getList("agent_capability_grants",
+            (Class<Map<String, Object>>) (Class<?>) Map.class);
+    Map<String, Object> approvedGrant = grants.stream()
+        .filter(g -> approvedCap.equals(g.get("capability")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("approvedCap missing from reactivation grants"));
+    assertThat(approvedGrant.get("status"))
+        .as("cap in host.default_capabilities reactivates to active without re-prompt")
+        .isEqualTo("active");
+    Map<String, Object> unapprovedGrant = grants.stream()
+        .filter(g -> unapprovedCap.equals(g.get("capability")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("unapprovedCap missing from reactivation grants"));
+    assertThat(unapprovedGrant.get("status"))
+        .as("cap NOT in host.default_capabilities reactivates as pending (re-prompts)")
+        .isEqualTo("pending");
   }
 
   @Test

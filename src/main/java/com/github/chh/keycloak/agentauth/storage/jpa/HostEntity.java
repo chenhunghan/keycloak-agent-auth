@@ -60,6 +60,15 @@ public class HostEntity {
   @Column(name = "DEFAULT_CAPABILITY_GRANTS", columnDefinition = "TEXT")
   private String defaultCapabilityGrants;
 
+  /**
+   * §3.1 {@code default_capabilities}: cap names auto-granted to delegated agents under this host
+   * (TOFU — populated as user/admin approvals land). Stored as serialized JSON {@code string[]}.
+   * Distinct from {@link #defaultCapabilityGrants}, which is a constraint-preserving snapshot of
+   * the most recent registration's grant set used by the reactivation flow.
+   */
+  @Column(name = "DEFAULT_CAPABILITIES", columnDefinition = "TEXT")
+  private String defaultCapabilities;
+
   @Column(name = "LAST_USED_AT", length = 64)
   private String lastUsedAt;
 
@@ -157,6 +166,14 @@ public class HostEntity {
 
   public void setDefaultCapabilityGrants(String defaultCapabilityGrants) {
     this.defaultCapabilityGrants = defaultCapabilityGrants;
+  }
+
+  public String getDefaultCapabilities() {
+    return defaultCapabilities;
+  }
+
+  public void setDefaultCapabilities(String defaultCapabilities) {
+    this.defaultCapabilities = defaultCapabilities;
   }
 
   public String getLastUsedAt() {

@@ -256,6 +256,10 @@ public class JpaStorage implements AgentAuthStorage {
       map.put("default_capability_grants",
           deserializeList(entity.getDefaultCapabilityGrants()));
     }
+    if (entity.getDefaultCapabilities() != null) {
+      map.put("default_capabilities",
+          deserializeList(entity.getDefaultCapabilities()));
+    }
     if (entity.getLastUsedAt() != null) {
       map.put("last_used_at", entity.getLastUsedAt());
     }
@@ -286,6 +290,9 @@ public class JpaStorage implements AgentAuthStorage {
     Object defaults = host.get("default_capability_grants");
     entity.setDefaultCapabilityGrants(
         defaults instanceof List<?> ? serializeAny(defaults) : null);
+    Object defaultCaps = host.get("default_capabilities");
+    entity.setDefaultCapabilities(
+        defaultCaps instanceof List<?> ? serializeAny(defaultCaps) : null);
     entity.setLastUsedAt(stringField(host, "last_used_at"));
   }
 
