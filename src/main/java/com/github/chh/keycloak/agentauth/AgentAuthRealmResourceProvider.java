@@ -303,9 +303,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       // in this host's `default_capabilities` auto-grants without re-prompting the user (§5.3:
       // "if the capabilities fall within its defaults, auto-approve"). Loaded before the cap
       // loop so the per-grant status decision can consult it.
+      // §2.11: "any agent registered under a `pending` host MUST remain `pending` until the
+      // host is approved." Compute the host's effective state (loaded record's status, or
+      // `pending` for the new-host case which is created below) so the cap loop can force
+      // every grant pending alongside the agent itself.
       String hostId = iss;
       Map<String, Object> hostData = storage().getHost(hostId);
       List<String> hostDefaults = hostDefaultCapabilities(hostData);
+      boolean hostPending = hostData == null || "pending".equals(hostData.get("status"));
 
       for (Object capObj : capabilities) {
         String capName;
@@ -359,8 +364,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           // §5.3: TOFU auto-grant — a cap that's already in the host's defaults auto-approves
           // even if the cap registry says requires_approval=true, because the linked user has
           // approved it for this host before.
+          // §2.11: pending host forces every grant pending too — needsApproval kept true so the
+          // approval flow runs and this agent's grants land alongside the host activation.
           boolean inHostDefaults = hostDefaults.contains(capName);
-          boolean needsApproval = capReqApproval && !inHostDefaults;
+          boolean needsApproval = hostPending || (capReqApproval && !inHostDefaults);
           // Only mark as requiring approval if not auto-denied.
           if (needsApproval && !autoDeny)
             requiresApproval = true;
@@ -465,8 +472,26 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
 
+      // §2.8: a host first seen via dynamic registration is created in `pending` state.
+      // Autonomous agents can't be bootstrapped under a pending host because there's no
+      // user-approval flow for them — reject early so admins are forced down the spec's
+      // pre-registration path (§2.8 path #2).
+      if (hostData == null && "autonomous".equals(mode)) {
+        return Response.status(400)
+            .entity(Map.of("error", "host_pre_registration_required",
+                "message",
+                "Autonomous agents require a pre-registered host (§2.8); dynamic registration"
+                    + " on an unknown host produces a `pending` host state and §2.11 forbids"
+                    + " the autonomous agent from activating without an approval flow."))
+            .build();
+      }
+
       String agentId = UUID.randomUUID().toString();
-      String status = ("delegated".equals(mode) && requiresApproval) ? "pending" : "active";
+      // §2.11 MUST: pending host → pending agent. Otherwise the existing approval-routing rule
+      // applies: delegated + needsApproval → pending; everything else → active.
+      String status = (hostPending || ("delegated".equals(mode) && requiresApproval))
+          ? "pending"
+          : "active";
       String nowTs = nowTimestamp();
 
       Map<String, Object> agentData = new HashMap<>();
@@ -509,7 +534,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           hostData.put("host_jwks_url", hostJwksUrl);
           hostData.put("host_kid", jwt.getHeader().getKeyID());
         }
-        hostData.put("status", "active");
+        // §2.8: dynamic registration creates the host in `pending` state pending user approval.
+        // The first /verify/approve (or admin approve) flips it to `active` alongside the
+        // host→user link. Pre-registration via the admin API is the alternate path that creates
+        // hosts directly active.
+        hostData.put("status", "pending");
         hostData.put("created_at", nowTs);
         hostData.put("default_capability_grants", copyGrantDefaults(grants));
       }
@@ -3286,15 +3315,23 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     storage.putAgent(agentId, agentData);
 
     if (approve) {
-      // Two host-side updates can land here on approval, both keyed off the linked user:
+      // Three host-side updates can land here on approval, all keyed off the linked user:
+      // §2.8 / §2.11 host activation — a pending host transitions to `active` once the user
+      // approves an agent under it. Capability-request approvals run only on hosts that are
+      // already active (the agent itself was active), so the flip is a no-op there.
       // §2.9 linking — the first delegated approval on an unlinked host binds the host to the
       // approving user. Capability-request approvals never re-link (host is already linked).
       // §3.1 TOFU defaults — every cap the user just approved on this host gets appended to
       // `default_capabilities` so future registrations auto-grant per §5.3.
-      // Both flows write the host record once.
+      // All three flows write the host record once.
       Map<String, Object> hostData = storage.getHost(hostId);
       if (hostData != null) {
         boolean dirty = false;
+        if ("pending".equals(hostData.get("status"))) {
+          hostData.put("status", "active");
+          hostData.put("activated_at", nowTs);
+          dirty = true;
+        }
         if (!isCapabilityRequestApproval && hostData.get("user_id") == null) {
           hostData.put("user_id", userId);
           dirty = true;

@@ -195,6 +195,7 @@ class AgentAuthFullJourneyE2E extends BasePostgresE2E {
   private static String registerAgent(
       OctetKeyPair hostKey, OctetKeyPair agentKey, String capability, String mode) {
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
     return given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)

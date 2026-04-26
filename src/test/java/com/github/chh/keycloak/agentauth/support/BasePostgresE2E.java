@@ -2,8 +2,11 @@ package com.github.chh.keycloak.agentauth.support;
 
 import static io.restassured.RestAssured.given;
 
+import com.nimbusds.jose.jwk.OctetKeyPair;
 import dasniko.testcontainers.keycloak.KeycloakContainer;
 import io.restassured.http.ContentType;
+import java.util.HashMap;
+import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.testcontainers.containers.Network;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -52,6 +55,27 @@ public abstract class BasePostgresE2E {
         .statusCode(200)
         .extract()
         .path("access_token");
+  }
+
+  /**
+   * Pre-registers a host via the admin API (§2.8 path #2) so the host comes up {@code active}
+   * immediately, bypassing the dynamic-register {@code pending} state introduced for §2.11.
+   * Idempotent: returns silently if the host already exists (HTTP 409).
+   */
+  protected static void preRegisterHost(OctetKeyPair hostKey) {
+    ensureStarted();
+    Map<String, Object> jwk = new HashMap<>(hostKey.toPublicJWK().toJSONObject());
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of("host_public_key", jwk))
+        .when()
+        .post("/hosts")
+        .then()
+        .statusCode(org.hamcrest.Matchers.anyOf(
+            org.hamcrest.Matchers.equalTo(201),
+            org.hamcrest.Matchers.equalTo(409)));
   }
 
   private static synchronized void ensureStarted() {

@@ -68,6 +68,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
     registerCapability(constrainedCapability, "Transfer funds");
 
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
 
     agentId = given()
         .baseUri(issuerUrl())
@@ -471,6 +472,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
     OctetKeyPair freshAgentKey = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(freshHostKey, freshAgentKey, issuerUrl());
+    preRegisterHost(freshHostKey);
     String revokedAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -567,6 +569,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(201);
 
     String regJwt = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
+    preRegisterHost(pendingHostKey);
     String pendingAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)

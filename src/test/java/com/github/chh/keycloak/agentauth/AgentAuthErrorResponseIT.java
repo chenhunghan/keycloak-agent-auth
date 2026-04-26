@@ -204,6 +204,7 @@ class AgentAuthErrorResponseIT extends BaseKeycloakIT {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
 
     String agentId = given()
         .baseUri(realmUrl())

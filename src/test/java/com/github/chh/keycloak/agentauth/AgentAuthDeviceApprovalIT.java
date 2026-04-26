@@ -239,6 +239,7 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
     String approvalCap = registerApprovalRequiredCapability("devauth_capreq_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
+    preRegisterHost(hostKey);
 
     // Register the agent with only the auto-approved capability → status=active straight away.
     String agentId = given()
@@ -508,6 +509,7 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
     String approvB = registerApprovalRequiredCapability("devauth_capreq_partial_b_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
+    preRegisterHost(hostKey);
 
     String agentId = given()
         .baseUri(issuerUrl())

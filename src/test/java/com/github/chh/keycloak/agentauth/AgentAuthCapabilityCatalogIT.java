@@ -70,6 +70,7 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
     hostKey = TestKeys.generateEd25519();
     agentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
 
     agentId = given()
         .baseUri(issuerUrl())
@@ -658,6 +659,7 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
     OctetKeyPair freshHostKey = TestKeys.generateEd25519();
     OctetKeyPair freshAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(freshHostKey, freshAgentKey, issuerUrl());
+    preRegisterHost(freshHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)

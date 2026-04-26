@@ -113,6 +113,13 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     registerCapability(activeCapability, "Check account balance", false);
     registerCapability(constrainedCapability, "Transfer funds", false);
     registerCapability(pendingCapability, "Transfer funds with approval", true);
+
+    // Pre-register the shared hostKey so the §2.11 host-pending bootstrap doesn't block tests
+    // that exercise the post-link, active-host registration paths. Tests that explicitly cover
+    // the pending bootstrap or use distinct host keys keep their own preRegisterHost calls.
+    preRegisterHost(hostKey);
+    preRegisterHost(agentJwksHostKey);
+    preRegisterHost(hostJwksHostKey);
   }
 
   @AfterAll
@@ -195,6 +202,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
   void registerDelegatedAgentReturnsActiveAgentRecord() {
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -230,6 +238,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair noCapsAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, noCapsAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -268,6 +277,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair autonomousAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, autonomousAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -307,6 +317,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair capAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, capAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -349,6 +360,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair constrainedAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, constrainedAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -460,6 +472,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     String hostJwt1 = TestJwts.hostJwtForRegistration(hostKey, duplicateAgentKey, issuerUrl());
     String hostJwt2 = TestJwts.hostJwtForRegistration(hostKey, duplicateAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt1)
@@ -793,6 +806,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair mixedAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, mixedAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     List<Map<String, String>> grants = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -1410,6 +1424,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair rejectedAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, rejectedAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     String rejectedAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -1503,6 +1518,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair autonomousAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, autonomousAgentKey, issuerUrl());
 
+    preRegisterHost(hostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -1539,6 +1555,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     String hostJwt = TestJwts.hostJwtForRegistrationWithAgentJwksUrl(
         agentJwksHostKey, agentJwksUrl, agentJwksKid, issuerUrl());
 
+    preRegisterHost(agentJwksHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -1574,6 +1591,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
       String hostJwt = TestJwts.hostJwtForRegistrationWithAgentJwksUrl(
           jwksHostKey, jwksUrl, kid, issuerUrl());
 
+      preRegisterHost(jwksHostKey);
       String jwksAgentId = given()
           .baseUri(issuerUrl())
           .header("Authorization", "Bearer " + hostJwt)
@@ -1708,6 +1726,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     String hostJwt = TestJwts.hostJwtForRegistrationWithHostJwksUrl(
         hostJwksHostKey, hostJwksAgentKey, hostJwksUrl, hostJwksKid, issuerUrl());
 
+    preRegisterHost(hostJwksHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -1827,6 +1846,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair deniedAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(deniedHostKey, deniedAgentKey, issuerUrl());
 
+    preRegisterHost(deniedHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)

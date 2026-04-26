@@ -294,6 +294,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         "http://127.0.0.1:" + port + "/execute/stream-long");
 
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
     agentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -789,6 +790,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
     OctetKeyPair agentKey2 = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(hostKey2, agentKey2, issuerUrl());
+    preRegisterHost(hostKey2);
     String revokedAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1225,6 +1227,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
     OctetKeyPair agentKey2 = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(hostKey2, agentKey2, issuerUrl());
+    preRegisterHost(hostKey2);
     String expiredAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1316,6 +1319,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .statusCode(201);
 
     String regJwt = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
+    preRegisterHost(pendingHostKey);
     String pendingAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1842,6 +1846,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
     OctetKeyPair streamHostKey = TestKeys.generateEd25519();
     OctetKeyPair streamAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(streamHostKey, streamAgentKey, issuerUrl());
+    preRegisterHost(streamHostKey);
     String streamAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1947,6 +1952,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
     // The server validates operators at registration time and MUST reject this with 400.
     String regJwt = TestJwts.hostJwtForRegistration(unknownOpHostKey, unknownOpAgentKey,
         issuerUrl());
+    preRegisterHost(unknownOpHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)

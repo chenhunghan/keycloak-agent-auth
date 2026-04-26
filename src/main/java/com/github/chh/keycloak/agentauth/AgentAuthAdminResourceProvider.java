@@ -302,18 +302,27 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     agentData.put("updated_at", Instant.now().toString());
     storage.putAgent(id, agentData);
 
-    // §3.1 TOFU: admin approval is one of the auto-approval pathways. Append the cap to the
-    // host's `default_capabilities` so subsequent registrations under this host auto-grant per
-    // §5.3 ("if the capabilities fall within its defaults, auto-approve") without re-prompting.
+    // §2.8 / §2.11 host activation + §3.1 TOFU. Admin grant approval is one of the
+    // auto-approval pathways: it carries the same human-in-the-loop semantics as
+    // /verify/approve and so should activate a pending host and append the cap to defaults.
     if (wasPending) {
       String hostId = (String) agentData.get("host_id");
       if (hostId != null) {
         Map<String, Object> hostData = storage.getHost(hostId);
         if (hostData != null) {
+          boolean dirty = false;
+          if ("pending".equals(hostData.get("status"))) {
+            hostData.put("status", "active");
+            hostData.put("activated_at", Instant.now().toString());
+            dirty = true;
+          }
           List<String> existing = readHostDefaultCapabilities(hostData);
           if (!existing.contains(capability)) {
             existing.add(capability);
             hostData.put("default_capabilities", existing);
+            dirty = true;
+          }
+          if (dirty) {
             hostData.put("updated_at", Instant.now().toString());
             storage.putHost(hostId, hostData);
           }

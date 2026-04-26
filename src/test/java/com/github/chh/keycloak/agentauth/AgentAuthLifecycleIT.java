@@ -110,6 +110,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
   @Order(1)
   void registerAgentForLifecycleTests() {
     String hostJwt = TestJwts.hostJwtForRegistration(currentHostKey, initialAgentKey, issuerUrl());
+    preRegisterHost(currentHostKey);
 
     agentId = given()
         .baseUri(issuerUrl())
@@ -760,6 +761,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair cascadeAgentKey2 = TestKeys.generateEd25519();
 
     String regJwt1 = TestJwts.hostJwtForRegistration(cascadeHostKey, cascadeAgentKey1, issuerUrl());
+    preRegisterHost(cascadeHostKey);
     String firstAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt1)
@@ -781,6 +783,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .path("agent_id");
 
     String regJwt2 = TestJwts.hostJwtForRegistration(cascadeHostKey, cascadeAgentKey2, issuerUrl());
+    preRegisterHost(cascadeHostKey);
     String secondAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt2)
@@ -890,6 +893,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair revokeAgentKey = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(revokeHostKey, revokeAgentKey, issuerUrl());
+    preRegisterHost(revokeHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -994,6 +998,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .statusCode(201);
 
     String regJwt = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
+    preRegisterHost(pendingHostKey);
     String pendingAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1053,6 +1058,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair expHostKey = TestKeys.generateEd25519();
     OctetKeyPair expAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(expHostKey, expAgentKey, issuerUrl());
+    preRegisterHost(expHostKey);
 
     String expiredAgentId = given()
         .baseUri(issuerUrl())
@@ -1110,6 +1116,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair expHostKey = TestKeys.generateEd25519();
     OctetKeyPair expAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(expHostKey, expAgentKey, issuerUrl());
+    preRegisterHost(expHostKey);
 
     String expiredAgentId = given()
         .baseUri(issuerUrl())
@@ -1173,6 +1180,10 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair expAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(expHostKey, expAgentKey, issuerUrl());
 
+    // Dynamic register populates host.default_capability_grants from the agent's caps; under
+    // §2.11 the host comes up `pending`, so the per-grant + agent statuses are pending too.
+    // Admin grant-approve flips the host to active, appends the cap to host.default_capabilities,
+    // and activates the agent — the post-link state reactivation needs to rebuild grants from.
     String expiredAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1192,6 +1203,14 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .statusCode(200)
         .extract()
         .path("agent_id");
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .post("/agents/" + expiredAgentId + "/capabilities/" + lifecycleCap + "/approve")
+        .then()
+        .statusCode(200);
 
     forceExpireAgent(expiredAgentId);
 
@@ -1246,6 +1265,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair expHostKey = TestKeys.generateEd25519();
     OctetKeyPair expAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(expHostKey, expAgentKey, issuerUrl());
+    preRegisterHost(expHostKey);
 
     String expiredAgentId = given()
         .baseUri(issuerUrl())
@@ -1309,6 +1329,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair agentKeyA = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(hostKeyA, agentKeyA, issuerUrl());
+    preRegisterHost(hostKeyA);
     String targetAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1363,6 +1384,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair revokeHostKey = TestKeys.generateEd25519();
     OctetKeyPair revokeAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(revokeHostKey, revokeAgentKey, issuerUrl());
+    preRegisterHost(revokeHostKey);
 
     String doubleRevokeAgentId = given()
         .baseUri(issuerUrl())
@@ -1540,6 +1562,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair agentKeyA = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(hostKeyA, agentKeyA, issuerUrl());
+    preRegisterHost(hostKeyA);
     String rotateTargetAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1635,6 +1658,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair revokedAgentKey = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(revokedHostKey, revokedAgentKey, issuerUrl());
+    preRegisterHost(revokedHostKey);
     String revokedAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1711,6 +1735,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair expiredAgentKey = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(expiredHostKey, expiredAgentKey, issuerUrl());
+    preRegisterHost(expiredHostKey);
     String expiredAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1842,6 +1867,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair revokedAgentKey = TestKeys.generateEd25519();
 
     String regJwt = TestJwts.hostJwtForRegistration(revokedHostKey, revokedAgentKey, issuerUrl());
+    preRegisterHost(revokedHostKey);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -1994,6 +2020,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .statusCode(201);
 
     String regJwt = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
+    preRegisterHost(pendingHostKey);
     String pendingAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -2090,6 +2117,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair absHostKey = TestKeys.generateEd25519();
     OctetKeyPair absAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(absHostKey, absAgentKey, issuerUrl());
+    preRegisterHost(absHostKey);
 
     String absAgentId = given()
         .baseUri(issuerUrl())
@@ -2183,7 +2211,10 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair decayAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(decayHostKey, decayAgentKey, issuerUrl());
 
-    // Register agent WITHOUT the extra capability — so after reactivation, only host defaults apply
+    // Dynamic register populates host.default_capability_grants from the agent's caps; under
+    // §2.11 the host comes up `pending`. Admin grant-approve flips the host to active and
+    // appends decayCap to host.default_capabilities, the post-link state reactivation rebuilds
+    // grants from.
     String decayAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -2203,6 +2234,14 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .statusCode(200)
         .extract()
         .path("agent_id");
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .post("/agents/" + decayAgentId + "/capabilities/" + decayCap + "/approve")
+        .then()
+        .statusCode(200);
 
     // Record the initial set of granted capability names
     String hostJwt0 = TestJwts.hostJwt(decayHostKey, issuerUrl());
@@ -2279,6 +2318,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair ttlHostKey = TestKeys.generateEd25519();
     OctetKeyPair ttlAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(ttlHostKey, ttlAgentKey, issuerUrl());
+    preRegisterHost(ttlHostKey);
 
     String ttlAgentId = given()
         .baseUri(issuerUrl())
@@ -2407,6 +2447,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair rejectedAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(rejectedHostKey, rejectedAgentKey,
         issuerUrl());
+    preRegisterHost(rejectedHostKey);
 
     String rejectedAgentId = given()
         .baseUri(issuerUrl())
@@ -2474,6 +2515,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair tsHostKey = TestKeys.generateEd25519();
     OctetKeyPair tsAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(tsHostKey, tsAgentKey, issuerUrl());
+    preRegisterHost(tsHostKey);
 
     String tsAgentId = given()
         .baseUri(issuerUrl())
@@ -2591,6 +2633,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair schemaHostKey = TestKeys.generateEd25519();
     OctetKeyPair schemaAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(schemaHostKey, schemaAgentKey, issuerUrl());
+    preRegisterHost(schemaHostKey);
 
     String schemaAgentId = given()
         .baseUri(issuerUrl())
@@ -2676,6 +2719,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair uaHostKey = TestKeys.generateEd25519();
     OctetKeyPair uaAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(uaHostKey, uaAgentKey, issuerUrl());
+    preRegisterHost(uaHostKey);
 
     String uaAgentId = given()
         .baseUri(issuerUrl())
@@ -2738,6 +2782,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     OctetKeyPair uaHostKey = TestKeys.generateEd25519();
     OctetKeyPair uaAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(uaHostKey, uaAgentKey, issuerUrl());
+    preRegisterHost(uaHostKey);
 
     given()
         .baseUri(issuerUrl())
@@ -2823,7 +2868,12 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
     String regJwt = TestJwts.hostJwtForRegistration(pendingReactHostKey, pendingReactAgentKey,
         issuerUrl());
 
-    // Register an agent requesting the approval-required capability
+    // Dynamic-register the agent against a fresh (unknown) host so the host is created with
+    // host.default_capability_grants populated from the request — that's the rich list
+    // buildReactivationGrants iterates on §5.6. We pair the approval-required cap with the
+    // auto-grant lifecycleCap so admin grant-approve on lifecycleCap activates the host
+    // (§2.11) and links it without sweeping approvalCap into host.default_capabilities. On
+    // reactivate, approvalCap stays !inHostDefaults → pending, exercising the path under test.
     String pendingReactAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -2832,17 +2882,25 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
             {
               "name": "Reactivate Pending Agent",
               "host_name": "reactivate-pending-host",
-              "capabilities": ["%s"],
+              "capabilities": ["%s", "%s"],
               "mode": "delegated",
               "reason": "Reactivation pending approval test"
             }
-            """, approvalCap))
+            """, lifecycleCap, approvalCap))
         .when()
         .post("/agent/register")
         .then()
         .statusCode(200)
         .extract()
         .path("agent_id");
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .post("/agents/" + pendingReactAgentId + "/capabilities/" + lifecycleCap + "/approve")
+        .then()
+        .statusCode(200);
 
     // Expire the agent
     forceExpireAgent(pendingReactAgentId);

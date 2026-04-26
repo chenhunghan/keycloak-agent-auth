@@ -70,6 +70,7 @@ class AgentAuthPendingCleanupIT extends BaseKeycloakIT {
     String cap = registerAutoCap("cleanup_skip_active_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
+    preRegisterHost(hostKey);
     Response regResp = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer "
@@ -165,6 +166,7 @@ class AgentAuthPendingCleanupIT extends BaseKeycloakIT {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     String jwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
     return given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + jwt)

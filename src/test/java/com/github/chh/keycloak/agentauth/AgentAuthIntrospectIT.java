@@ -90,6 +90,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     registerCapability(grantedCapability);
 
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
 
     agentId = given()
         .baseUri(issuerUrl())
@@ -394,6 +395,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     OctetKeyPair llHostKey = TestKeys.generateEd25519();
     OctetKeyPair llAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(llHostKey, llAgentKey, issuerUrl());
+    preRegisterHost(llHostKey);
     String llAgentId = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -485,6 +487,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
   void introspectTokenForRevokedAgentReturnsInactive() {
     OctetKeyPair revokeAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(hostKey, revokeAgentKey, issuerUrl());
+    preRegisterHost(hostKey);
 
     String revokedAgentId = given()
         .baseUri(issuerUrl())
@@ -687,6 +690,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     OctetKeyPair pendingHostKey = TestKeys.generateEd25519();
     OctetKeyPair pendingAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
+    preRegisterHost(pendingHostKey);
 
     String pendingAgentId = given()
         .baseUri(issuerUrl())
@@ -775,6 +779,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     // Register a new agent requesting that capability with constraints
     OctetKeyPair agentKey2 = TestKeys.generateEd25519();
     String regJwt2 = TestJwts.hostJwtForRegistration(hostKey, agentKey2, issuerUrl());
+    preRegisterHost(hostKey);
 
     String constrainedAgentId = given()
         .baseUri(issuerUrl())
@@ -1156,6 +1161,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     OctetKeyPair revokedHostAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(revokedHostKey, revokedHostAgentKey,
         issuerUrl());
+    preRegisterHost(revokedHostKey);
 
     // Grant the agent a capability so the §4.3 aud check has something to match against —
     // otherwise an aud-less agent would short-circuit to inactive before the host-status check
@@ -1297,6 +1303,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
     // Register a new agent with a min constraint on the amount field
     OctetKeyPair minAgentKey = TestKeys.generateEd25519();
     String minRegJwt = TestJwts.hostJwtForRegistration(hostKey, minAgentKey, issuerUrl());
+    preRegisterHost(hostKey);
 
     String minAgentId = given()
         .baseUri(issuerUrl())

@@ -261,6 +261,7 @@ class AgentAuthHostLinkIT extends BaseKeycloakIT {
   private static String registerAgent(OctetKeyPair hostKey, OctetKeyPair agentKey,
       String capability, String mode) {
     String jwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    preRegisterHost(hostKey);
     return given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + jwt)
