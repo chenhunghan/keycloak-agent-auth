@@ -62,4 +62,58 @@ class CibaEmailNotifierTest {
         "https://example.test/verify?agent_id=A", null);
     assertThat(html).contains("href=\"https://example.test/verify?agent_id=A\"");
   }
+
+  /**
+   * §7.2 throttle: rapid retries on the same (realm × user × agent) key collapse to a single send,
+   * preserving the linked user's inbox as a useful approval channel rather than a spam vector. Uses
+   * an injected clock so the test runs synchronously without sleeps.
+   */
+  @Test
+  void shouldSendCollapsesRapidRetriesPerKey() {
+    CibaEmailNotifier.resetThrottleForTesting();
+    long t0 = 1_000_000L;
+    java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(t0);
+
+    // First call goes through.
+    assertThat(CibaEmailNotifier.shouldSend("realm:user:agent", 30_000L, clock::get)).isTrue();
+
+    // Same key, same instant — throttled.
+    assertThat(CibaEmailNotifier.shouldSend("realm:user:agent", 30_000L, clock::get)).isFalse();
+
+    // Same key, just inside the window — still throttled.
+    clock.set(t0 + 29_999L);
+    assertThat(CibaEmailNotifier.shouldSend("realm:user:agent", 30_000L, clock::get)).isFalse();
+
+    // Same key, past the window — fresh send allowed.
+    clock.set(t0 + 30_000L);
+    assertThat(CibaEmailNotifier.shouldSend("realm:user:agent", 30_000L, clock::get)).isTrue();
+  }
+
+  /** Different keys are independent — one user's flood doesn't lock out another's first send. */
+  @Test
+  void shouldSendIsolatesKeys() {
+    CibaEmailNotifier.resetThrottleForTesting();
+    java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0L);
+    assertThat(CibaEmailNotifier.shouldSend("realm:alice:agent1", 30_000L, clock::get)).isTrue();
+    // Alice's second send within window: throttled.
+    assertThat(CibaEmailNotifier.shouldSend("realm:alice:agent1", 30_000L, clock::get)).isFalse();
+    // Bob's first send (different user): allowed.
+    assertThat(CibaEmailNotifier.shouldSend("realm:bob:agent1", 30_000L, clock::get)).isTrue();
+    // Alice's other agent: also allowed (per-(user,agent) granularity).
+    assertThat(CibaEmailNotifier.shouldSend("realm:alice:agent2", 30_000L, clock::get)).isTrue();
+  }
+
+  /**
+   * Defensive: a non-positive or null configuration short-circuits to "allow" rather than throwing
+   * — operators that mis-set the realm attribute don't take down approvals, they just lose
+   * throttling.
+   */
+  @Test
+  void shouldSendDegradesOpenForInvalidConfig() {
+    CibaEmailNotifier.resetThrottleForTesting();
+    java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0L);
+    assertThat(CibaEmailNotifier.shouldSend(null, 30_000L, clock::get)).isTrue();
+    assertThat(CibaEmailNotifier.shouldSend("k", 0L, clock::get)).isTrue();
+    assertThat(CibaEmailNotifier.shouldSend("k", -1L, clock::get)).isTrue();
+  }
 }

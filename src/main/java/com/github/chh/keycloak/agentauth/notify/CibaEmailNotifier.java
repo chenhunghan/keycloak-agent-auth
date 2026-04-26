@@ -1,6 +1,8 @@
 package com.github.chh.keycloak.agentauth.notify;
 
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.keycloak.email.EmailException;
@@ -28,10 +30,54 @@ public final class CibaEmailNotifier {
 
   private static final Logger LOG = Logger.getLogger(CibaEmailNotifier.class.getName());
 
+  /**
+   * §7.2 throttle: protects the linked user's inbox from rapid retries (workload bug or compromised
+   * client looping on /agent/request-capability). Per-(realm × user × agent) key. Skipping is
+   * silent — the inbox endpoint stays the always-on fallback so dropping an email doesn't strand a
+   * real approval.
+   */
+  static final long DEFAULT_THROTTLE_SECONDS = 30L;
+  private static final Map<String, Long> LAST_SENT_MS = new ConcurrentHashMap<>();
+
   private final KeycloakSession session;
 
   public CibaEmailNotifier(KeycloakSession session) {
     this.session = session;
+  }
+
+  /**
+   * Decides whether a CIBA email for {@code throttleKey} should be sent now. Returns {@code true}
+   * exactly once per throttle window per key; subsequent calls within the window return
+   * {@code false}. Atomic via {@link ConcurrentHashMap#compute}, so concurrent triggers can't both
+   * win.
+   *
+   * <p>
+   * The {@code clock} parameter is injectable for unit tests; production callers go through
+   * {@link #shouldSend(String, long)} which uses the system clock.
+   */
+  static boolean shouldSend(String throttleKey, long throttleMs, LongSupplier clock) {
+    if (throttleKey == null || throttleMs <= 0L) {
+      return true;
+    }
+    long now = clock.getAsLong();
+    final boolean[] decision = {false};
+    LAST_SENT_MS.compute(throttleKey, (k, last) -> {
+      if (last == null || now - last >= throttleMs) {
+        decision[0] = true;
+        return now;
+      }
+      return last;
+    });
+    return decision[0];
+  }
+
+  static boolean shouldSend(String throttleKey, long throttleMs) {
+    return shouldSend(throttleKey, throttleMs, System::currentTimeMillis);
+  }
+
+  /** Test helper: clear the throttle ledger between unit tests. */
+  static void resetThrottleForTesting() {
+    LAST_SENT_MS.clear();
   }
 
   /**
@@ -69,6 +115,15 @@ public final class CibaEmailNotifier {
       return false;
     }
 
+    long throttleMs = throttleSecondsFromRealm(realm) * 1000L;
+    String throttleKey = realm.getId() + ":" + userId + ":" + agentId;
+    if (!shouldSend(throttleKey, throttleMs)) {
+      LOG.log(Level.FINE,
+          () -> "agent-auth: CIBA email throttled for " + throttleKey
+              + " (within " + throttleMs + "ms of last send)");
+      return false;
+    }
+
     String agentName = stringField(agentData, "name", "(unnamed)");
     String hostName = stringField(hostData, "name", null);
     String verifyUrl = buildVerifyUrl(agentId);
@@ -87,6 +142,26 @@ public final class CibaEmailNotifier {
           e);
       return false;
     }
+  }
+
+  /**
+   * Reads the per-realm throttle interval. Falls back to {@link #DEFAULT_THROTTLE_SECONDS} when
+   * unset, blank, non-numeric, or non-positive. Operators tune via the
+   * {@code agent_auth_ciba_email_throttle_seconds} realm attribute.
+   */
+  private static long throttleSecondsFromRealm(RealmModel realm) {
+    String raw = realm.getAttribute("agent_auth_ciba_email_throttle_seconds");
+    if (raw != null && !raw.isBlank()) {
+      try {
+        long parsed = Long.parseLong(raw.trim());
+        if (parsed > 0L) {
+          return parsed;
+        }
+      } catch (NumberFormatException ignored) {
+        // fall through to default
+      }
+    }
+    return DEFAULT_THROTTLE_SECONDS;
   }
 
   private String buildVerifyUrl(String agentId) {
