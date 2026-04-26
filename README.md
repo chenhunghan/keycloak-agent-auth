@@ -29,8 +29,8 @@ flowchart LR
     RS -.->|introspect| KC
 ```
 
-- **Client** — the process holding the host keypair and signing JWTs. Your CLI, SDK, or background worker.
-- **Agent** — the AI loop inside the Client. Requests capabilities through tool calls (MCP, SDK functions); never talks to Keycloak directly.
+- **[Client][§1.5]** — the process holding the host keypair and signing JWTs. Your CLI, SDK, or background worker.
+- **[Agent][§2.1]** — the AI loop inside the Client. Requests capabilities through tool calls (MCP, SDK functions); never talks to Keycloak directly.
 
 Solid edges happen on every call; dashed edges are mode-specific (gateway vs direct). Host-scoped calls (register, status, revoke, rotate-key) carry a [`host+jwt`]; agent-scoped calls (execute, introspect) carry an [`agent+jwt`]. The full sequence walkthrough lives in [docs/architecture.md](docs/architecture.md).
 
@@ -139,14 +139,14 @@ The agent picks per call:
 
 The spec defines five actors; this extension implements one (Server). The others plug in around Keycloak.
 
-| Actor | Role | Implementation note |
-|-------|------|---------------------|
-| **Agent** ([§2.1]) | Runtime AI actor scoped to a conversation/task. Doesn't hold keys itself. | Yours — any LLM/runtime. Lifecycle states ([§2.3]): `pending`, `active`, `expired`, `revoked`, `rejected`, `claimed`. |
-| **Client** ([§1.5]) | Process that holds the host keypair, exposes protocol tools (MCP/CLI/SDK) to agents, signs JWTs, and speaks HTTP to the server. | Yours — any language. One client install ≡ one host identity. |
-| **Host** ([§2.7]) | Persistent identity of the client environment (Ed25519 keypair + metadata). A principal the client holds, not an actor. | Stored in `AGENT_AUTH_HOST`. |
-| **Server** ([§1.5]) | Authorization server: discovery, registration, approvals, grants, introspection, gateway execution. | **This extension + Keycloak core.** |
-| **Resource server** ([§1.5], [§2.15]) | Hosts a capability's business logic at `capability.location`. Validates agent JWTs locally or via `/agent/introspect`. | Yours — any language. |
-| **User** (implicit) | Human who approves delegated registrations and grants. | A Keycloak realm user. Hosts get bound to users via the admin link API or implicitly when the user approves a device-flow registration; CIBA emails the linked user a deep link to the approval page. |
+| Actor | Implementation note |
+|-------|---------------------|
+| **Agent** ([§2.1]) | Yours — any LLM/runtime. Lifecycle states ([§2.3]): `pending`, `active`, `expired`, `revoked`, `rejected`, `claimed`. |
+| **Client** ([§1.5]) | Yours — any language. One client install ≡ one host identity. |
+| **Host** ([§2.7]) | A principal the Client holds, not an actor. Stored in `AGENT_AUTH_HOST`. |
+| **Server** ([§1.5]) | **This extension + Keycloak core.** |
+| **Resource server** ([§1.5], [§2.15]) | Yours — any language. Validates agent JWTs locally or via `/agent/introspect`; gateway mode lets you skip validation. |
+| **User** (implicit) | A Keycloak realm user — the human who approves delegated registrations and grants. Hosts get bound to users via the admin link API or implicitly when the user approves a device-flow registration; CIBA emails the linked user a deep link to the approval page. |
 
 ### Agent modes
 
