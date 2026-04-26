@@ -7,7 +7,7 @@ A Keycloak extension implementing the [Agent Auth Protocol v1.0-draft](https://a
 Keycloak already provides what Agent Auth needs: realms, users, sessions, tokens, audit events, and an admin API. This extension adds the agent-auth concepts on top — hosts, agents, capability grants — and reuses Keycloak primitives where it can:
 
 - **Approval flows** reuse Keycloak user sessions: device-authorization ([§7.1]) and CIBA push ([§7.2]).
-- **Multi-tenant capability registries** reuse Keycloak Organizations and realm roles. Grants revoke automatically when a user leaves an org.
+- **Multi-tenant capability registries** reuse [Keycloak Organizations] and realm roles. Grants revoke automatically when a user leaves an org.
 
 ## Architecture
 
@@ -184,7 +184,7 @@ Each capability record carries:
 
 ### Multi-tenant scoping
 
-The AAP spec doesn't define multi-tenancy. Plugging Keycloak Organizations into the capability registry gives you tenant-isolated agent auth without writing a parallel ACL. Each capability carries `organization_id` (the tenant boundary) and `required_role` (a finer authorization gate); both are enforced at discovery, approval, and introspection. Grants revoke automatically when a user leaves an org (`reason=org_membership_removed`).
+The AAP spec doesn't define multi-tenancy. Plugging [Keycloak Organizations] into the capability registry gives you tenant-isolated agent auth without writing a parallel ACL. Each capability carries `organization_id` (the tenant boundary) and `required_role` (a finer authorization gate); both are enforced at discovery, approval, and introspection. Grants revoke automatically when a user leaves an org (`reason=org_membership_removed`).
 
 By caller:
 
@@ -194,7 +194,7 @@ By caller:
 
 `required_role` and `organization_id` are orthogonal: a capability with both set requires both. Public-visibility capabilities bypass both gates.
 
-> **Without Keycloak Organizations enabled on the realm**, capabilities with `organization_id IS NULL` continue to work as realm-wide caps; capabilities with a set `organization_id` become invisible (fail-safe — no leakage). Org-admin endpoints return `501 organizations_feature_disabled`. `required_role` continues to work as a single-tenant authorization gate.
+> **Without [Keycloak Organizations] enabled on the realm**, capabilities with `organization_id IS NULL` continue to work as realm-wide caps; capabilities with a set `organization_id` become invisible (fail-safe — no leakage). Org-admin endpoints return `501 organizations_feature_disabled`. `required_role` continues to work as a single-tenant authorization gate.
 
 ### Constraints
 
@@ -244,7 +244,7 @@ This extension does not sign protocol responses, so discovery does not publish a
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on Keycloak's classpath, well-audited. |
 | Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; writes land in Keycloak's main persistence unit (H2 in dev, any RDBMS Keycloak supports in prod). Selected by default through the `agent-auth-storage` SPI; set `kc.spi.agent-auth-storage.provider=in-memory` to switch back to the process-local map for tests. | Survives Keycloak restarts and scales across replicas. Indexed `ORGANIZATION_ID` and `REQUIRED_ROLE` make multi-tenant filtering and cascades SQL-efficient. The `AGENT_AUTH_AGENT_GRANT` table is a sync-on-write secondary index over per-agent grants used by the eager cascade. |
 | Approval flows | `device_authorization` ([§7.1]), `ciba` ([§7.2] — email + in-realm `/inbox` fallback), and `admin` (server-defined extension per [§5.1]) | Device flow reuses the realm's user authentication for the `user_code` step; CIBA emails the linked user a deep link to `/verify/approve`; the admin path covers headless setups. |
-| Capabilities | Centralized in Keycloak, optionally org-scoped | Single source of truth; resource servers just execute. Multi-tenancy via Keycloak Organizations + realm roles. |
+| Capabilities | Centralized in Keycloak, optionally org-scoped | Single source of truth; resource servers just execute. Multi-tenancy via [Keycloak Organizations] + realm roles. |
 
 ## Development
 
@@ -298,3 +298,4 @@ The Dockerfile is multi-stage. The builder runs `mvn package` against the checke
 [§5.3]: https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration
 [§7.1]: https://agent-auth-protocol.com/specification/v1.0-draft#71-device-authorization-rfc-8628
 [§7.2]: https://agent-auth-protocol.com/specification/v1.0-draft#72-object-object-client-initiated-backchannel-authentication
+[Keycloak Organizations]: https://www.keycloak.org/docs/latest/server_admin/index.html#_managing_organizations
