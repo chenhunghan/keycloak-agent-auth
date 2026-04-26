@@ -2,12 +2,14 @@
 
 A Keycloak extension implementing the [Agent Auth Protocol v1.0-draft](https://agent-auth-protocol.com/), which establishes AI agents as first-class principals with their own identity, scoped capabilities, and independent lifecycle.
 
+**Multi-tenant out of the box.** A single Keycloak realm hosts many [Keycloak Organizations]; capabilities, grants, and agent environments stay isolated per org, and grants revoke automatically when a member leaves.
+
 ## Why Keycloak?
 
 Keycloak already provides what Agent Auth needs: realms, users, sessions, tokens, audit events, and an admin API. This extension adds the agent-auth concepts on top — hosts, agents, capability grants — and reuses Keycloak primitives where it can:
 
 - **Approval flows** reuse Keycloak user sessions: device-authorization ([§7.1]) and CIBA push ([§7.2]).
-- **Multi-tenant capability registries** reuse [Keycloak Organizations] and realm roles. Grants revoke automatically when a user leaves an org.
+- **Multi-tenancy** reuses [Keycloak Organizations] and realm roles; see [Multi-tenant scoping](#multi-tenant-scoping) below.
 
 ## Architecture
 
