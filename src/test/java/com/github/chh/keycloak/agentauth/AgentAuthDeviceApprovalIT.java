@@ -2,6 +2,7 @@ package com.github.chh.keycloak.agentauth;
 
 import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 
 import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
@@ -167,6 +168,49 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .post("/verify/approve")
         .then()
         .statusCode(410);
+  }
+
+  /**
+   * §7.1 expiry: a user_code older than the realm's configured approval window must be rejected
+   * with 410 {@code approval_expired}, even if the pending agent still exists in storage (the 24h
+   * cleanup is a separate sweep and shouldn't be the only line of defense). The threshold is
+   * realm-configurable via the {@code agent_auth_approval_expires_in_seconds} attribute; this test
+   * temporarily lowers it to 2s so we can wait past it without slowing the suite.
+   */
+  @Test
+  void approveAfterUserCodeExpired_returns410() throws InterruptedException {
+    long previous = currentApprovalExpirySeconds();
+    setApprovalExpirySeconds(2L);
+    try {
+      OctetKeyPair hostKey = TestKeys.generateEd25519();
+      OctetKeyPair agentKey = TestKeys.generateEd25519();
+      String cap = registerApprovalRequiredCapability("devauth_expiry_" + suffix());
+      Response regResp = registerDelegatedAgent(hostKey, agentKey, cap);
+      regResp.then().statusCode(200);
+      // expires_in must reflect the configured value, not the constant default.
+      assertThat(regResp.jsonPath().getInt("approval.expires_in")).isEqualTo(2);
+      String userCode = regResp.jsonPath().getString("approval.user_code");
+
+      // Wait past the expiry threshold (with margin for test latency).
+      Thread.sleep(3000L);
+
+      String username = "expiry-approver-" + suffix();
+      createTestUser(username);
+      String token = realmUserAccessToken(username);
+
+      given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer " + token)
+          .contentType(ContentType.JSON)
+          .body(Map.of("user_code", userCode))
+          .when()
+          .post("/verify/approve")
+          .then()
+          .statusCode(410)
+          .body("error", equalTo("approval_expired"));
+    } finally {
+      setApprovalExpirySeconds(previous);
+    }
   }
 
   @Test
@@ -523,6 +567,52 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
 
   private static String suffix() {
     return UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+  }
+
+  private static long currentApprovalExpirySeconds() {
+    String token = adminAccessToken(); // touch first so ensureStarted() runs before we read
+                                       // KEYCLOAK
+    Response resp = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .when()
+        .get("/admin/realms/" + REALM);
+    resp.then().statusCode(200);
+    String raw = resp.jsonPath().getString("attributes.agent_auth_approval_expires_in_seconds");
+    if (raw == null || raw.isBlank()) {
+      return 600L; // matches DEFAULT_APPROVAL_EXPIRES_IN
+    }
+    return Long.parseLong(raw.trim());
+  }
+
+  private static void setApprovalExpirySeconds(long seconds) {
+    // Merge: GET → modify attribute → PUT. KC's PUT realm rep replaces the whole representation,
+    // so we round-trip to avoid stomping unrelated realm settings.
+    String token = adminAccessToken(); // ensureStarted() before reading KEYCLOAK
+    Response current = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .when()
+        .get("/admin/realms/" + REALM);
+    current.then().statusCode(200);
+    java.util.Map<String, Object> body = current.jsonPath().getMap("$");
+    @SuppressWarnings("unchecked")
+    java.util.Map<String, Object> attrs = body.get("attributes") instanceof java.util.Map
+        ? (java.util.Map<String, Object>) body.get("attributes")
+        : new java.util.HashMap<>();
+    attrs = new java.util.HashMap<>(attrs);
+    attrs.put("agent_auth_approval_expires_in_seconds", String.valueOf(seconds));
+    body.put("attributes", attrs);
+
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(body)
+        .when()
+        .put("/admin/realms/" + REALM)
+        .then()
+        .statusCode(204);
   }
 
   private static String createTestUser(String username) {

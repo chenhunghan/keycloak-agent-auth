@@ -3064,6 +3064,24 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               "message", "Approval is no longer possible; agent is in a terminal state"))
           .build();
     }
+    // §7.1 / §7.2 expiry: a stale approval (user_code or CIBA-emailed link) is no longer
+    // redeemable. The mint time is stamped inside the approval blob in selectApprovalObject; if
+    // it's older than userCodeExpirySeconds(), reject with 410. PendingAgentCleanup deletes
+    // pending agents past 24h as a separate sweep, so an expired approval that hasn't been
+    // cleaned yet still surfaces a clear error rather than silently succeeding hours later.
+    Object approvalRaw = agentData.get("approval");
+    if (approvalRaw instanceof Map<?, ?> approval) {
+      Object issuedAtRaw = approval.get("issued_at_ms");
+      if (issuedAtRaw instanceof Number issuedAt) {
+        long ageMs = System.currentTimeMillis() - issuedAt.longValue();
+        if (ageMs > userCodeExpirySeconds() * 1000L) {
+          return Response.status(410)
+              .entity(Map.of("error", "approval_expired",
+                  "message", "Approval window has elapsed; client must re-register"))
+              .build();
+        }
+      }
+    }
     // Two approval contexts share this endpoint:
     // (a) §5.3 register / §5.6 reactivate — agent itself is `pending`.
     // (b) §5.4 capability-request — agent is `active`, and one or more grants are `pending`.
@@ -3397,7 +3415,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   private Map<String, Object> buildApprovalObject(String agentId) {
     Map<String, Object> approval = new HashMap<>();
     approval.put("method", "admin");
-    approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
+    approval.put("expires_in", userCodeExpirySeconds());
     approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
     approval.put("status_url",
         session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
@@ -3425,6 +3443,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     boolean hostLinked = hostData != null && hostData.get("user_id") != null;
     if ("delegated".equals(mode) && hostLinked) {
       Map<String, Object> approval = buildCibaApprovalObject(agentId, bindingMessage);
+      // §7.2 expiry: same stamp as the device-auth path — verifyApprove enforces the window for
+      // both flows by reading approval.issued_at_ms.
+      approval.put("issued_at_ms", System.currentTimeMillis());
       // §7.2 push delivery: best-effort email to the linked user. Failure is logged and
       // swallowed by the notifier so the approval response itself never breaks on SMTP issues
       // — the inbox endpoint remains the always-on fallback.
@@ -3435,9 +3456,41 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     if ("delegated".equals(mode)) {
       String userCode = generateUserCode();
       agentData.put("user_code", userCode);
-      return buildDeviceAuthApprovalObject(agentId, userCode);
+      // §7.1 expiry: stamp the mint time inside the device-auth approval object so verifyApprove
+      // can reject stale codes. The stamp lives in `approval.issued_at_ms` because (a) the approval
+      // blob is the JSON-serialized portion that survives JpaStorage round-trip — top-level
+      // unknown keys are dropped by the typed-column schema, and (b) it groups the timestamp with
+      // the approval it belongs to. Capability-request and reactivate flows mint a fresh approval
+      // (and a fresh stamp) each time, so the field always tracks the latest pending approval.
+      Map<String, Object> approval = buildDeviceAuthApprovalObject(agentId, userCode);
+      approval.put("issued_at_ms", System.currentTimeMillis());
+      return approval;
     }
     return buildApprovalObject(agentId);
+  }
+
+  /**
+   * §7.1 user_code expiry threshold (seconds). Operator-configurable per-realm via the {@code
+   * agent_auth_approval_expires_in_seconds} attribute; falls back to
+   * {@link #DEFAULT_APPROVAL_EXPIRES_IN}. Used both in {@code expires_in} responses (so what we
+   * advertise matches what we enforce) and in the verifyApprove staleness check.
+   */
+  private long userCodeExpirySeconds() {
+    RealmModel realm = session.getContext().getRealm();
+    if (realm != null) {
+      String raw = realm.getAttribute("agent_auth_approval_expires_in_seconds");
+      if (raw != null && !raw.isBlank()) {
+        try {
+          long parsed = Long.parseLong(raw.trim());
+          if (parsed > 0) {
+            return parsed;
+          }
+        } catch (NumberFormatException ignored) {
+          // fall through to default
+        }
+      }
+    }
+    return DEFAULT_APPROVAL_EXPIRES_IN;
   }
 
   /**
@@ -3452,7 +3505,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         .path("agent").path("status").queryParam("agent_id", agentId).build().toString();
     Map<String, Object> approval = new HashMap<>();
     approval.put("method", "ciba");
-    approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
+    approval.put("expires_in", userCodeExpirySeconds());
     approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
     approval.put("status_url", statusUrl);
     if (bindingMessage != null && !bindingMessage.isBlank()) {
@@ -3469,7 +3522,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         .path("agent").path("status").queryParam("agent_id", agentId).build().toString();
     Map<String, Object> approval = new HashMap<>();
     approval.put("method", "device_authorization");
-    approval.put("expires_in", DEFAULT_APPROVAL_EXPIRES_IN);
+    approval.put("expires_in", userCodeExpirySeconds());
     approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
     approval.put("user_code", display);
     approval.put("verification_uri", verifyBase);
