@@ -32,7 +32,7 @@ flowchart LR
 - **Client** — the process holding the host keypair and signing JWTs. Your CLI, SDK, or background worker.
 - **Agent** — the AI loop inside the Client. Requests capabilities through tool calls (MCP, SDK functions); never talks to Keycloak directly.
 
-Solid edges happen on every call; dashed edges are mode-specific (gateway vs direct). Host-scoped calls (register, status, revoke, rotate-key) carry a `host+jwt`; agent-scoped calls (execute, introspect) carry an `agent+jwt`. The full sequence walkthrough lives in [docs/architecture.md](docs/architecture.md).
+Solid edges happen on every call; dashed edges are mode-specific (gateway vs direct). Host-scoped calls (register, status, revoke, rotate-key) carry a [`host+jwt`]; agent-scoped calls (execute, introspect) carry an [`agent+jwt`]. The full sequence walkthrough lives in [docs/architecture.md](docs/architecture.md).
 
 ### Endpoints
 
@@ -141,7 +141,7 @@ The spec defines five actors; this extension implements one (Server). The others
 
 | Actor | Role | Implementation note |
 |-------|------|---------------------|
-| **Agent** ([§2.1]) | Runtime AI actor scoped to a conversation/task. Doesn't hold keys itself. | Yours — any LLM/runtime. Lifecycle states: `pending`, `active`, `expired`, `revoked`, `rejected`, `claimed`. |
+| **Agent** ([§2.1]) | Runtime AI actor scoped to a conversation/task. Doesn't hold keys itself. | Yours — any LLM/runtime. Lifecycle states ([§2.3]): `pending`, `active`, `expired`, `revoked`, `rejected`, `claimed`. |
 | **Client** ([§1.5]) | Process that holds the host keypair, exposes protocol tools (MCP/CLI/SDK) to agents, signs JWTs, and speaks HTTP to the server. | Yours — any language. One client install ≡ one host identity. |
 | **Host** ([§2.7]) | Persistent identity of the client environment (Ed25519 keypair + metadata). A principal the client holds, not an actor. | Stored in `AGENT_AUTH_HOST`. |
 | **Server** ([§1.5]) | Authorization server: discovery, registration, approvals, grants, introspection, gateway execution. | **This extension + Keycloak core.** |
@@ -150,16 +150,16 @@ The spec defines five actors; this extension implements one (Server). The others
 
 ### Agent modes
 
-Each agent registers in one of two modes (per AAP [§3]):
+Each agent registers in one of two modes (per AAP [§2.2]):
 
-- **Delegated** — agent acts on behalf of a user who approves its grants.
-- **Autonomous** — agent operates without a user in the loop. Typically backed by a service-account host (see the Org-admin endpoints' `agent-environments` provisioning).
+- **[Delegated][§2.21]** — agent acts on behalf of a user who approves its grants.
+- **[Autonomous][§2.22]** — agent operates without a user in the loop. Typically backed by a service-account host (see the Org-admin endpoints' `agent-environments` provisioning).
 
 For the full sequence walkthrough, internals diagram, and per-concept source mapping, see [docs/architecture.md](docs/architecture.md).
 
 ## Capabilities
 
-Capabilities are registered in Keycloak by administrators. Keycloak is the single source of truth for what capabilities exist, who can see them, and which agents have grants.
+[Capabilities][§2.12] are registered in Keycloak by administrators. Keycloak is the single source of truth for what capabilities exist, who can see them, and which agents have grants.
 
 ```mermaid
 flowchart LR
@@ -229,7 +229,7 @@ A grant auto-approves when the entitlement gate passes AND (`!requires_approval`
 
 Hosts and agents use Ed25519 keypairs. Registration provides keys either inline as a public JWK (`host_public_key`, `agent_public_key`) or by reference with a JWKS URL (`host_jwks_url`, `agent_jwks_url`). Inline and JWKS URL are mutually exclusive per identity, and `agent_kid` is required when `agent_jwks_url` is used.
 
-JWTs are EdDSA-signed (RFC 8037). `host+jwt` audiences the issuer URL. `agent+jwt` audiences the resolved capability location (`capability.location` if set, else `default_location`) when calling for execution, and the issuer URL for non-execution calls to the auth server, per [§4.3].
+JWTs are EdDSA-signed (RFC 8037). [`host+jwt`] audiences the issuer URL. [`agent+jwt`] audiences the resolved capability location (`capability.location` if set, else `default_location`) when calling for execution, and the issuer URL for non-execution calls to the auth server, per [§4.3].
 
 JWKS-based identities are cached in-process for 5 minutes. A `kid` miss triggers one refetch per URL, rate-limited to once per 10 seconds. JWKS fetches require HTTPS, except for localhost and container-test hostnames used by local development and integration tests — intentionally stricter than the spec's URL-fetching guidance.
 
@@ -301,3 +301,12 @@ The Dockerfile is multi-stage. The builder runs `mvn package` against the checke
 [§7.1]: https://agent-auth-protocol.com/specification/v1.0-draft#71-device-authorization-rfc-8628
 [§7.2]: https://agent-auth-protocol.com/specification/v1.0-draft#72-object-object-client-initiated-backchannel-authentication
 [Keycloak Organizations]: https://www.keycloak.org/docs/latest/server_admin/index.html#_managing_organizations
+
+[§2.2]: https://agent-auth-protocol.com/specification/v1.0-draft#22-agent-modes
+[§2.3]: https://agent-auth-protocol.com/specification/v1.0-draft#23-agent-states
+[§2.12]: https://agent-auth-protocol.com/specification/v1.0-draft#212-capabilities
+[§2.21]: https://agent-auth-protocol.com/specification/v1.0-draft#221-delegated-agents
+[§2.22]: https://agent-auth-protocol.com/specification/v1.0-draft#222-autonomous-agents
+[§4.2]: https://agent-auth-protocol.com/specification/v1.0-draft#42-host-jwt
+[`host+jwt`]: https://agent-auth-protocol.com/specification/v1.0-draft#42-host-jwt
+[`agent+jwt`]: https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt
