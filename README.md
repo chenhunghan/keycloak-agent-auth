@@ -6,7 +6,7 @@ A Keycloak extension implementing the [Agent Auth Protocol v1.0-draft](https://a
 
 Keycloak already provides what Agent Auth needs: realms, users, sessions, tokens, audit events, and an admin API. This extension adds the agent-auth concepts on top — hosts, agents, capability grants — and reuses Keycloak primitives where it can:
 
-- **Approval flows** reuse Keycloak user sessions: device-authorization (§7.1) and CIBA push (§7.2).
+- **Approval flows** reuse Keycloak user sessions: device-authorization ([§7.1]) and CIBA push ([§7.2]).
 - **Multi-tenant capability registries** reuse Keycloak Organizations and realm roles. Grants revoke automatically when a user leaves an org.
 
 ## Architecture
@@ -83,9 +83,9 @@ Base: `/realms/{realm}/agent-auth/`. All endpoints require an authenticated real
 |--------|------|-------------|
 | GET  | `verify` | Browser-facing HTML approval page (the URL published as `verification_uri`). Bounces through realm login when no fresh identity cookie, then renders an approval form bound to the supplied `user_code`. |
 | POST | `verify` | Form-encoded companion to the page: `user_code + decision + access_token` → HTML success/failure page. CSRF double-submit. |
-| POST | `verify/approve` | JSON approve (§7.1). Activates the agent and links the host to the approving user. The entitlement gate flips grants whose cap fails the user's org/role check to `denied(insufficient_authority)`. |
+| POST | `verify/approve` | JSON approve ([§7.1]). Activates the agent and links the host to the approving user. The entitlement gate flips grants whose cap fails the user's org/role check to `denied(insufficient_authority)`. |
 | POST | `verify/deny` | JSON deny. Terminal — subsequent approve attempts return 410. |
-| GET  | `inbox` | Pending approvals routed to the user via CIBA push (§7.2). In-realm fallback when SMTP isn't configured. |
+| GET  | `inbox` | Pending approvals routed to the user via CIBA push ([§7.2]). In-realm fallback when SMTP isn't configured. |
 
 #### Realm admin (`manage-realm`)
 
@@ -96,9 +96,9 @@ Base: `/admin/realms/{realm}/agent-auth/`
 | POST   | `capabilities` | Register a realm-wide capability |
 | PUT    | `capabilities/{name}` | Update a realm-wide capability |
 | DELETE | `capabilities/{name}` | Delete a realm-wide capability |
-| POST   | `hosts` | Pre-register a host with an inline Ed25519 JWK (§2.8). Optional `client_id` resolves a service-account user as the host owner so autonomous workloads skip the post-claim approval flow. |
+| POST   | `hosts` | Pre-register a host with an inline Ed25519 JWK ([§2.8]). Optional `client_id` resolves a service-account user as the host owner so autonomous workloads skip the post-claim approval flow. |
 | GET    | `hosts/{id}` | Fetch a host record by thumbprint |
-| POST   | `hosts/{id}/link` | Bind host → user (§2.9). Cascades: autonomous agents → `claimed` with grants revoked (§2.10); delegated agents inherit `user_id` (§3.2). |
+| POST   | `hosts/{id}/link` | Bind host → user ([§2.9]). Cascades: autonomous agents → `claimed` with grants revoked ([§2.10]); delegated agents inherit `user_id` ([§3.2]). |
 | DELETE | `hosts/{id}/link` | Remove the host→user binding. Revokes delegated agents; autonomous agents stay `claimed` (terminal). |
 | GET    | `agents/{id}` | Fetch an agent record by id |
 | GET    | `agents/{id}/grants` | Rows from the `AGENT_AUTH_AGENT_GRANT` secondary index — verifies the index stays in sync with the per-agent grant blob |
@@ -139,16 +139,16 @@ The spec defines five actors; this extension implements one (Server). The others
 
 | Actor | Role | Implementation note |
 |-------|------|---------------------|
-| **Agent** (§2.1) | Runtime AI actor scoped to a conversation/task. Doesn't hold keys itself. | Yours — any LLM/runtime. Lifecycle states: `pending`, `active`, `expired`, `revoked`, `rejected`, `claimed`. |
-| **Client** (§1.5) | Process that holds the host keypair, exposes protocol tools (MCP/CLI/SDK) to agents, signs JWTs, and speaks HTTP to the server. | Yours — any language. One client install ≡ one host identity. |
-| **Host** (§2.7) | Persistent identity of the client environment (Ed25519 keypair + metadata). A principal the client holds, not an actor. | Stored in `AGENT_AUTH_HOST`. |
-| **Server** (§1.5) | Authorization server: discovery, registration, approvals, grants, introspection, gateway execution. | **This extension + Keycloak core.** |
-| **Resource server** (§1.5, §2.15) | Hosts a capability's business logic at `capability.location`. Validates agent JWTs locally or via `/agent/introspect`. | Yours — any language. |
+| **Agent** ([§2.1]) | Runtime AI actor scoped to a conversation/task. Doesn't hold keys itself. | Yours — any LLM/runtime. Lifecycle states: `pending`, `active`, `expired`, `revoked`, `rejected`, `claimed`. |
+| **Client** ([§1.5]) | Process that holds the host keypair, exposes protocol tools (MCP/CLI/SDK) to agents, signs JWTs, and speaks HTTP to the server. | Yours — any language. One client install ≡ one host identity. |
+| **Host** ([§2.7]) | Persistent identity of the client environment (Ed25519 keypair + metadata). A principal the client holds, not an actor. | Stored in `AGENT_AUTH_HOST`. |
+| **Server** ([§1.5]) | Authorization server: discovery, registration, approvals, grants, introspection, gateway execution. | **This extension + Keycloak core.** |
+| **Resource server** ([§1.5], [§2.15]) | Hosts a capability's business logic at `capability.location`. Validates agent JWTs locally or via `/agent/introspect`. | Yours — any language. |
 | **User** (implicit) | Human who approves delegated registrations and grants. | A Keycloak realm user. Hosts get bound to users via the admin link API or implicitly when the user approves a device-flow registration; CIBA emails the linked user a deep link to the approval page. |
 
 ### Agent modes
 
-Each agent registers in one of two modes (per AAP §3):
+Each agent registers in one of two modes (per AAP [§3]):
 
 - **Delegated** — agent acts on behalf of a user who approves its grants.
 - **Autonomous** — agent operates without a user in the loop. Typically backed by a service-account host (see the Org-admin endpoints' `agent-environments` provisioning).
@@ -175,7 +175,7 @@ Each capability record carries:
 |-------|-------------|
 | `name` | Stable identifier (`check_balance`, `transfer_money`) |
 | `description` | Human-readable explanation |
-| `location` | URL where the resource server executes the capability. If omitted, clients fall back to `default_location` from discovery (§2.15 / §5.1). Capabilities without a location appear in discovery and grants but can't be proxied through gateway mode. |
+| `location` | URL where the resource server executes the capability. If omitted, clients fall back to `default_location` from discovery ([§2.15] / [§5.1]). Capabilities without a location appear in discovery and grants but can't be proxied through gateway mode. |
 | `input` / `output` | JSON Schema for arguments and results |
 | `visibility` *(extension)* | `public` (visible to anyone) or `authenticated` (visible to realm users only) |
 | `requires_approval` *(extension)* | Whether user approval is needed before granting |
@@ -219,7 +219,7 @@ Supported operators: `max`, `min`, `in`, `not_in`, and exact-value match. Constr
 Two orthogonal signals can skip the user-approval prompt for a delegated agent's grant:
 
 - **Per-cap `requires_approval=false`** — admin marks this cap as universally low-risk.
-- **Per-host `default_capabilities`** — a set of cap names on the host record, populated when prior grants get approved. A subsequent registration under the same host that requests a cap already in the set auto-approves (§3.1, §5.3 auto-approval rule).
+- **Per-host `default_capabilities`** — a set of cap names on the host record, populated when prior grants get approved. A subsequent registration under the same host that requests a cap already in the set auto-approves ([§3.1], [§5.3] auto-approval rule).
 
 A grant auto-approves when the entitlement gate passes AND (`!requires_approval` OR cap is in the host's `default_capabilities`).
 
@@ -227,7 +227,7 @@ A grant auto-approves when the entitlement gate passes AND (`!requires_approval`
 
 Hosts and agents use Ed25519 keypairs. Registration provides keys either inline as a public JWK (`host_public_key`, `agent_public_key`) or by reference with a JWKS URL (`host_jwks_url`, `agent_jwks_url`). Inline and JWKS URL are mutually exclusive per identity, and `agent_kid` is required when `agent_jwks_url` is used.
 
-JWTs are EdDSA-signed (RFC 8037). `host+jwt` audiences the issuer URL. `agent+jwt` audiences the resolved capability location (`capability.location` if set, else `default_location`) when calling for execution, and the issuer URL for non-execution calls to the auth server, per §4.3.
+JWTs are EdDSA-signed (RFC 8037). `host+jwt` audiences the issuer URL. `agent+jwt` audiences the resolved capability location (`capability.location` if set, else `default_location`) when calling for execution, and the issuer URL for non-execution calls to the auth server, per [§4.3].
 
 JWKS-based identities are cached in-process for 5 minutes. A `kid` miss triggers one refetch per URL, rate-limited to once per 10 seconds. JWKS fetches require HTTPS, except for localhost and container-test hostnames used by local development and integration tests — intentionally stricter than the spec's URL-fetching guidance.
 
@@ -243,7 +243,7 @@ This extension does not sign protocol responses, so discovery does not publish a
 | Discovery | `/realms/{realm}/.well-known/agent-configuration` via `WellKnownProvider` SPI | Follows Keycloak's OpenID discovery pattern. |
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on Keycloak's classpath, well-audited. |
 | Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; writes land in Keycloak's main persistence unit (H2 in dev, any RDBMS Keycloak supports in prod). Selected by default through the `agent-auth-storage` SPI; set `kc.spi.agent-auth-storage.provider=in-memory` to switch back to the process-local map for tests. | Survives Keycloak restarts and scales across replicas. Indexed `ORGANIZATION_ID` and `REQUIRED_ROLE` make multi-tenant filtering and cascades SQL-efficient. The `AGENT_AUTH_AGENT_GRANT` table is a sync-on-write secondary index over per-agent grants used by the eager cascade. |
-| Approval flows | `device_authorization` (§7.1), `ciba` (§7.2 — email + in-realm `/inbox` fallback), and `admin` (server-defined extension per §5.1) | Device flow reuses the realm's user authentication for the `user_code` step; CIBA emails the linked user a deep link to `/verify/approve`; the admin path covers headless setups. |
+| Approval flows | `device_authorization` ([§7.1]), `ciba` ([§7.2] — email + in-realm `/inbox` fallback), and `admin` (server-defined extension per [§5.1]) | Device flow reuses the realm's user authentication for the `user_code` step; CIBA emails the linked user a deep link to `/verify/approve`; the admin path covers headless setups. |
 | Capabilities | Centralized in Keycloak, optionally org-scoped | Single source of truth; resource servers just execute. Multi-tenancy via Keycloak Organizations + realm roles. |
 
 ## Development
@@ -281,3 +281,20 @@ docker compose up
 Keycloak comes up at `http://localhost:28080` with the extension preloaded. Agent-auth endpoints live at `/realms/{realm}/agent-auth/...`.
 
 The Dockerfile is multi-stage. The builder runs `mvn package` against the checked-in source; the runtime stage copies the extension JAR plus its runtime libs (nimbus-jose-jwt, tink) from `target/provider-libs/` into `/opt/keycloak/providers/`. No host JDK or Maven required. Integration tests use the same `target/provider-libs/` directory via Testcontainers, so the image and the test harness share one source of truth for runtime deps.
+
+
+[§1.5]: https://agent-auth-protocol.com/specification/v1.0-draft#15-terminology
+[§2.1]: https://agent-auth-protocol.com/specification/v1.0-draft#21-agent
+[§2.7]: https://agent-auth-protocol.com/specification/v1.0-draft#27-host
+[§2.8]: https://agent-auth-protocol.com/specification/v1.0-draft#28-host-establishment
+[§2.9]: https://agent-auth-protocol.com/specification/v1.0-draft#29-host-linking
+[§2.10]: https://agent-auth-protocol.com/specification/v1.0-draft#210-autonomous-agent-claiming
+[§2.15]: https://agent-auth-protocol.com/specification/v1.0-draft#215-execution
+[§3]: https://agent-auth-protocol.com/specification/v1.0-draft#3-data-model
+[§3.1]: https://agent-auth-protocol.com/specification/v1.0-draft#31-host
+[§3.2]: https://agent-auth-protocol.com/specification/v1.0-draft#32-agent
+[§4.3]: https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt
+[§5.1]: https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery
+[§5.3]: https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration
+[§7.1]: https://agent-auth-protocol.com/specification/v1.0-draft#71-device-authorization-rfc-8628
+[§7.2]: https://agent-auth-protocol.com/specification/v1.0-draft#72-object-object-client-initiated-backchannel-authentication
