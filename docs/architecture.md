@@ -18,14 +18,7 @@ The README gives the high-level picture; this doc is the deep reference.
 
 ## Protocol actors
 
-| Actor | Kind | Definition (verbatim quote, spec section) |
-|-------|------|-------------------------------------------|
-| **Agent** | service | "A runtime AI actor scoped to a specific conversation, task, or session, that calls external services." (§2.1) |
-| **Client** | service | "The process that holds a host identity and exposes protocol tools to AI systems (MCP server, CLI, SDK). It manages host and agent keys, talks to servers, and signs JWTs." (§1.5) |
-| **Host** | principal | "The persistent identity of the client environment where agents run... represented as a registered keypair plus metadata." (§2.7) |
-| **Server** | service | "The service's authorization server. It manages discovery, host and agent registrations, approvals, capability grants, and JWT verification." (§1.5) |
-| **Resource Server** | service | Implicit in §2.15 and §5.11. The service hosting a capability's business logic at `capability.location`. Validates agent JWTs locally or via introspection. |
-| **User** | human | End user who approves delegated registrations and capability grants (§2.2.1, §2.9). Linked to hosts through the server's implementation-specific linking mechanism (§2.9). |
+Spec actors: **Agent** ([§2.1]), **Client** ([§1.5]), **Host** ([§2.7]), **Server** ([§1.5]), **Resource Server** ([§1.5], [§2.15], [§5.11]), **User** (implicit in [§2.2] and [§2.9]).
 
 Key property: **Client and Host are different things.** The client is the process (Claude Code CLI, a background worker, etc.); the host is the identity that client holds (one Ed25519 keypair + record on the server). Migrating a client install to a different machine but carrying the key = same host; reinstalling with a fresh key = different host.
 
@@ -111,14 +104,14 @@ sequenceDiagram
 
 A few nuances worth calling out:
 
-- **Host+jwt vs agent+jwt boundary.** Host+jwt signs *host-scoped* operations (register, status, revoke, reactivate, rotate-key) with `aud = issuer URL` per §4.3. Agent+jwt signs *agent-scoped* operations and per §4.3 its `aud` MUST be the **resolved location URL** of a capability — `cap.location` if set, else `default_location` (which our discovery advertises as `<issuer>/capability/execute`). Gateway and direct are not different aud rules; the gateway is what runs when the resolved location IS `default_location`. A cap with its own `location` is, per §2.15, called directly at that URL — and `aud = cap.location` either way. Our gateway also accepts `aud = cap.location` for caps with explicit locations as a server-side proxy convenience, but the audience identity still belongs to the cap. `/agent/introspect` enforces the same rule on the introspected token: it must address a cap the agent currently holds an active grant for, optionally narrowed by the JWT's `capabilities` claim.
-- **Approval method selection.** Driven by what the server advertises in `/.well-known/agent-configuration` under `approval_methods`. Today we publish `["device_authorization", "ciba", "admin"]`. For `device_authorization` (AAP §7.1), the server returns a `user_code`, `verification_uri`, and `status_url` in the approval object; the user authenticates to the realm and POSTs the code to `/verify/approve` or `/verify/deny`. Approval also links the host to the approving user per §2.9. For `ciba` (AAP §7.2), the server emails the linked user a deep link back to the approval page; users without SMTP configured can poll `/agent-auth/inbox` as the in-realm fallback channel. For `admin`, the flow in step 6 is a Keycloak admin calling `/admin/.../agents/{id}/capabilities/{cap}/approve`.
-- **Layer-2 enforcement at approval time.** Phase 2 of the multi-tenant authz plan inserts an org/role check inside `/verify/approve`. Approving user's KC entitlement is checked against each pending grant's cap; gate-failed grants flip to `denied(insufficient_authority)` instead of `active`. The agent itself still transitions per §5.3 — same partial-approval shape as today's `user_denied` path.
+- **Host+jwt vs agent+jwt boundary.** Host+jwt signs *host-scoped* operations (register, status, revoke, reactivate, rotate-key) with `aud = issuer URL` per [§4.3]. Agent+jwt signs *agent-scoped* operations and per [§4.3] its `aud` MUST be the **resolved location URL** of a capability — `cap.location` if set, else `default_location` (which our discovery advertises as `<issuer>/capability/execute`). Gateway and direct are not different aud rules; the gateway is what runs when the resolved location IS `default_location`. A cap with its own `location` is, per [§2.15], called directly at that URL — and `aud = cap.location` either way. Our gateway also accepts `aud = cap.location` for caps with explicit locations as a server-side proxy convenience, but the audience identity still belongs to the cap. `/agent/introspect` enforces the same rule on the introspected token: it must address a cap the agent currently holds an active grant for, optionally narrowed by the JWT's `capabilities` claim.
+- **Approval method selection.** Driven by what the server advertises in `/.well-known/agent-configuration` under `approval_methods`. Today we publish `["device_authorization", "ciba", "admin"]`. For `device_authorization` (AAP [§7.1]), the server returns a `user_code`, `verification_uri`, and `status_url` in the approval object; the user authenticates to the realm and POSTs the code to `/verify/approve` or `/verify/deny`. Approval also links the host to the approving user per [§2.9]. For `ciba` (AAP [§7.2]), the server emails the linked user a deep link back to the approval page; users without SMTP configured can poll `/agent-auth/inbox` as the in-realm fallback channel. For `admin`, the flow in step 6 is a Keycloak admin calling `/admin/.../agents/{id}/capabilities/{cap}/approve`.
+- **Layer-2 enforcement at approval time.** Phase 2 of the multi-tenant authz plan inserts an org/role check inside `/verify/approve`. Approving user's KC entitlement is checked against each pending grant's cap; gate-failed grants flip to `denied(insufficient_authority)` instead of `active`. The agent itself still transitions per [§5.3] — same partial-approval shape as today's `user_denied` path.
 - **Async / streaming execution.** Gateway-mode `/capability/execute` can return `202 + status_url` for async or an SSE stream for streaming. `AgentAuthRealmResourceProvider.executeCapability` proxies all three response shapes; see `AgentAuthCapabilityExecuteIT` for the exercised contracts.
 
 ## Host linking flow
 
-Host linking is the spec's mechanism for binding a host (machine identity) to a user (human identity). §2.9 says linking is implementation-specific; this extension ships two paths: the admin API (`POST/DELETE /admin/.../hosts/{id}/link`) and implicit linking on device-authorization approval (`/verify/approve` links the host to the approving realm user, AAP §7.1). CIBA is **not** a linking trigger by design — `selectApprovalObject` only routes to CIBA when the host is already linked (so the server knows which user to email); unlinked hosts fall through to device flow, which is the linking path. If you want CIBA to also serve as a linking trigger (e.g. a workload-provided user hint that mints an approval email to a specific user), that's a feature extension on top of §2.9, not a closure of a spec gap.
+Host linking is the spec's mechanism for binding a host (machine identity) to a user (human identity). [§2.9] says linking is implementation-specific; this extension ships two paths: the admin API (`POST/DELETE /admin/.../hosts/{id}/link`) and implicit linking on device-authorization approval (`/verify/approve` links the host to the approving realm user, AAP [§7.1]). CIBA is **not** a linking trigger by design — `selectApprovalObject` only routes to CIBA when the host is already linked (so the server knows which user to email); unlinked hosts fall through to device flow, which is the linking path. If you want CIBA to also serve as a linking trigger (e.g. a workload-provided user hint that mints an approval email to a specific user), that's a feature extension on top of [§2.9], not a closure of a spec gap.
 
 ```mermaid
 sequenceDiagram
@@ -146,9 +139,9 @@ sequenceDiagram
     Ext-->>Admin: host
 ```
 
-Unlink (`DELETE /admin/.../hosts/{id}/link`) runs the inverse cascade: all delegated agents under the host are revoked (§2.9 — their authority derived from the now-removed link). Autonomous agents were already `claimed` by the link cascade, which is a terminal state, so they stay put. The host's `user_id` is cleared and it becomes unlinked again.
+Unlink (`DELETE /admin/.../hosts/{id}/link`) runs the inverse cascade: all delegated agents under the host are revoked ([§2.9] — their authority derived from the now-removed link). Autonomous agents were already `claimed` by the link cascade, which is a terminal state, so they stay put. The host's `user_id` is cleared and it becomes unlinked again.
 
-Coverage: `AgentAuthHostLinkIT` walks each of the spec's normative consequences (§2.9 one-user constraint, §2.10 claim cascade, §3.2 user_id propagation, §2.9 unlink revocation) against a live Keycloak container.
+Coverage: `AgentAuthHostLinkIT` walks each of the spec's normative consequences ([§2.9] one-user constraint, [§2.10] claim cascade, [§3.2] user_id propagation, [§2.9] unlink revocation) against a live Keycloak container.
 
 ## Extension internals
 
@@ -223,24 +216,24 @@ Both paths converge in the same verification logic; the choice is per-identity, 
 
 | Spec section / concept | Implementation |
 |------------------------|----------------|
-| §5.1 Discovery | `AgentAuthWellKnownProvider` + `AgentAuthWellKnownProviderFactory` |
-| §5.2 / §5.2.1 Capability list / describe | `AgentAuthRealmResourceProvider.listCapabilities` / `.describeCapability` |
-| §5.3 Agent registration | `AgentAuthRealmResourceProvider.registerAgent` |
-| §5.4 Request capability | `AgentAuthRealmResourceProvider.requestCapability` |
-| §5.5 Status | `AgentAuthRealmResourceProvider.getAgentStatus` and `.getGrantStatus` |
-| §5.6 Reactivate | `AgentAuthRealmResourceProvider.reactivateAgent` |
-| §5.7 / §5.10 Revoke agent / host | `AgentAuthRealmResourceProvider.revokeAgent` / `.revokeHost` |
-| §5.8 / §5.9 Key rotation | `AgentAuthRealmResourceProvider.rotateAgentKey` / `.rotateHostKey` |
-| §5.11 Execute (gateway) | `AgentAuthRealmResourceProvider.executeCapability` |
-| §5.12 Introspect | `AgentAuthRealmResourceProvider.introspect` |
-| §4.5 JWT verification | inline in the above, shared helpers |
-| §2.13 Constraints | `ConstraintValidator`, `ConstraintViolation` |
-| §2.8 Pre-registration | `AgentAuthAdminResourceProvider.preRegisterHost` / `.getHost` |
-| §2.9 / §2.10 / §3.2 Host linking + claiming + user_id propagation | `AgentAuthAdminResourceProvider.linkHost` / `.unlinkHost` |
-| §7.1 Device-authorization approval | `AgentAuthRealmResourceProvider.verifyApprove` / `.verifyDeny` — approves or denies a pending agent by `user_code`; approval implicitly links the host to the approving user. Phase 2 layer-2 gate runs inside the same flow. |
-| §7.2 CIBA push approval | `AgentAuthRealmResourceProvider.inbox` (in-realm poll) + `notify/CibaEmailNotifier` (email channel). Approval lands at the same `verifyApprove` site. |
-| §3.1 Host `default_capabilities` (TOFU auto-grant) | `AgentAuthRealmResourceProvider.hostDefaultCapabilities` reads the field; `verifyApprove` and `AgentAuthAdminResourceProvider.approveCapability` append cap names when grants flip pending → active. `registerAgent` and `buildReactivationGrants` apply the §5.3 rule "auto-approve if cap is in host defaults." Distinct from `default_capability_grants`, which is a constraint-preserving snapshot used only by reactivation. |
-| §2.6 User-deletion cascade | `AgentAuthUserEventListenerProviderFactory.handleUserRemoved` — listens to `UserModel.UserRemovedEvent` and revokes hosts/agents under the deleted user. |
+| [§5.1] Discovery | `AgentAuthWellKnownProvider` + `AgentAuthWellKnownProviderFactory` |
+| [§5.2] / [§5.2.1] Capability list / describe | `AgentAuthRealmResourceProvider.listCapabilities` / `.describeCapability` |
+| [§5.3] Agent registration | `AgentAuthRealmResourceProvider.registerAgent` |
+| [§5.4] Request capability | `AgentAuthRealmResourceProvider.requestCapability` |
+| [§5.5] Status | `AgentAuthRealmResourceProvider.getAgentStatus` and `.getGrantStatus` |
+| [§5.6] Reactivate | `AgentAuthRealmResourceProvider.reactivateAgent` |
+| [§5.7] / [§5.10] Revoke agent / host | `AgentAuthRealmResourceProvider.revokeAgent` / `.revokeHost` |
+| [§5.8] / [§5.9] Key rotation | `AgentAuthRealmResourceProvider.rotateAgentKey` / `.rotateHostKey` |
+| [§5.11] Execute (gateway) | `AgentAuthRealmResourceProvider.executeCapability` |
+| [§5.12] Introspect | `AgentAuthRealmResourceProvider.introspect` |
+| [§4.5] JWT verification | inline in the above, shared helpers |
+| [§2.13] Constraints | `ConstraintValidator`, `ConstraintViolation` |
+| [§2.8] Pre-registration | `AgentAuthAdminResourceProvider.preRegisterHost` / `.getHost` |
+| [§2.9] / [§2.10] / [§3.2] Host linking + claiming + user_id propagation | `AgentAuthAdminResourceProvider.linkHost` / `.unlinkHost` |
+| [§7.1] Device-authorization approval | `AgentAuthRealmResourceProvider.verifyApprove` / `.verifyDeny` — approves or denies a pending agent by `user_code`; approval implicitly links the host to the approving user. Phase 2 layer-2 gate runs inside the same flow. |
+| [§7.2] CIBA push approval | `AgentAuthRealmResourceProvider.inbox` (in-realm poll) + `notify/CibaEmailNotifier` (email channel). Approval lands at the same `verifyApprove` site. |
+| [§3.1] Host `default_capabilities` (TOFU auto-grant) | `AgentAuthRealmResourceProvider.hostDefaultCapabilities` reads the field; `verifyApprove` and `AgentAuthAdminResourceProvider.approveCapability` append cap names when grants flip pending → active. `registerAgent` and `buildReactivationGrants` apply the [§5.3] rule "auto-approve if cap is in host defaults." Distinct from `default_capability_grants`, which is a constraint-preserving snapshot used only by reactivation. |
+| [§2.6] User-deletion cascade | `AgentAuthUserEventListenerProviderFactory.handleUserRemoved` — listens to `UserModel.UserRemovedEvent` and revokes hosts/agents under the deleted user. |
 | Multi-tenant org-membership cascade (Phase 4) | `AgentAuthUserEventListenerProviderFactory.handleOrgMemberLeave` — listens to `OrganizationModel.OrganizationMemberLeaveEvent` and revokes grants whose cap matches the removed org. |
 | Multi-tenant user-entitlement filter (Phase 1) | `AgentAuthRealmResourceProvider.userEntitlementAllows` (gate predicate) + `loadUserEntitlement` (snapshot helper) — applied on `/capability/list`, `/capability/describe`, and `/verify/approve`. |
 | Multi-tenant introspect re-eval (Phase 2) | Inline filter in `AgentAuthRealmResourceProvider.introspect` — strips grants whose cap fails the agent user's current org/role entitlement. |
@@ -261,17 +254,50 @@ The spec is intentionally implementation-agnostic in several places. Here's wher
 
 | Spec concept | What we did | Why |
 |--------------|-------------|-----|
-| `approval_methods` | `["device_authorization", "ciba", "admin"]` | `device_authorization` (AAP §7.1) is implemented on top of Keycloak user sessions: the client receives a `user_code`, the approving realm user posts it to `/verify/approve` (or `/verify/deny`), and the host is linked to that user per §2.9. `ciba` (AAP §7.2) emails the linked user with a deep link to the approval page; the in-realm `/inbox` poll is the SMTP-less fallback. `admin` remains available for headless setups (`POST /admin/.../agents/{id}/capabilities/{cap}/approve`). |
-| Host state on dynamic registration | `pending` per §2.8 + §2.11 MUST. The first user-driven approval (`/verify/approve` or admin grant-approve) flips the host to `active` alongside linking + TOFU defaults appending. Autonomous mode + dynamic-register-on-unknown-host is rejected with `400 host_pre_registration_required` since autonomous has no user-approval flow to ever activate the host — admins must use the pre-register endpoint instead. | Spec compliance. Pre-registered hosts (admin API) bypass the pending state entirely (admin's act is the human approval). |
-| Pre-registration endpoint shape | `POST /admin/.../agent-auth/hosts` with inline JWK | Spec explicitly defers this to "server's dashboard, admin API, or any other server-specific mechanism" (§2.8). We matched the shape of the existing admin API. |
-| `user_id` linking on hosts (§2.9) | **Implemented** via two paths: admin API (`POST/DELETE /admin/.../agent-auth/hosts/{id}/link`) and implicit on device-flow approval (`/verify/approve` links the host to the approving user). | §2.9 is mechanism-agnostic about which approval methods trigger linking. CIBA is intentionally not a linking trigger — `selectApprovalObject` routes to CIBA only when the host is already linked (so the server has an email recipient); unlinked hosts go through device flow, which is the linking path. Adding workload-provided user hints to extend CIBA into a linking flow is a feature on top of §2.9, not a spec-gap closure. |
-| Autonomous-agent `claimed` transition on host link (§2.10) | **Implemented** — link cascade claims autonomous agents, revokes their grants, propagates `user_id` to delegated agents (§3.2) | The normative consequences of linking are MUST-level in the spec; the admin endpoint enforces them and `AgentAuthHostLinkIT` covers each one. |
+| `approval_methods` | `["device_authorization", "ciba", "admin"]` | `device_authorization` (AAP [§7.1]) is implemented on top of Keycloak user sessions: the client receives a `user_code`, the approving realm user posts it to `/verify/approve` (or `/verify/deny`), and the host is linked to that user per [§2.9]. `ciba` (AAP [§7.2]) emails the linked user with a deep link to the approval page; the in-realm `/inbox` poll is the SMTP-less fallback. `admin` remains available for headless setups (`POST /admin/.../agents/{id}/capabilities/{cap}/approve`). |
+| Host state on dynamic registration | `pending` per [§2.8] + [§2.11] MUST. The first user-driven approval (`/verify/approve` or admin grant-approve) flips the host to `active` alongside linking + TOFU defaults appending. Autonomous mode + dynamic-register-on-unknown-host is rejected with `400 host_pre_registration_required` since autonomous has no user-approval flow to ever activate the host — admins must use the pre-register endpoint instead. | Spec compliance. Pre-registered hosts (admin API) bypass the pending state entirely (admin's act is the human approval). |
+| Pre-registration endpoint shape | `POST /admin/.../agent-auth/hosts` with inline JWK | Spec defers this to server-specific mechanisms ([§2.8]); we matched the shape of the existing admin API. |
+| `user_id` linking on hosts ([§2.9]) | **Implemented** via two paths: admin API (`POST/DELETE /admin/.../agent-auth/hosts/{id}/link`) and implicit on device-flow approval (`/verify/approve` links the host to the approving user). | [§2.9] is mechanism-agnostic about which approval methods trigger linking. CIBA is intentionally not a linking trigger — `selectApprovalObject` routes to CIBA only when the host is already linked (so the server has an email recipient); unlinked hosts go through device flow, which is the linking path. Adding workload-provided user hints to extend CIBA into a linking flow is a feature on top of [§2.9], not a spec-gap closure. |
+| Autonomous-agent `claimed` transition on host link ([§2.10]) | **Implemented** — link cascade claims autonomous agents, revokes their grants, propagates `user_id` to delegated agents ([§3.2]) | The normative consequences of linking are MUST-level in the spec; the admin endpoint enforces them and `AgentAuthHostLinkIT` covers each one. |
 | `jwks_uri` in discovery | omitted | Extension doesn't sign server responses — nothing to publish. Host/agent JWKS support is separate and fully implemented. |
 | JWKS HTTPS enforcement | stricter than spec (HTTPS required except for localhost and container-test hostnames) | Avoid accidentally fetching JWKS over cleartext in production. Dev/test exceptions are scoped narrowly. |
 | Storage SPI | shipped (`AgentAuthStorage`) with JPA default | So persistence survives container restarts and scales across replicas without forcing any consumer onto a specific backend. |
-| Multi-tenant capability registries | shipped via `organization_id` (KC Organizations) + `required_role` (realm role) on capability, with eager cascade on org-membership leave and lazy re-eval at introspect | Multi-tenancy was a real customer ask and falls out cleanly when KC's own primitives are wired in. The alternative — building an AAP-native ACL — would parallel work KC already does. |
-| Auto-grant signals | three orthogonal axes: (1) tenancy/role gate (`cap.organization_id` + `cap.required_role`), (2) per-cap `requires_approval` flag (extension-only — admin says "this cap is universally low-risk"), (3) per-host `default_capabilities` TOFU set (spec §3.1 — appended on user/admin approval, drives §5.3 auto-approval rule "if the capabilities fall within its defaults, auto-approve"). Auto-grant fires when the tenancy/role gate passes AND (`!requires_approval` OR cap is in host defaults). | §2.9 says delegated auto-approval is `MAY` — server policy. The cap-level flag is an extension knob the spec doesn't define but doesn't preclude; the host-level TOFU set is the spec's defined data shape. Keeping both gives admins a global "low-risk" override and per-host accumulated trust without mixing them. |
+| Multi-tenant capability registries | shipped via `organization_id` ([Keycloak Organizations]) + `required_role` (realm role) on capability, with eager cascade on org-membership leave and lazy re-eval at introspect | Multi-tenancy was a real customer ask and falls out cleanly when KC's own primitives are wired in. The alternative — building an AAP-native ACL — would parallel work KC already does. |
+| Auto-grant signals | three orthogonal axes: (1) tenancy/role gate (`cap.organization_id` + `cap.required_role`), (2) per-cap `requires_approval` flag (extension-only — admin says "this cap is universally low-risk"), (3) per-host `default_capabilities` TOFU set (spec [§3.1] — appended on user/admin approval, drives [§5.3]'s auto-approval rule for caps in the host's defaults). Auto-grant fires when the tenancy/role gate passes AND (`!requires_approval` OR cap is in host defaults). | [§2.9] says delegated auto-approval is `MAY` — server policy. The cap-level flag is an extension knob the spec doesn't define but doesn't preclude; the host-level TOFU set is the spec's defined data shape. Keeping both gives admins a global "low-risk" override and per-host accumulated trust without mixing them. |
 | Org-self-serve agent environments | `POST /admin/.../organizations/{orgId}/agent-environments` creates a locked-down KC client + binds its SA to the org + pre-registers the host atomically, gated by `manage-organization`. The endpoint takes only `{name, host_public_key}` — every OIDC-flow flag is hard-coded false, so org admins can't repurpose the client for browser/auth flows. `client_secret` is returned exactly once and can't be retrieved later (rotate by deleting + recreating). Quota of 50 managed clients per org. Removing an org admin does **not** invalidate the secrets/keys they've already received — operators must rotate explicitly. KC native admin (manage-clients) can still mutate or delete these clients out-of-band; the extension only guards its own surface. | The realm-admin-only path forces every org SA-host through a human bottleneck, which leads to credential sharing and approval fatigue. Bounded delegation (limited blast radius via lockdown + tagging + quota) matches the IAM-role / GitHub-Apps pattern and is net-safer than the status quo. |
 | Soft FKs to KC's `KEYCLOAK_USER` / `KEYCLOAK_ORG` / `KEYCLOAK_REALM` | string columns + application-level cascades (`AgentAuthUserEventListenerProviderFactory` for user-delete and org-leave) | Adding cross-package real FKs would tie our Liquibase changesets to KC's schema across version bumps; brittle. The cascade listeners cover the integrity story for now. Revisit if a stale-id orphan bug actually surfaces. |
 
 If you hit one of these and need different behavior, open an issue — most of them are "waits on a sibling feature" rather than deliberate exclusion.
+
+
+[§1.5]: https://agent-auth-protocol.com/specification/v1.0-draft#15-terminology
+[§2.1]: https://agent-auth-protocol.com/specification/v1.0-draft#21-agent
+[§2.2]: https://agent-auth-protocol.com/specification/v1.0-draft#22-agent-modes
+[§2.6]: https://agent-auth-protocol.com/specification/v1.0-draft#26-revocation
+[§2.7]: https://agent-auth-protocol.com/specification/v1.0-draft#27-host
+[§2.8]: https://agent-auth-protocol.com/specification/v1.0-draft#28-host-establishment
+[§2.9]: https://agent-auth-protocol.com/specification/v1.0-draft#29-host-linking
+[§2.10]: https://agent-auth-protocol.com/specification/v1.0-draft#210-autonomous-agent-claiming
+[§2.11]: https://agent-auth-protocol.com/specification/v1.0-draft#211-host-states
+[§2.13]: https://agent-auth-protocol.com/specification/v1.0-draft#213-scoped-grants-constraints
+[§2.15]: https://agent-auth-protocol.com/specification/v1.0-draft#215-execution
+[§3.1]: https://agent-auth-protocol.com/specification/v1.0-draft#31-host
+[§3.2]: https://agent-auth-protocol.com/specification/v1.0-draft#32-agent
+[§4.3]: https://agent-auth-protocol.com/specification/v1.0-draft#43-agent-jwt
+[§4.5]: https://agent-auth-protocol.com/specification/v1.0-draft#45-verification
+[§5.1]: https://agent-auth-protocol.com/specification/v1.0-draft#51-discovery
+[§5.2]: https://agent-auth-protocol.com/specification/v1.0-draft#52-list-capabilities
+[§5.2.1]: https://agent-auth-protocol.com/specification/v1.0-draft#521-describe-capability
+[§5.3]: https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration
+[§5.4]: https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability
+[§5.5]: https://agent-auth-protocol.com/specification/v1.0-draft#55-status
+[§5.6]: https://agent-auth-protocol.com/specification/v1.0-draft#56-reactivate
+[§5.7]: https://agent-auth-protocol.com/specification/v1.0-draft#57-revoke
+[§5.8]: https://agent-auth-protocol.com/specification/v1.0-draft#58-key-rotation
+[§5.9]: https://agent-auth-protocol.com/specification/v1.0-draft#59-rotate-host-key
+[§5.10]: https://agent-auth-protocol.com/specification/v1.0-draft#510-revoke-host
+[§5.11]: https://agent-auth-protocol.com/specification/v1.0-draft#511-execute-capability
+[§5.12]: https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect
+[§7.1]: https://agent-auth-protocol.com/specification/v1.0-draft#71-device-authorization-rfc-8628
+[§7.2]: https://agent-auth-protocol.com/specification/v1.0-draft#72-object-object-client-initiated-backchannel-authentication
+[Keycloak Organizations]: https://www.keycloak.org/docs/latest/server_admin/index.html#_managing_organizations
