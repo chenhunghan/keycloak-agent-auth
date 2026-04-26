@@ -184,17 +184,17 @@ Each capability record carries:
 
 ### Multi-tenant scoping
 
-`organization_id` and `required_role` compose into one entitlement gate: a caller passes when both `(cap.organization_id IS NULL OR caller ∈ cap's org)` and `(cap.required_role IS NULL OR caller has cap.required_role)` hold. Public-visibility caps bypass the gate (anonymous callers have nothing to match against).
+The AAP spec doesn't define multi-tenancy. Plugging Keycloak Organizations into the capability registry gives you tenant-isolated agent auth without writing a parallel ACL. Each capability carries `organization_id` (the tenant boundary) and `required_role` (a finer authorization gate); both are enforced at discovery, approval, and introspection. Grants revoke automatically when a user leaves an org (`reason=org_membership_removed`).
 
-The gate runs at three points:
+By caller:
 
-- **Discovery** — `/capability/list` and `/capability/describe` filter caps the caller can't see.
-- **Approval** — `/verify/approve` flips grants whose cap fails the approver's entitlement to `denied(insufficient_authority)`; passing grants go `active`.
-- **Introspection** — `/agent/introspect` strips grants whose cap the agent's user no longer entitles (the lazy half of the cascade).
+- **Realm admin** (`manage-realm`) registers realm-wide capabilities (visible to every authenticated user) and pre-registers hosts. Realm-admin overrides the org-membership check, so it can also call any org-admin endpoint.
+- **Org admin** (`manage-organization` + member of the target org) manages capabilities, hosts, and agent-environment clients scoped to its own org. The `organization_id` is path-derived; the body can't override it. Cross-org calls return 403 (caller not a member of the path's org) or 404 (named capability lives in another org).
+- **Org user** (any member of an org) sees and can be granted that org's capabilities plus any realm-wide ones. Leaving the org revokes their grants there immediately.
 
-The eager half: `OrganizationModel.OrganizationMemberLeaveEvent` triggers immediate revocation of a leaving user's grants whose cap belongs to that org, with `reason=org_membership_removed`.
+`required_role` and `organization_id` are orthogonal: a capability with both set requires both. Public-visibility capabilities bypass both gates.
 
-The Keycloak Organizations feature is required for org-scoped caps end-to-end. Without it, caps with `organization_id IS NULL` continue to work; caps with a set `organization_id` become invisible (fail-safe — no leakage when the feature isn't enabled).
+> **Without Keycloak Organizations enabled on the realm**, capabilities with `organization_id IS NULL` continue to work as realm-wide caps; capabilities with a set `organization_id` become invisible (fail-safe — no leakage). Org-admin endpoints return `501 organizations_feature_disabled`. `required_role` continues to work as a single-tenant authorization gate.
 
 ### Constraints
 
