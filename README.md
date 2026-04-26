@@ -101,7 +101,7 @@ Base: `/admin/realms/{realm}/agent-auth/`
 | POST   | `agents/{id}/capabilities/{capability}/approve` | Approve a pending capability grant |
 | POST   | `agents/{id}/expire` | Force-expire an active agent |
 | POST   | `agents/{id}/reject` | Reject a pending agent (terminal) |
-| POST   | `pending-agents/cleanup` | Manual GC sweep for stale pending agents (also runs hourly per JVM). Optional `?olderThanSeconds=` overrides the default threshold. |
+| POST   | `pending-agents/cleanup` | Manual GC sweep for stale pending agents and the orphan pending hosts left behind by abandoned dynamic registrations. Also runs hourly per JVM. Optional `?olderThanSeconds=` overrides the default threshold. Returns `{removed, removed_agents, removed_hosts, threshold_seconds}` (`removed` is the sum). |
 
 #### Org admin (`manage-organization` + member of the target org)
 
