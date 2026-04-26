@@ -225,6 +225,8 @@ class AgentAuthErrorResponseIT extends BaseKeycloakIT {
         .extract()
         .path("agent_id");
 
+    // The cap is unknown so cap-not-found fires before the aud check; aud value here is
+    // immaterial. Keep it set to default_location for shape parity with §4.3.
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
         issuerUrl() + "/capability/execute");
 

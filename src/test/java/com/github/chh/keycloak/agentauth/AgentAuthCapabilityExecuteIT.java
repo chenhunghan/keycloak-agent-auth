@@ -96,6 +96,21 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   // Latch held open while the long-stream SSE handler is blocked; count down to release it.
   private static final java.util.concurrent.CountDownLatch longStreamRelease = new java.util.concurrent.CountDownLatch(
       1);
+  /**
+   * §4.3 resolved location URL per registered capability — populated by
+   * {@link #registerCapability(String, String, String)} so tests can mint agent+jwts with
+   * {@code aud} set to the cap's actual {@code location}.
+   */
+  private static final Map<String, String> capLocations = new java.util.HashMap<>();
+
+  /** Per-cap §4.3 resolved location URL (or {@code default_location} when the cap has none). */
+  private static String capLocation(String name) {
+    String loc = capLocations.get(name);
+    if (loc == null) {
+      throw new IllegalStateException("Unknown capability: " + name);
+    }
+    return loc;
+  }
 
   @BeforeAll
   static void setUp() throws IOException {
@@ -383,6 +398,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .post("/capabilities")
         .then()
         .statusCode(201);
+    capLocations.put(name, location);
   }
 
   private static void handleJson(
@@ -417,7 +433,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeGrantedCapabilityProxiesSyncResponse() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -485,6 +501,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("active"));
 
+    // §4.3: cap was registered without `location`, so resolved URL = default_location.
     String executeJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
         issuerUrl() + "/capability/execute");
     given()
@@ -516,7 +533,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeGatewayForwardsCapabilityAndArguments() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -553,7 +570,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeGrantedCapabilityCanReturnAsyncPendingResponse() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(asyncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -619,7 +636,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeWithoutGrantReturns403AndDoesNotForward() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(ungrantedCapability));
     int syncCallsBefore = syncExecutions.get();
 
     given()
@@ -658,7 +675,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeConstraintViolationReturns403AndDoesNotForward() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(limitedCapability));
     int limitedCallsBefore = limitedExecutions.get();
 
     given()
@@ -698,7 +715,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeMissingCapabilityFieldReturns400() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -734,7 +751,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeWithExpiredAgentJwtReturns401() {
     String expiredJwt = TestJwts.expiredAgentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -809,7 +826,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .body("status", equalTo("revoked"));
 
     String agentJwt = TestJwts.agentJwt(hostKey2, agentKey2, revokedAgentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -844,7 +861,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeGrantedCapabilityProxiesStreamResponse() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(streamCapability));
     int callsBefore = streamExecutions.get();
 
     given()
@@ -884,7 +901,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeMinConstraintViolationReturns403AndDoesNotForward() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(minConstrainedCapability));
     int callsBefore = minConstrainedExecutions.get();
 
     given()
@@ -926,7 +943,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeInConstraintViolationReturns403AndDoesNotForward() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(inConstrainedCapability));
     int callsBefore = inConstrainedExecutions.get();
 
     given()
@@ -968,7 +985,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeNotInConstraintViolationReturns403AndDoesNotForward() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(notInConstrainedCapability));
     int callsBefore = notInConstrainedExecutions.get();
 
     given()
@@ -1010,7 +1027,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeExactConstraintViolationReturns403AndDoesNotForward() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(exactConstrainedCapability));
     int callsBefore = exactConstrainedExecutions.get();
 
     given()
@@ -1048,7 +1065,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeExactConstraintPassesWhenMatched() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(exactConstrainedCapability));
     int callsBefore = exactConstrainedExecutions.get();
 
     given()
@@ -1089,7 +1106,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeCombinedConstraintBelowMinReturns403() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(combinedConstrainedCapability));
     int callsBefore = combinedConstrainedExecutions.get();
 
     given()
@@ -1129,7 +1146,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeCombinedConstraintAboveMaxReturns403() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(combinedConstrainedCapability));
     int callsBefore = combinedConstrainedExecutions.get();
 
     given()
@@ -1169,7 +1186,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeUnregisteredCapabilityReturns404() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -1239,7 +1256,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .statusCode(200);
 
     String agentJwt = TestJwts.agentJwt(hostKey2, agentKey2, expiredAgentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -1321,7 +1338,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .path("agent_id");
 
     String agentJwt = TestJwts.agentJwt(pendingHostKey, pendingAgentKey, pendingAgentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -1389,7 +1406,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeMaxConstraintPassesWhenUnderLimit() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(limitedCapability));
     int callsBefore = limitedExecutions.get();
 
     given()
@@ -1428,7 +1445,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeMinConstraintPassesWhenAboveLimit() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(minConstrainedCapability));
     int callsBefore = minConstrainedExecutions.get();
 
     given()
@@ -1467,7 +1484,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeInConstraintPassesWhenValueInList() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(inConstrainedCapability));
     int callsBefore = inConstrainedExecutions.get();
 
     given()
@@ -1505,7 +1522,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeNotInConstraintPassesWhenValueNotInList() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(notInConstrainedCapability));
     int callsBefore = notInConstrainedExecutions.get();
 
     given()
@@ -1543,7 +1560,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeCombinedConstraintPassesWhenInRange() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(combinedConstrainedCapability));
     int callsBefore = combinedConstrainedExecutions.get();
 
     given()
@@ -1582,7 +1599,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void constraintViolationResponseIncludesViolationsArray() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(limitedCapability));
 
     given()
         .baseUri(issuerUrl())
@@ -1620,7 +1637,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void malformedCapabilityFieldReturns400() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     // Empty string capability name
     given()
@@ -1641,7 +1658,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .body("message", notNullValue());
 
     String secondAgentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(syncCapability));
 
     // Whitespace-only capability name
     given()
@@ -1703,7 +1720,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeWithCapabilityOutsideJwtScopeReturns403() {
     String scopedJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute", Map.of("capabilities", List.of(limitedCapability)));
+        capLocation(limitedCapability), Map.of("capabilities", List.of(limitedCapability)));
     int callsBefore = syncExecutions.get();
 
     given()
@@ -1738,7 +1755,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void asyncPollingReturnsCompletedStatus() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(asyncCompletedCapability));
 
     String statusUrl = given()
         .baseUri(issuerUrl())
@@ -1781,7 +1798,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void asyncPollingReturnsFailedStatus() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(asyncFailedCapability));
 
     String statusUrl = given()
         .baseUri(issuerUrl())
@@ -1846,7 +1863,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .path("agent_id");
 
     String agentJwt = TestJwts.agentJwt(streamHostKey, streamAgentKey, streamAgentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(longStreamCapability));
 
     // Start SSE request in background thread — the upstream handler blocks on longStreamRelease
     java.util.concurrent.atomic.AtomicInteger responseStatus = new java.util.concurrent.atomic.AtomicInteger(
@@ -1976,7 +1993,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeWithMissingArgumentForConstrainedField() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(limitedCapability));
     int callsBefore = limitedExecutions.get();
 
     // limitedCapability has constraint: amount max 1000. Omitting the constrained field cannot
@@ -2014,7 +2031,7 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   @Test
   void executeWithTypeMismatchOnConstrainedField() {
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
+        capLocation(limitedCapability));
 
     // limitedCapability has constraint: amount max 1000. A string cannot satisfy a numeric max
     // constraint, so the server must reject before forwarding upstream.

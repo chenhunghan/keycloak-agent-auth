@@ -2439,14 +2439,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
-      String executeUrl = issuerUrl() + "/capability/execute";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(executeUrl)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience"))
-            .build();
-      }
-
       String status = (String) agentData.get("status");
       if ("revoked".equals(status)) {
         return Response.status(403)
@@ -2542,6 +2534,22 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.status(403)
             .entity(Map.of("error", "capability_not_granted",
                 "message", "Agent does not hold an active grant for this capability"))
+            .build();
+      }
+
+      // §4.3: agent+jwt aud MUST be the resolved location URL — `cap.location` if set, else
+      // `default_location` (which our discovery advertises as `<issuer>/capability/execute`).
+      // The gateway accepts the token because the resolved URL identifies the cap as the
+      // intended recipient; we proxy on its behalf, but the aud belongs to the cap.
+      String defaultLocation = issuerUrl() + "/capability/execute";
+      String capLocation = (String) registeredCap.get("location");
+      String resolvedLocation = (capLocation != null && !capLocation.isBlank())
+          ? capLocation
+          : defaultLocation;
+      List<String> aud = jwt.getJWTClaimsSet().getAudience();
+      if (aud == null || !aud.contains(resolvedLocation)) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience"))
             .build();
       }
 
