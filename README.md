@@ -146,6 +146,13 @@ The spec defines five actors; this extension implements one (Server). The others
 | **Resource server** (§1.5, §2.15) | Hosts a capability's business logic at `capability.location`. Validates agent JWTs locally or via `/agent/introspect`. | Yours — any language. |
 | **User** (implicit) | Human who approves delegated registrations and grants. | A Keycloak realm user. Hosts get bound to users via the admin link API or implicitly when the user approves a device-flow registration; CIBA emails the linked user a deep link to the approval page. |
 
+### Agent modes
+
+Each agent registers in one of two modes (per AAP §3):
+
+- **Delegated** — agent acts on behalf of a user who approves its grants.
+- **Autonomous** — agent operates without a user in the loop. Typically backed by a service-account host (see the Org-admin endpoints' `agent-environments` provisioning).
+
 For the full sequence walkthrough, internals diagram, and per-concept source mapping, see [docs/architecture.md](docs/architecture.md).
 
 ## Capabilities
@@ -220,6 +227,8 @@ A grant auto-approves when the entitlement gate passes AND (`!requires_approval`
 
 Hosts and agents use Ed25519 keypairs. Registration provides keys either inline as a public JWK (`host_public_key`, `agent_public_key`) or by reference with a JWKS URL (`host_jwks_url`, `agent_jwks_url`). Inline and JWKS URL are mutually exclusive per identity, and `agent_kid` is required when `agent_jwks_url` is used.
 
+JWTs are EdDSA-signed (RFC 8037). `host+jwt` audiences the issuer URL. `agent+jwt` audiences the resolved capability location (`capability.location` if set, else `default_location`) when calling for execution, and the issuer URL for non-execution calls to the auth server, per §4.3.
+
 JWKS-based identities are cached in-process for 5 minutes. A `kid` miss triggers one refetch per URL, rate-limited to once per 10 seconds. JWKS fetches require HTTPS, except for localhost and container-test hostnames used by local development and integration tests — intentionally stricter than the spec's URL-fetching guidance.
 
 Inline-key identities rotate through the explicit endpoints (`/agent/rotate-key`, `/host/rotate-key`); JWKS-based identities rotate by publishing the new key at the JWKS URL.
@@ -234,19 +243,8 @@ This extension does not sign protocol responses, so discovery does not publish a
 | Discovery | `/realms/{realm}/.well-known/agent-configuration` via `WellKnownProvider` SPI | Follows Keycloak's OpenID discovery pattern. |
 | Crypto | Nimbus JOSE+JWT for Ed25519 | Already on Keycloak's classpath, well-audited. |
 | Storage | JPA entities + Liquibase changelog via `JpaEntityProvider` SPI; writes land in Keycloak's main persistence unit (H2 in dev, any RDBMS Keycloak supports in prod). Selected by default through the `agent-auth-storage` SPI; set `kc.spi.agent-auth-storage.provider=in-memory` to switch back to the process-local map for tests. | Survives Keycloak restarts and scales across replicas. Indexed `ORGANIZATION_ID` and `REQUIRED_ROLE` make multi-tenant filtering and cascades SQL-efficient. The `AGENT_AUTH_AGENT_GRANT` table is a sync-on-write secondary index over per-agent grants used by the eager cascade. |
-| Approval flows | Device-authorization (§7.1), CIBA push (§7.2 — email + in-realm `/inbox` fallback), and admin-mediated HTTP approval | Device flow reuses the realm's user authentication for the `user_code` step; CIBA emails the linked user a deep link to `/verify/approve`; the admin path covers headless setups. |
+| Approval flows | `device_authorization` (§7.1), `ciba` (§7.2 — email + in-realm `/inbox` fallback), and `admin` (server-defined extension per §5.1) | Device flow reuses the realm's user authentication for the `user_code` step; CIBA emails the linked user a deep link to `/verify/approve`; the admin path covers headless setups. |
 | Capabilities | Centralized in Keycloak, optionally org-scoped | Single source of truth; resource servers just execute. Multi-tenancy via Keycloak Organizations + realm roles. |
-
-## Protocol reference
-
-This extension implements [Agent Auth Protocol v1.0-draft](https://agent-auth-protocol.com/specification).
-
-- **Host** — persistent identity of the client environment (Ed25519 keypair).
-- **Agent** — per-task identity scoped to a conversation, with its own keypair, lifecycle, and grants.
-- **`host+jwt` / `agent+jwt`** — short-lived Ed25519-signed JWTs (EdDSA, RFC 8037). `host+jwt` audiences the issuer URL. `agent+jwt` audiences the resolved capability location (`capability.location` if set, else `default_location`) when calling for execution, and the issuer URL for non-execution calls to the auth server, per §4.3.
-- **Delegated mode** — agent acts on behalf of a user who approves grants.
-- **Autonomous mode** — agent operates without a user in the loop (typically backed by a service-account host).
-- **Approval methods advertised in discovery** — `device_authorization`, `ciba` (both core spec methods), plus `admin` (server-defined per §5.1's "additional custom methods" allowance).
 
 ## Development
 
