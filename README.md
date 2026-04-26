@@ -11,7 +11,7 @@ Keycloak already provides what Agent Auth needs: realms, users, sessions, tokens
 
 ## Architecture
 
-**Hybrid model** — Keycloak handles auth; the resource server handles capability execution.
+Keycloak handles authorization; the resource server handles capability execution.
 
 ```mermaid
 flowchart LR
@@ -124,14 +124,14 @@ Base: `/admin/realms/{realm}/agent-auth/`. `organization_id` is derived from the
 
 ### What the resource server does
 
-The resource server hosts each capability's business logic at the URL stored in `capability.location`. It can be written in any language. For each request it should verify the JWT `aud` matches its own capability URL, call Keycloak's `POST /agent/introspect` with `{"token":"..."}` (or `{"token":"...","capability":"...","arguments":{...}}` to run constraint checks server-side), and reject when `active` is `false` or `violations` is present and non-empty. Resource servers that don't want to implement introspection can use **gateway** mode instead and let Keycloak proxy.
+The resource server hosts each capability's business logic at `capability.location`. Any language works. In **gateway** mode it just receives the proxied call — Keycloak has already validated the JWT and run constraint checks. In **direct** mode the resource server validates the JWT itself; see [Execution modes](#execution-modes) below.
 
 ### Execution modes
 
 The agent picks per call:
 
-- **Gateway** — `POST /capability/execute` to Keycloak with `{capability, arguments}`. Keycloak introspects the agent JWT, runs constraint checks, and proxies to `capability.location`. The resource server doesn't need to introspect. Synchronous, async-pending (`202 + status_url`), and SSE streaming responses are all proxied.
-- **Direct** — `POST` straight to `capability.location` with the agent JWT in `Authorization`. The resource server calls `/agent/introspect` itself. Useful when the resource server already runs its own auth or wants to avoid an extra hop.
+- **Gateway** — `POST /capability/execute` to Keycloak with `{capability, arguments}`. Keycloak validates the JWT, runs constraint checks, and proxies to `capability.location`. Synchronous, async-pending (`202 + status_url`), and SSE responses all pass through.
+- **Direct** — agent `POST`s straight to `capability.location` with the agent JWT in `Authorization`. The resource server verifies the JWT `aud`, calls `POST /agent/introspect` (optionally with `{capability, arguments}` for server-side constraint checks), and rejects when `active` is `false` or `violations` is present and non-empty. Useful when the resource server wants to avoid an extra hop or already has its own auth plumbing.
 
 ### Protocol actors
 
