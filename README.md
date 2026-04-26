@@ -27,9 +27,10 @@ flowchart LR
     RS -.->|introspect| KC
 ```
 
-The **Client** is the process that holds the host keypair, signs JWTs, and speaks the agent-auth protocol — your CLI, SDK, or background worker. The **Agent** is the AI reasoning loop running inside the Client; it requests capabilities through tool calls (MCP, SDK functions) and never talks to Keycloak directly.
+- **Client** — the process holding the host keypair and signing JWTs. Your CLI, SDK, or background worker.
+- **Agent** — the AI loop inside the Client. Requests capabilities through tool calls (MCP, SDK functions); never talks to Keycloak directly.
 
-Solid edges always happen; dashed edges are mode-specific. Host-scoped calls (register, status, revoke, rotate-key) carry a `host+jwt`; agent-scoped calls (execute, introspect) carry an `agent+jwt`. Per-endpoint paths and auth are below; the end-to-end sequence diagram lives in [docs/architecture.md](docs/architecture.md).
+Solid edges happen on every call; dashed edges are mode-specific (gateway vs direct). Host-scoped calls (register, status, revoke, rotate-key) carry a `host+jwt`; agent-scoped calls (execute, introspect) carry an `agent+jwt`. The full sequence walkthrough lives in [docs/architecture.md](docs/architecture.md).
 
 ### Endpoints
 
