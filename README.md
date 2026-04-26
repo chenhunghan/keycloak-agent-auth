@@ -4,7 +4,10 @@ A Keycloak extension implementing the [Agent Auth Protocol v1.0-draft](https://a
 
 ## Why Keycloak?
 
-Keycloak already runs the things Agent Auth needs: realms, users, sessions, tokens, audit events, and an admin API. This extension layers agent-auth concepts (hosts, agents, capability grants) on top, reusing Keycloak's user identity, approval UX, and event log instead of building parallel machinery. Approval flows (device-authorization §7.1, CIBA push §7.2) ride on Keycloak user sessions; multi-tenant capability registries ride on Keycloak Organizations and realm roles, with org-leave events triggering grant revocation.
+Keycloak already provides what Agent Auth needs: realms, users, sessions, tokens, audit events, and an admin API. This extension adds the agent-auth concepts on top — hosts, agents, capability grants — and reuses Keycloak primitives where it can:
+
+- **Approval flows** reuse Keycloak user sessions: device-authorization (§7.1) and CIBA push (§7.2).
+- **Multi-tenant capability registries** reuse Keycloak Organizations and realm roles. Grants revoke automatically when a user leaves an org.
 
 ## Architecture
 
