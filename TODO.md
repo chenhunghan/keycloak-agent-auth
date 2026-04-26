@@ -14,17 +14,16 @@ Living list of things we want to come back to. Each item carries enough context 
 
 ## §5.2 capability listing — spec gaps
 
-- [ ] **Reconcile the §5.2 host-defaults filter with Phase 1's user-
-  entitlement gate.** The current §5.2 filter narrows the
-  authenticated-visibility view for verified host JWTs from linked
-  hosts to those caps in `host.default_capability_grants` — a host-
-  scoped pre-approval. Phase 1 of the multi-tenant authz plan below
-  adds a user-entitlement gate (`org_id` + `required_role`) that
-  filters by the spec's "capabilities available to the host's linked
-  user" wording. After Phase 1 ships, decide whether to keep the
-  host-defaults filter as additional narrowing (defensible: "what this
-  host has pre-approved") or remove it (the user-entitlement gate is
-  the spec-aligned answer). Either is defensible; pick one and document.
+- [x] **Reconcile the §5.2 host-defaults filter with Phase 1's user-
+  entitlement gate.** Resolved 2026-04-26: removed the host-defaults
+  filter from `/capability/list`. The listing view is now gated solely
+  by the Phase 1 user-entitlement check (`org_id` + `required_role` on
+  cap vs the linked user's KC org/roles), which is the spec-aligned
+  reading of §5.2's "capabilities available to the host's linked user."
+  `host.default_capability_grants` is preserved for the reactivation
+  flow (`buildReactivationGrants`) — it stays a meaningful host-scoped
+  concept, just not a list-time narrowing. The two-layer model was
+  confusing for API consumers and the spec wording leans single-layer.
 
 ## Multi-tenant AAP ↔ Keycloak authorization integration
 

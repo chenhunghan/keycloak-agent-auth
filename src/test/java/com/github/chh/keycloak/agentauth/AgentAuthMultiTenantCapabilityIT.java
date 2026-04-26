@@ -25,8 +25,10 @@ import org.junit.jupiter.api.Test;
  * to all authenticated users.
  *
  * <p>
- * Tests use {@code agent+jwt} rather than {@code host+jwt} to bypass the §5.2 host-defaults filter
- * (which narrows the host's view to its registered defaults) and isolate the new gate.
+ * Tests use {@code agent+jwt} rather than {@code host+jwt} for principal-resolution clarity (the
+ * caller is unambiguously the agent's owning user). The §5.2 host-defaults listing filter was
+ * removed during the post-Phase-1 reconciliation, so host+jwt would also work here — agent+jwt just
+ * keeps the "isolate the new gate" framing one step removed from host pre-approval state.
  *
  * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#52-list-capabilities">§5.2
  *      List Capabilities — host-JWT mode "capabilities available to the host's linked user"</a>

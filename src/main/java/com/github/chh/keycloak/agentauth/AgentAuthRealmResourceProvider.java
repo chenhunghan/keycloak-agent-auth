@@ -1735,30 +1735,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     // are invisible — matches the "no entitlements" case).
     UserEntitlement entitlement = loadUserEntitlement(effectiveUserId);
 
-    // §5.2: when the caller is a verified host with a linked user and
-    // pre-approved default grants, scope the authenticated-visibility view to
-    // that pre-approval list. Hosts without a linked user, or without any
-    // defaults, keep the broader authenticated view (until reconciled per the
-    // §5.2 follow-up TODO entry, post-Phase-1).
-    Set<String> hostDefaultCapNames = null;
-    if (verifiedHostData != null && verifiedHostData.get("user_id") != null) {
-      Object rawDefaults = verifiedHostData.get("default_capability_grants");
-      if (rawDefaults instanceof List<?> list && !list.isEmpty()) {
-        Set<String> names = new LinkedHashSet<>();
-        for (Object item : list) {
-          if (item instanceof Map<?, ?> grant) {
-            Object capName = grant.get("capability");
-            if (capName instanceof String capStr) {
-              names.add(capStr);
-            }
-          }
-        }
-        if (!names.isEmpty()) {
-          hostDefaultCapNames = names;
-        }
-      }
-    }
-
+    // §5.2 reconciliation: the listing view is gated solely by the user-entitlement check
+    // (Phase 1) — the host's `default_capability_grants` are NOT used as an additional filter
+    // here. The defaults are still a meaningful host-scoped concept used by the reactivation
+    // flow (`buildReactivationGrants`), but applying them as a list-time narrowing produced a
+    // confusing two-layer model: caps were filtered by both "what the user can have" AND "what
+    // this host has done before." The spec's §5.2 wording — "capabilities available to the
+    // host's linked user" — is the user-entitlement reading; that's what we surface.
     List<Map<String, Object>> visibleCapabilities = new ArrayList<>();
     for (Map<String, Object> cap : capabilities) {
       String visibility = (String) cap.get("visibility");
@@ -1770,10 +1753,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         continue;
       }
       if (!userEntitlementAllows(cap, entitlement)) {
-        continue;
-      }
-      if (hostDefaultCapNames != null
-          && !hostDefaultCapNames.contains(String.valueOf(cap.get("name")))) {
         continue;
       }
       visibleCapabilities.add(cap);

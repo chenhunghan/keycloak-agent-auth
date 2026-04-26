@@ -638,20 +638,21 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
   }
 
   /**
-   * Verifies §5.2 host-linked-user filtering: when a host+jwt comes from a host whose {@code
-   * user_id} is set and whose {@code default_capability_grants} pre-approve a specific subset of
-   * authenticated-visibility capabilities, the response must include only those caps (plus all
-   * public caps), excluding other authenticated-visibility caps in the registry.
+   * §5.2 reconciliation: the listing view for a verified host+jwt is gated by the linked user's
+   * entitlement (Phase 1), not by the host's {@code default_capability_grants}. A linked host sees
+   * every authenticated-visibility cap its user is entitled to — regardless of which subset was
+   * pre-approved as defaults at registration time. The defaults are still a meaningful host-scoped
+   * concept used by the reactivation flow; they're just not a list-time filter anymore.
    *
    * <p>
-   * This is the layer-1 narrowing toward the spec's "capabilities available to the host's linked
-   * user" wording — implemented as host-pre-approval filtering until full user-entitlement gating
-   * (authz Q3 in TODO.md) lands.
+   * Pre-2026-04-26 the same scenario asserted the response excluded {@code extraAuthCap} (the cap
+   * not in host defaults). The reconciliation flips that to "included" — no entitlement gates apply
+   * to either cap in this test, so both must be visible.
    */
   @Test
-  void listCapabilitiesWithLinkedHostJwtFiltersByHostDefaults() {
+  void listCapabilitiesWithLinkedHostJwtIsGatedByUserEntitlementNotHostDefaults() {
     String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-    String extraAuthCap = "extra_filter_target_" + suffix;
+    String extraAuthCap = "extra_listing_visible_" + suffix;
     registerCapability(extraAuthCap, "Extra auth cap not in host defaults", "authenticated", false);
 
     OctetKeyPair freshHostKey = TestKeys.generateEd25519();
@@ -663,11 +664,11 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .contentType(ContentType.JSON)
         .body(String.format("""
             {
-              "name": "Filter Test Agent",
-              "host_name": "filter-host",
+              "name": "Listing Test Agent",
+              "host_name": "listing-host",
               "capabilities": ["%s"],
               "mode": "delegated",
-              "reason": "B-filter test"
+              "reason": "post-Phase-1 listing test"
             }
             """, authenticatedCapability))
         .when()
@@ -676,7 +677,7 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .statusCode(200);
 
     String hostId = TestKeys.thumbprint(freshHostKey);
-    String userId = createTestUser("filter-test-user-" + suffix);
+    String userId = createTestUser("listing-test-user-" + suffix);
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -695,8 +696,8 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .get("/capability/list")
         .then()
         .statusCode(200)
-        .body("capabilities.name", hasItems(publicCapability, authenticatedCapability))
-        .body("capabilities.name", org.hamcrest.Matchers.not(hasItem(extraAuthCap)));
+        .body("capabilities.name",
+            hasItems(publicCapability, authenticatedCapability, extraAuthCap));
   }
 
   private static String createTestUser(String username) {
