@@ -110,6 +110,199 @@ class AgentAuthPendingCleanupIT extends BaseKeycloakIT {
         .body("status", org.hamcrest.Matchers.equalTo("active"));
   }
 
+  @Test
+  void cleanup_alsoReapsOrphanedPendingHosts() {
+    // §2.8 dynamic registration creates a pending host AND a pending agent. After the agent
+    // is swept, the host has zero remaining agents and qualifies as orphan-pending. The
+    // existing /pending-agents/cleanup endpoint reaps both in the same transaction.
+    String cap = registerApprovalCap("orphan_host_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    // Note: NO preRegisterHost call here — we want the §2.8 dynamic-registration path so the
+    // host comes up in pending state.
+    String hostId = TestKeys.thumbprint(hostKey);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "orphan-host agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, cap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200);
+
+    // Confirm the pending host is in storage before the sweep.
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/hosts/" + hostId)
+        .then()
+        .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("pending"));
+
+    Response resp = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("olderThanSeconds", 0)
+        .when()
+        .post("/pending-agents/cleanup");
+    resp.then().statusCode(200);
+    assertThat(resp.jsonPath().getInt("removed_agents")).isGreaterThanOrEqualTo(1);
+    assertThat(resp.jsonPath().getInt("removed_hosts")).isGreaterThanOrEqualTo(1);
+
+    // Host must be gone now.
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/hosts/" + hostId)
+        .then()
+        .statusCode(404);
+  }
+
+  @Test
+  void cleanup_keepsActiveHostsUnderlyingPendingAgents() {
+    // Pre-registered host is created in `active` state (§2.8 path #2), not pending. Even when
+    // its only agent is a pending one and gets swept, the active host stays — only PENDING
+    // hosts qualify for the orphan reap.
+    String cap = registerApprovalCap("active_host_keep_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String hostId = TestKeys.thumbprint(hostKey);
+    preRegisterHost(hostKey);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "active-host pending agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, cap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200);
+
+    Response resp = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("olderThanSeconds", 0)
+        .when()
+        .post("/pending-agents/cleanup");
+    resp.then().statusCode(200);
+    assertThat(resp.jsonPath().getInt("removed_hosts"))
+        .as("active hosts must never be reaped").isZero();
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/hosts/" + hostId)
+        .then()
+        .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("active"));
+  }
+
+  @Test
+  void cleanup_keepsYoungPendingHostsAndAgents() {
+    // Tight threshold (1h) leaves freshly-registered pending state intact — neither the agent
+    // nor the host is older than the cutoff.
+    String cap = registerApprovalCap("young_host_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String hostId = TestKeys.thumbprint(hostKey);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "young pending agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, cap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200);
+
+    Response resp = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("olderThanSeconds", 3600)
+        .when()
+        .post("/pending-agents/cleanup");
+    resp.then().statusCode(200);
+    assertThat(resp.jsonPath().getInt("removed_agents")).isZero();
+    assertThat(resp.jsonPath().getInt("removed_hosts")).isZero();
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/hosts/" + hostId)
+        .then()
+        .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("pending"));
+  }
+
+  @Test
+  void cleanup_isIdempotentOnSecondCall() {
+    // Second sweep with nothing left to do returns zero counts and no failure.
+    String cap = registerApprovalCap("idempotent_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "idempotent agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, cap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("olderThanSeconds", 0)
+        .when()
+        .post("/pending-agents/cleanup")
+        .then()
+        .statusCode(200);
+
+    Response second = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("olderThanSeconds", 0)
+        .when()
+        .post("/pending-agents/cleanup");
+    second.then().statusCode(200);
+    assertThat(second.jsonPath().getInt("removed_agents")).isZero();
+    assertThat(second.jsonPath().getInt("removed_hosts")).isZero();
+  }
+
   // --- helpers ---
 
   private static String suffix() {

@@ -495,8 +495,21 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
         ? PendingAgentCleanup.DEFAULT_THRESHOLD_SECONDS
         : Math.max(0L, olderThanSeconds);
     long thresholdMs = System.currentTimeMillis() - (thresholdSec * 1000L);
-    int removed = storage().deletePendingAgentsOlderThan(thresholdMs);
-    return Response.ok(Map.of("removed", removed, "threshold_seconds", thresholdSec)).build();
+    AgentAuthStorage storage = storage();
+    int removedAgents = storage.deletePendingAgentsOlderThan(thresholdMs);
+    // Cascade: pending hosts whose only agents we just deleted (or that were already orphaned)
+    // are reaped in the same transaction. Spec doesn't mandate this — §7.1 cleanup is
+    // agent-only — but pending hosts otherwise accumulate from abandoned dynamic
+    // registrations. The "no remaining agents" filter inside the storage method preserves the
+    // user's retry window: a still-young pending agent under a pending host keeps the host
+    // alive.
+    int removedHosts = storage.deleteOrphanedPendingHostsOlderThan(thresholdMs);
+    return Response.ok(Map.of(
+        "removed", removedAgents + removedHosts,
+        "removed_agents", removedAgents,
+        "removed_hosts", removedHosts,
+        "threshold_seconds", thresholdSec))
+        .build();
   }
 
   /**

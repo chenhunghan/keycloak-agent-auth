@@ -171,6 +171,40 @@ public class InMemoryStorage implements AgentAuthStorage {
   }
 
   @Override
+  public int deleteOrphanedPendingHostsOlderThan(long thresholdEpochMs) {
+    int removed = 0;
+    var iterator = HOSTS.entrySet().iterator();
+    while (iterator.hasNext()) {
+      var entry = iterator.next();
+      String hostId = entry.getKey();
+      Map<String, Object> host = entry.getValue();
+      if (!"pending".equals(host.get("status"))) {
+        continue;
+      }
+      Object createdAt = host.get("created_at");
+      if (!(createdAt instanceof String iso)) {
+        continue;
+      }
+      try {
+        long epochMs = java.time.Instant.parse(iso).toEpochMilli();
+        if (epochMs >= thresholdEpochMs) {
+          continue;
+        }
+      } catch (java.time.format.DateTimeParseException ignored) {
+        continue;
+      }
+      boolean stillReferenced = AGENTS.values().stream()
+          .anyMatch(agent -> hostId.equals(agent.get("host_id")));
+      if (stillReferenced) {
+        continue;
+      }
+      iterator.remove();
+      removed++;
+    }
+    return removed;
+  }
+
+  @Override
   public Map<String, Object> getCapability(String name) {
     return CAPABILITIES.get(name);
   }

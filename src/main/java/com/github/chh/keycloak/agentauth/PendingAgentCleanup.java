@@ -77,7 +77,8 @@ public final class PendingAgentCleanup {
 
   private static int sweepRealm(KeycloakSessionFactory factory, String realmName,
       long thresholdMs) {
-    int[] removed = {0};
+    int[] removedAgents = {0};
+    int[] removedHosts = {0};
     KeycloakModelUtils.runJobInTransaction(factory, (KeycloakSession session) -> {
       RealmModel realm = session.realms().getRealmByName(realmName);
       if (realm == null) {
@@ -96,12 +97,17 @@ public final class PendingAgentCleanup {
       if (storage == null) {
         return;
       }
-      removed[0] = storage.deletePendingAgentsOlderThan(thresholdMs);
-      if (removed[0] > 0) {
-        LOG.log(Level.INFO, () -> "agent-auth: swept " + removed[0]
-            + " pending agent(s) in realm " + realmName);
+      removedAgents[0] = storage.deletePendingAgentsOlderThan(thresholdMs);
+      // Orphan host sweep runs in the same tx so the NOT EXISTS subquery sees the agent
+      // deletes that just landed. Hosts with still-young pending agents remain; hosts whose
+      // only agents were just swept become deletable.
+      removedHosts[0] = storage.deleteOrphanedPendingHostsOlderThan(thresholdMs);
+      if (removedAgents[0] > 0 || removedHosts[0] > 0) {
+        LOG.log(Level.INFO,
+            () -> "agent-auth: swept " + removedAgents[0] + " pending agent(s) and "
+                + removedHosts[0] + " orphan pending host(s) in realm " + realmName);
       }
     });
-    return removed[0];
+    return removedAgents[0] + removedHosts[0];
   }
 }

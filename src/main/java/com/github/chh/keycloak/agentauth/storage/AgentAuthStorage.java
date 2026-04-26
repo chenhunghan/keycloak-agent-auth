@@ -68,6 +68,24 @@ public interface AgentAuthStorage extends Provider {
   int deletePendingAgentsOlderThan(long thresholdEpochMs);
 
   /**
+   * Delete hosts whose {@code status} is {@code pending}, whose first-seen timestamp is older than
+   * {@code thresholdEpochMs}, AND whose dependent agents have all been removed already (zero rows
+   * in {@code AGENT_AUTH_AGENT.HOST_ID = host.id}). Returns the number of hosts removed.
+   *
+   * <p>
+   * Companion to {@link #deletePendingAgentsOlderThan(long)} — call this <em>after</em> the agent
+   * sweep so the orphan check sees the post-sweep state. The "no remaining agents" filter preserves
+   * dynamic-registration retry semantics: a pending host with a still-young pending agent under it
+   * is left alone for the user to approve.
+   *
+   * <p>
+   * The spec ({@code §2.11}) defines pending host state but does not mandate cleanup; this method
+   * is operationally analogous to §7.1's pending-agent cleanup and exists to bound storage growth
+   * from abandoned dynamic registrations.
+   */
+  int deleteOrphanedPendingHostsOlderThan(long thresholdEpochMs);
+
+  /**
    * Phase 3 of the multi-tenant authz plan: returns the {@code AGENT_AUTH_AGENT_GRANT} rows
    * mirroring this agent's {@code agent_capability_grants} blob array. Each map carries the
    * normalized grant fields ({@code agent_id}, {@code capability}, {@code status},

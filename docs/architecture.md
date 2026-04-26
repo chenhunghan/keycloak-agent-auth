@@ -57,7 +57,7 @@ Solid edges happen in every session; dashed edges are one of two execution-mode 
 - **execute (gateway)** — `POST /capability/execute` with `agent+jwt`; server validates, runs constraint checks, proxies to `<capability.location>`. Resource server never sees an agent+jwt.
 - **execute (direct)** — `POST <capability.location>` with `agent+jwt` straight from the client.
 - **introspect** — `POST /agent/introspect` server-to-server from the resource server; only used in direct mode.
-- **approval** — the approval method advertised in `/.well-known/agent-configuration`. Currently `device_authorization` and `admin`; `ciba` is on the roadmap.
+- **approval** — the approval method advertised in `/.well-known/agent-configuration`. Currently `device_authorization`, `ciba`, and `admin`.
 
 Gateway is the simpler integration (resource server doesn't implement any auth); direct gives the resource server ownership of the auth decision and saves one hop.
 

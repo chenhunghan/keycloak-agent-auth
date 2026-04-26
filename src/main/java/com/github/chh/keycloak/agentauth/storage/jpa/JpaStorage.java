@@ -135,6 +135,20 @@ public class JpaStorage implements AgentAuthStorage {
   }
 
   @Override
+  public int deleteOrphanedPendingHostsOlderThan(long thresholdEpochMs) {
+    // The NOT EXISTS subquery sees the agent table after the agent sweep has committed in the
+    // surrounding transaction (PendingAgentCleanup runs both deletes in the same JPA tx).
+    // Hosts whose only agent was just-deleted become orphan and qualify; hosts that still have
+    // a (younger) pending agent or any non-pending agent are left alone.
+    return em()
+        .createQuery("delete from HostEntity h where h.status = 'pending'"
+            + " and h.createdAt < :threshold"
+            + " and not exists (select 1 from AgentEntity a where a.hostId = h.id)")
+        .setParameter("threshold", thresholdEpochMs)
+        .executeUpdate();
+  }
+
+  @Override
   public Map<String, Object> findAgentByKeyAndHost(String agentKeyThumbprint, String hostId) {
     List<AgentEntity> rows = em()
         .createNamedQuery("AgentEntity.findByKeyAndHost", AgentEntity.class)
