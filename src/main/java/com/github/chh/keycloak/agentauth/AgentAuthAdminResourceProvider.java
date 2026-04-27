@@ -211,6 +211,100 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     return Response.ok(agentData).build();
   }
 
+  /**
+   * Test-only endpoint that backdates lifecycle-clock timestamps on an agent record without
+   * mutating its {@code status}. Lets integration tests simulate session/max/absolute lifetime
+   * elapsing so the lazy {@link LifecycleClock} evaluator (called from status/reactivate/execute/
+   * introspect) can be exercised without time-travel.
+   *
+   * <p>
+   * Body knobs (all optional):
+   *
+   * <ul>
+   * <li>{@code expires_at_offset_seconds} — set {@code expires_at} to {@code now + offset}; use a
+   * negative value to push it into the past.</li>
+   * <li>{@code created_at_offset_seconds} — replace {@code created_at} with {@code now + offset};
+   * use a negative value to backdate creation.</li>
+   * <li>{@code absolute_lifetime_seconds} — store the absolute-lifetime budget so the evaluator can
+   * compare it against {@code created_at}.</li>
+   * <li>{@code max_lifetime_seconds} — store the max-lifetime budget so the evaluator can compare
+   * it against {@code max_lifetime_reset_at}/{@code created_at}.</li>
+   * <li>{@code max_lifetime_reset_offset_seconds} — set {@code max_lifetime_reset_at} to
+   * {@code now + offset} (epoch millis).</li>
+   * </ul>
+   */
+  @POST
+  @Path("agents/{id}/backdate-clocks")
+  @Consumes(MediaType.WILDCARD)
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response backdateAgentClocks(@PathParam("id") String id, String rawBody) {
+    requireManageRealm();
+    Map<String, Object> requestBody = null;
+    if (rawBody != null && !rawBody.isBlank()) {
+      try {
+        requestBody = new com.fasterxml.jackson.databind.ObjectMapper()
+            .readValue(rawBody,
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+                });
+      } catch (Exception ignored) {
+        // ignore malformed body
+      }
+    }
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = storage.getAgent(id);
+    if (agentData == null) {
+      return Response.status(404).entity(Map.of("error", "not_found")).build();
+    }
+
+    if (requestBody != null) {
+      Long expiresAtOffset = readLong(requestBody, "expires_at_offset_seconds");
+      if (expiresAtOffset != null) {
+        agentData.put("expires_at", Instant.now().plusSeconds(expiresAtOffset).toString());
+      }
+      Long createdAtOffset = readLong(requestBody, "created_at_offset_seconds");
+      if (createdAtOffset != null) {
+        long backdated = System.currentTimeMillis() + createdAtOffset * 1000L;
+        // Both representations: keep the ISO string in lock-step for in-memory storage and for
+        // any caller that reads `created_at` directly, AND drop the JPA-only override so the
+        // storage layer mutates CREATED_AT on this write.
+        agentData.put("created_at", Instant.ofEpochMilli(backdated).toString());
+        agentData.put("created_at_override_epoch_millis", backdated);
+      }
+      Long absoluteLifetimeSeconds = readLong(requestBody, "absolute_lifetime_seconds");
+      if (absoluteLifetimeSeconds != null) {
+        agentData.put("absolute_lifetime_seconds", absoluteLifetimeSeconds);
+      }
+      Long maxLifetimeSeconds = readLong(requestBody, "max_lifetime_seconds");
+      if (maxLifetimeSeconds != null) {
+        agentData.put("max_lifetime_seconds", maxLifetimeSeconds);
+      }
+      Long maxResetOffset = readLong(requestBody, "max_lifetime_reset_offset_seconds");
+      if (maxResetOffset != null) {
+        agentData.put("max_lifetime_reset_at",
+            System.currentTimeMillis() + maxResetOffset * 1000L);
+      }
+    }
+
+    storage.putAgent(id, agentData);
+    emitAdminEvent("agent-auth/agent/" + id + "/backdate-clocks", OperationType.ACTION, agentData);
+    return Response.ok(agentData).build();
+  }
+
+  private static Long readLong(Map<String, Object> body, String key) {
+    Object value = body.get(key);
+    if (value instanceof Number n) {
+      return n.longValue();
+    }
+    if (value instanceof String s && !s.isBlank()) {
+      try {
+        return Long.parseLong(s.trim());
+      } catch (NumberFormatException ignored) {
+        return null;
+      }
+    }
+    return null;
+  }
+
   @POST
   @Path("agents/{id}/reject")
   @Consumes(MediaType.WILDCARD)

@@ -372,6 +372,12 @@ public class JpaStorage implements AgentAuthStorage {
     if (entity.getMaxLifetimeResetAt() != null) {
       map.put("max_lifetime_reset_at", entity.getMaxLifetimeResetAt());
     }
+    if (entity.getMaxLifetimeSeconds() != null) {
+      map.put("max_lifetime_seconds", entity.getMaxLifetimeSeconds());
+    }
+    if (entity.getAbsoluteLifetimeSeconds() != null) {
+      map.put("absolute_lifetime_seconds", entity.getAbsoluteLifetimeSeconds());
+    }
     if (entity.getAbsoluteLifetimeElapsed() != null) {
       map.put("absolute_lifetime_elapsed", entity.getAbsoluteLifetimeElapsed());
     }
@@ -412,6 +418,15 @@ public class JpaStorage implements AgentAuthStorage {
     if (status != null) {
       entity.setStatus(status);
     }
+    // Test/admin backdating support: when the protocol-shaped map carries an explicit
+    // `created_at_override_epoch_millis`, honour it so the absolute-lifetime clock can be
+    // simulated without time travel. Normal writes never set this key — reads project the
+    // entity's CREATED_AT into `created_at` (ISO string), which is intentionally not honoured
+    // on writes to keep regular putAgent calls from clobbering origin timestamps.
+    Long createdAtOverride = longField(agent, "created_at_override_epoch_millis");
+    if (createdAtOverride != null) {
+      entity.setCreatedAt(createdAtOverride);
+    }
     entity.setUserId(stringField(agent, "user_id"));
     entity.setUserCode(stringField(agent, "user_code"));
     entity.setMode(stringField(agent, "mode"));
@@ -427,6 +442,8 @@ public class JpaStorage implements AgentAuthStorage {
     entity.setLastUsedAt(stringField(agent, "last_used_at"));
     entity.setSessionTtlResetAt(longField(agent, "session_ttl_reset_at"));
     entity.setMaxLifetimeResetAt(longField(agent, "max_lifetime_reset_at"));
+    entity.setMaxLifetimeSeconds(longField(agent, "max_lifetime_seconds"));
+    entity.setAbsoluteLifetimeSeconds(longField(agent, "absolute_lifetime_seconds"));
     entity.setAbsoluteLifetimeElapsed(booleanField(agent, "absolute_lifetime_elapsed"));
     Object approval = agent.get("approval");
     entity.setApproval(approval instanceof Map<?, ?>

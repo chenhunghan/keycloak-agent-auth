@@ -377,4 +377,21 @@
             </column>
         </addColumn>
     </changeSet>
+
+    <changeSet author="agent-auth" id="agent-auth-1.6.0-agent-lifetime-budgets">
+        <preConditions onFail="MARK_RAN">
+            <and>
+                <not><columnExists tableName="AGENT_AUTH_AGENT" columnName="MAX_LIFETIME_SECONDS"/></not>
+                <not><columnExists tableName="AGENT_AUTH_AGENT" columnName="ABSOLUTE_LIFETIME_SECONDS"/></not>
+            </and>
+        </preConditions>
+        <addColumn tableName="AGENT_AUTH_AGENT">
+            <column name="MAX_LIFETIME_SECONDS" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+            <column name="ABSOLUTE_LIFETIME_SECONDS" type="BIGINT">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+    </changeSet>
 </databaseChangeLog>

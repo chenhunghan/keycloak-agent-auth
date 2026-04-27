@@ -85,6 +85,21 @@ public class AgentEntity {
   @Column(name = "MAX_LIFETIME_RESET_AT")
   private Long maxLifetimeResetAt;
 
+  /**
+   * AAP §2.4 max-lifetime budget in seconds; cleared/reset on reactivation alongside
+   * {@code MAX_LIFETIME_RESET_AT}. Optional — when {@code null} the max-lifetime clock is treated
+   * as not configured.
+   */
+  @Column(name = "MAX_LIFETIME_SECONDS")
+  private Long maxLifetimeSeconds;
+
+  /**
+   * AAP §2.4 absolute-lifetime budget in seconds; measured from {@code CREATED_AT} and never reset.
+   * Optional — when {@code null} the absolute-lifetime clock is treated as not configured.
+   */
+  @Column(name = "ABSOLUTE_LIFETIME_SECONDS")
+  private Long absoluteLifetimeSeconds;
+
   @Column(name = "ABSOLUTE_LIFETIME_ELAPSED")
   private Boolean absoluteLifetimeElapsed;
 
@@ -245,6 +260,22 @@ public class AgentEntity {
 
   public void setMaxLifetimeResetAt(Long maxLifetimeResetAt) {
     this.maxLifetimeResetAt = maxLifetimeResetAt;
+  }
+
+  public Long getMaxLifetimeSeconds() {
+    return maxLifetimeSeconds;
+  }
+
+  public void setMaxLifetimeSeconds(Long maxLifetimeSeconds) {
+    this.maxLifetimeSeconds = maxLifetimeSeconds;
+  }
+
+  public Long getAbsoluteLifetimeSeconds() {
+    return absoluteLifetimeSeconds;
+  }
+
+  public void setAbsoluteLifetimeSeconds(Long absoluteLifetimeSeconds) {
+    this.absoluteLifetimeSeconds = absoluteLifetimeSeconds;
   }
 
   public Boolean getAbsoluteLifetimeElapsed() {

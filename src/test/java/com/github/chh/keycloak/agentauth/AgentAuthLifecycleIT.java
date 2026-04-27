@@ -2935,4 +2935,292 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
         .body("status", equalTo("pending"))
         .body("approval", notNullValue());
   }
+
+  // ---------------------------------------------------------------------------
+  // Lazy lifecycle-clock evaluation (LifecycleClock — audit-03 P1 fix).
+  //
+  // These tests cover the centralized evaluator wired into status/reactivate/execute/introspect.
+  // They simulate clocks elapsing via the admin {@code /agents/{id}/backdate-clocks} endpoint so
+  // we don't depend on the wall clock advancing.
+  // ---------------------------------------------------------------------------
+
+  /** Helper: backdate lifecycle-clock fields on an agent without changing its status. */
+  private static void backdateAgentClocks(String agentId, String jsonBody) {
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(jsonBody)
+        .when()
+        .post("/agents/" + agentId + "/backdate-clocks")
+        .then()
+        .statusCode(200);
+  }
+
+  /**
+   * Audit-03 P1: {@code GET /agent/status} must return {@code expired} when {@code expires_at} has
+   * elapsed even if the stored status is still {@code active}. Validates the lazy clock-evaluation
+   * wired into the status endpoint.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#55-status">§5.5</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#24-lifetime-clocks">§2.4</a>
+   */
+  @Test
+  void getAgentStatusEvaluatesSessionClockLazily() {
+    OctetKeyPair lazyHostKey = TestKeys.generateEd25519();
+    OctetKeyPair lazyAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(lazyHostKey, lazyAgentKey, issuerUrl());
+    preRegisterHost(lazyHostKey);
+
+    String lazyAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Lazy Session Clock Agent",
+              "host_name": "lazy-session-host",
+              "capabilities": [],
+              "mode": "delegated",
+              "reason": "Lazy session-clock evaluation test"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("active"))
+        .extract()
+        .path("agent_id");
+
+    // Backdate expires_at into the past WITHOUT mutating status. The stored status is still
+    // "active"; the lazy evaluator on /agent/status must demote it to "expired".
+    backdateAgentClocks(lazyAgentId, "{\"expires_at_offset_seconds\": -60}");
+
+    String hostJwt = TestJwts.hostJwt(lazyHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .queryParam("agent_id", lazyAgentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("expired"));
+
+    // Subsequent call sees the persisted "expired" — proves the lazy evaluator persisted the
+    // transition rather than re-computing on every call. Use a fresh host JWT (new jti) so the
+    // replay-cache doesn't reject the second request.
+    String hostJwt2 = TestJwts.hostJwt(lazyHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt2)
+        .queryParam("agent_id", lazyAgentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("expired"));
+  }
+
+  /**
+   * Audit-03 P1: {@code GET /agent/status} must return {@code revoked} when the absolute lifetime
+   * has elapsed (computed from {@code created_at} + {@code absolute_lifetime_seconds}). The legacy
+   * {@code absolute_lifetime_elapsed} flag path remains covered by
+   * {@link #todoReactivateWhenAbsoluteLifetimeExceededReturns403()}.
+   *
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#24-lifetime-clocks">§2.4</a>
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#26-revocation">§2.6</a>
+   */
+  @Test
+  void getAgentStatusEvaluatesAbsoluteClockLazilyFromTimestamps() {
+    OctetKeyPair absHostKey = TestKeys.generateEd25519();
+    OctetKeyPair absAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(absHostKey, absAgentKey, issuerUrl());
+    preRegisterHost(absHostKey);
+
+    String absAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Lazy Absolute Clock Agent",
+              "host_name": "lazy-absolute-host",
+              "capabilities": [],
+              "mode": "delegated",
+              "reason": "Lazy absolute-clock evaluation test"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    // Backdate created_at by an hour and configure a 60-second absolute lifetime budget. The
+    // stored status is still "active"; the lazy evaluator must demote it to "revoked".
+    backdateAgentClocks(absAgentId,
+        "{\"created_at_offset_seconds\": -3600, \"absolute_lifetime_seconds\": 60}");
+
+    String hostJwt = TestJwts.hostJwt(absHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .queryParam("agent_id", absAgentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("revoked"))
+        .body("revocation_reason", equalTo("absolute_lifetime_exceeded"));
+  }
+
+  /**
+   * Audit-03 P1: {@code POST /agent/reactivate} must refuse an agent whose absolute-lifetime clock
+   * has elapsed even when the legacy {@code absolute_lifetime_elapsed} flag is NOT set.
+   * Reactivation must compute absolute lifetime from {@code created_at} +
+   * {@code absolute_lifetime_seconds}.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#56-reactivate">§5.6</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#24-lifetime-clocks">§2.4</a>
+   */
+  @Test
+  void reactivateRefusesWhenAbsoluteClockElapsedFromTimestamps() {
+    OctetKeyPair reactHostKey = TestKeys.generateEd25519();
+    OctetKeyPair reactAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(reactHostKey, reactAgentKey, issuerUrl());
+    preRegisterHost(reactHostKey);
+
+    String reactAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "Reactivate Absolute Timestamps Agent",
+              "host_name": "react-abs-host",
+              "capabilities": [],
+              "mode": "delegated",
+              "reason": "Reactivate vs computed absolute lifetime"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    // Force the agent into "expired" first via the standard admin /expire path. The legacy flag
+    // is intentionally NOT set — only the timestamps drive the decision.
+    forceExpireAgent(reactAgentId);
+    backdateAgentClocks(reactAgentId,
+        "{\"created_at_offset_seconds\": -7200, \"absolute_lifetime_seconds\": 60}");
+
+    String hostJwt = TestJwts.hostJwt(reactHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "agent_id": "%s"
+            }
+            """, reactAgentId))
+        .when()
+        .post("/agent/reactivate")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("absolute_lifetime_exceeded"));
+
+    // After the failed reactivate, the agent must be persisted as "revoked". Use a fresh
+    // host JWT (new jti) so the replay-cache doesn't reject the follow-up status call.
+    String hostJwt2 = TestJwts.hostJwt(reactHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt2)
+        .queryParam("agent_id", reactAgentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("revoked"));
+  }
+
+  /**
+   * Audit-03 P1: {@code POST /capability/execute} must return {@code 403 agent_expired} when the
+   * lifecycle clock says the agent is expired even if the stored status is still {@code active}.
+   * The lazy evaluator must persist the status transition.
+   *
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#511-execute-capability">§5.11</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#24-lifetime-clocks">§2.4</a>
+   */
+  @Test
+  void executeCapabilityEvaluatesSessionClockLazilyAndPersists() {
+    OctetKeyPair execHostKey = TestKeys.generateEd25519();
+    OctetKeyPair execAgentKey = TestKeys.generateEd25519();
+    String regJwt = TestJwts.hostJwtForRegistration(execHostKey, execAgentKey, issuerUrl());
+    preRegisterHost(execHostKey);
+
+    String execAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Lazy Execute Agent",
+              "host_name": "lazy-execute-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "Lazy session-clock at /capability/execute"
+            }
+            """, lifecycleCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("active"))
+        .extract()
+        .path("agent_id");
+
+    // Backdate expires_at into the past while the stored status remains "active".
+    backdateAgentClocks(execAgentId, "{\"expires_at_offset_seconds\": -60}");
+
+    String agentJwt = TestJwts.agentJwt(execHostKey, execAgentKey, execAgentId,
+        lifecycleCapLocation());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capability": "%s",
+              "arguments": {}
+            }
+            """, lifecycleCap))
+        .when()
+        .post("/capability/execute")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("agent_expired"));
+
+    // The lazy evaluator at /capability/execute must have persisted status=expired.
+    String hostJwt = TestJwts.hostJwt(execHostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .queryParam("agent_id", execAgentId)
+        .when()
+        .get("/agent/status")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("expired"));
+  }
 }

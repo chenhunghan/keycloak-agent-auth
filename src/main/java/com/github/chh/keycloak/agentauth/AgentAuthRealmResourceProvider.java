@@ -659,7 +659,21 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       Map<String, Object> agentData = storage().getAgent(agentId);
-      if (agentData == null || !"active".equals(agentData.get("status"))) {
+      if (agentData == null) {
+        return Response.ok(Map.of("active", false)).build();
+      }
+
+      // §§2.3-2.5: lazy lifecycle-clock evaluation. A token may arrive while the stored status
+      // still says `active`; the centralised evaluator demotes it before we treat it as such.
+      String statusBeforeIntrospectClock = (String) agentData.get("status");
+      LifecycleClock.Result introspectClock = LifecycleClock.applyExpiry(agentData);
+      if (introspectClock != LifecycleClock.Result.ACTIVE
+          && !java.util.Objects.equals(statusBeforeIntrospectClock, agentData.get("status"))) {
+        agentData.put("updated_at", nowTimestamp());
+        storage().putAgent(agentId, agentData);
+      }
+
+      if (!"active".equals(agentData.get("status"))) {
         return Response.ok(Map.of("active", false)).build();
       }
 
@@ -998,6 +1012,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
+      // §§2.3-2.5: lifecycle clocks are evaluated lazily on read so a status snapshot reflects
+      // the current state even when no other path has had a chance to mutate the record. Persist
+      // any status transition so subsequent calls see the new value.
+      String statusBeforeStatusClock = (String) agentData.get("status");
+      LifecycleClock.Result statusClock = LifecycleClock.applyExpiry(agentData);
+      if (statusClock != LifecycleClock.Result.ACTIVE
+          && !java.util.Objects.equals(statusBeforeStatusClock, agentData.get("status"))) {
+        agentData.put("updated_at", nowTimestamp());
+        storage().putAgent(agentId, agentData);
+      }
+
       return Response.ok(sanitizeAgentResponse(agentData)).build();
     } catch (Exception e) {
       return Response.status(500)
@@ -1256,8 +1281,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       if ("expired".equals(status)) {
-        if (Boolean.TRUE.equals(agentData.get("absolute_lifetime_elapsed"))) {
+        // §5.6 step 2 + §2.4: absolute lifetime is computed against the agent's original
+        // timestamps (or the legacy hard-flag), not the lazy `applyExpiry` shortcut. Re-running
+        // `evaluate` here means a backdated `created_at` tips the agent into permanent revoked
+        // state instead of being silently reactivated.
+        if (LifecycleClock
+            .evaluate(agentData) == LifecycleClock.Result.ABSOLUTE_LIFETIME_EXCEEDED) {
           agentData.put("status", "revoked");
+          agentData.putIfAbsent("revocation_reason", "absolute_lifetime_exceeded");
           agentData.put("updated_at", nowTimestamp());
           storage().putAgent(agentId, agentData);
           return Response.status(403)
@@ -2251,6 +2282,18 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.status(401)
             .entity(Map.of("error", "jti_replay", "message", "Replay detected"))
             .build();
+      }
+
+      // §§2.3-2.5: lazily evaluate lifecycle clocks before honouring the request. A token may
+      // arrive while the stored status still says `active`; the centralised evaluator catches
+      // sessions/max/absolute lifetimes elapsing between writes. Persist transitions so other
+      // flows see the new status.
+      String statusBeforeExecuteClock = (String) agentData.get("status");
+      LifecycleClock.Result executeClock = LifecycleClock.applyExpiry(agentData);
+      if (executeClock != LifecycleClock.Result.ACTIVE
+          && !java.util.Objects.equals(statusBeforeExecuteClock, agentData.get("status"))) {
+        agentData.put("updated_at", nowTimestamp());
+        storage().putAgent(agentId, agentData);
       }
 
       String status = (String) agentData.get("status");
