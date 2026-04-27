@@ -82,6 +82,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .entity(Map.of("error", "invalid_request", "message", "Invalid visibility")).build();
     }
 
+    Response capabilityFieldValidation = validateCapabilityFields(requestBody);
+    if (capabilityFieldValidation != null) {
+      return capabilityFieldValidation;
+    }
+
     Response gateValidation = validateGateFields(requestBody);
     if (gateValidation != null) {
       return gateValidation;
@@ -115,6 +120,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(404)
           .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
           .build();
+    }
+
+    Response capabilityFieldValidation = validateCapabilityFields(requestBody);
+    if (capabilityFieldValidation != null) {
+      return capabilityFieldValidation;
     }
 
     Response gateValidation = validateGateFields(requestBody);
@@ -282,6 +292,18 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(404).entity(Map.of("error", "capability_not_found")).build();
     }
 
+    // Audit 05 P1: terminal agent states (claimed/revoked/rejected) are immutable per AAP §§2.6,
+    // 2.10. Approving a grant on such an agent would resurrect authority that the spec already
+    // sealed off, so refuse before mutating anything.
+    String agentStatus = (String) agentData.get("status");
+    if ("claimed".equals(agentStatus) || "revoked".equals(agentStatus)
+        || "rejected".equals(agentStatus)) {
+      return Response.status(409)
+          .entity(Map.of("error", "invalid_state",
+              "message", "Cannot approve grant on agent in '" + agentStatus + "' state"))
+          .build();
+    }
+
     List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
         .get("agent_capability_grants");
     if (grants == null) {
@@ -297,6 +319,20 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
     if (targetGrant == null) {
       return Response.status(404).entity(Map.of("error", "grant_not_found")).build();
+    }
+
+    // Audit 05 P1: only pending grants may be promoted to active. Already-active grants are
+    // returned idempotently so retries (network blips, double-clicks) don't fail. Anything else —
+    // denied, revoked, etc. — is terminal and must not be silently flipped to active.
+    String grantStatus = (String) targetGrant.get("status");
+    if ("active".equals(grantStatus)) {
+      return Response.ok(targetGrant).build();
+    }
+    if (!"pending".equals(grantStatus)) {
+      return Response.status(409)
+          .entity(Map.of("error", "invalid_state",
+              "message", "Cannot approve grant in '" + grantStatus + "' state"))
+          .build();
     }
 
     boolean wasPending = "pending".equals(targetGrant.get("status"));
@@ -1151,6 +1187,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(400)
           .entity(Map.of("error", "invalid_request", "message", "Invalid visibility")).build();
     }
+    Response capabilityFieldValidation = validateCapabilityFields(requestBody);
+    if (capabilityFieldValidation != null) {
+      return capabilityFieldValidation;
+    }
     Response gateValidation = validateGateFields(requestBody);
     if (gateValidation != null) {
       return gateValidation;
@@ -1221,6 +1261,10 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .entity(Map.of("error", "capability_not_found",
               "message", "Capability not found in this organization"))
           .build();
+    }
+    Response capabilityFieldValidation = validateCapabilityFields(requestBody);
+    if (capabilityFieldValidation != null) {
+      return capabilityFieldValidation;
     }
     Response gateValidation = validateGateFields(requestBody);
     if (gateValidation != null) {
@@ -1352,6 +1396,45 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(501)
           .entity(Map.of("error", "organizations_feature_disabled",
               "message", "Organizations feature not enabled on this realm"))
+          .build();
+    }
+    return null;
+  }
+
+  /**
+   * AAP §2.12 capability-object shape validation, applied before the cap is persisted by either of
+   * the realm- or org-scoped admin endpoints. The protocol requires:
+   *
+   * <ul>
+   * <li>{@code description} — required, non-blank string.</li>
+   * <li>{@code input} — optional; if present, MUST be a JSON object (a {@code Map}). Scalars,
+   * arrays, and strings are rejected.</li>
+   * <li>{@code output} — same rule as {@code input}.</li>
+   * </ul>
+   *
+   * <p>
+   * {@code name} and {@code visibility} are checked at the call site because their messages and
+   * default-handling differ; this helper covers the shared shape rules. Returning a
+   * {@link Response} lets each endpoint short-circuit cleanly without throwing.
+   */
+  private static Response validateCapabilityFields(Map<String, Object> requestBody) {
+    Object rawDescription = requestBody.get("description");
+    if (!(rawDescription instanceof String) || ((String) rawDescription).trim().isEmpty()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "description is required and must be a non-blank string"))
+          .build();
+    }
+    if (requestBody.containsKey("input") && !(requestBody.get("input") instanceof Map)) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "input must be a JSON object when present"))
+          .build();
+    }
+    if (requestBody.containsKey("output") && !(requestBody.get("output") instanceof Map)) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "output must be a JSON object when present"))
           .build();
     }
     return null;

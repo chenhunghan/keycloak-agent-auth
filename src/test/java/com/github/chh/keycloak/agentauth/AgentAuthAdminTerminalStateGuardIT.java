@@ -163,6 +163,116 @@ class AgentAuthAdminTerminalStateGuardIT extends BaseKeycloakIT {
         .body("status", equalTo("rejected"));
   }
 
+  // -------------------- grant-approval guards (audit 05 P1) --------------------
+
+  /**
+   * AAP §2.6 / §2.10: terminal agent statuses ({@code claimed}, {@code revoked}, {@code rejected})
+   * are immutable. Approving a grant on a revoked agent would resurrect authority — refuse with 409
+   * and don't mutate the agent or its grants.
+   */
+  @Test
+  void approveGrant_onRevokedAgent_returns409_andStateIsPreserved() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String capability = registerApprovalCapability("grantguard_revoked_agent");
+    String agentId = registerPendingAgent(hostKey, agentKey, capability);
+
+    String hostJwt = TestJwts.hostJwt(hostKey, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(Map.of("agent_id", agentId))
+        .when()
+        .post("/agent/revoke")
+        .then()
+        .statusCode(200);
+
+    approveGrantRaw(agentId, capability).then()
+        .statusCode(409)
+        .body("error", equalTo("invalid_state"));
+
+    assertAdminAgentStatus(agentId, "revoked");
+  }
+
+  @Test
+  void approveGrant_onRejectedAgent_returns409_andStateIsPreserved() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String capability = registerApprovalCapability("grantguard_rejected_agent");
+    String agentId = registerPendingAgent(hostKey, agentKey, capability);
+
+    forceRejectRaw(agentId).then().statusCode(200);
+
+    approveGrantRaw(agentId, capability).then()
+        .statusCode(409)
+        .body("error", equalTo("invalid_state"));
+
+    assertAdminAgentStatus(agentId, "rejected");
+  }
+
+  @Test
+  void approveGrant_onClaimedAgent_returns409_andStateIsPreserved() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String capability = registerAutoCapability("grantguard_claimed_agent");
+    String agentId = registerAutonomousAgent(hostKey, agentKey, capability);
+    String hostId = TestKeys.thumbprint(hostKey);
+
+    String userId = createTestUser("grantguard-claimed-" + suffix());
+    linkHostRaw(hostId, userId).then().statusCode(200);
+    assertAdminAgentStatus(agentId, "claimed");
+
+    approveGrantRaw(agentId, capability).then()
+        .statusCode(409)
+        .body("error", equalTo("invalid_state"));
+
+    assertAdminAgentStatus(agentId, "claimed");
+  }
+
+  /**
+   * Already-denied grants are terminal. Approving them must 409 — flipping a denied grant to active
+   * would silently override the prior denial. Test setup: register a cap with {@code auto_deny} so
+   * the grant lands as denied at registration time while the agent itself stays non-terminal
+   * (active here, because the auto-deny cap doesn't gate activation).
+   */
+  @Test
+  void approveGrant_onAlreadyDeniedGrant_returns409() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String capability = registerAutoDenyCapability("grantguard_denied_grant");
+    String agentId = registerDelegatedAgent(hostKey, agentKey, capability);
+
+    // The grant landed as denied at registration via auto_deny. Agent itself isn't terminal —
+    // this isolates the grant-level guard from the agent-level guard.
+    approveGrantRaw(agentId, capability).then()
+        .statusCode(409)
+        .body("error", equalTo("invalid_state"));
+  }
+
+  /**
+   * Idempotency: approving an already-active grant must return 200 without mutating, so retries
+   * (network blips, double clicks) don't fail noisily.
+   */
+  @Test
+  void approveGrant_onAlreadyActiveGrant_isIdempotent() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String capability = registerApprovalCapability("grantguard_idempotent");
+    String agentId = registerPendingAgent(hostKey, agentKey, capability);
+
+    approveGrantRaw(agentId, capability).then()
+        .statusCode(200)
+        .body("status", equalTo("active"));
+
+    // Second approval on the now-active grant: idempotent 200, agent stays active.
+    approveGrantRaw(agentId, capability).then()
+        .statusCode(200)
+        .body("status", equalTo("active"));
+
+    assertAdminAgentStatus(agentId, "active");
+  }
+
   // -------------------- helpers --------------------
 
   private static String suffix() {
@@ -181,6 +291,31 @@ class AgentAuthAdminTerminalStateGuardIT extends BaseKeycloakIT {
               "description": "Auto-approved capability for terminal-state guard tests",
               "visibility": "authenticated",
               "requires_approval": false,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, name, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+    return name;
+  }
+
+  private static String registerAutoDenyCapability(String prefix) {
+    String name = prefix + "_" + suffix();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Auto-denied capability for grant-guard tests",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "auto_deny": true,
               "location": "https://resource.example.test/%s",
               "input": {"type": "object"},
               "output": {"type": "object"}
@@ -273,6 +408,16 @@ class AgentAuthAdminTerminalStateGuardIT extends BaseKeycloakIT {
         .body("{}")
         .when()
         .post("/agents/" + agentId + "/reject");
+  }
+
+  private static Response approveGrantRaw(String agentId, String capability) {
+    return given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body("{}")
+        .when()
+        .post("/agents/" + agentId + "/capabilities/" + capability + "/approve");
   }
 
   private static Response linkHostRaw(String hostId, String userId) {

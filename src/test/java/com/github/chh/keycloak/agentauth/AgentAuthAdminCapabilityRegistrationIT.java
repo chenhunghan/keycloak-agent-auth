@@ -813,4 +813,199 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("capabilities.name", not(hasItem(name)));
   }
+
+  // -----------------------------------------------------------------
+  // AAP §2.12 capability shape — required description + object schemas
+  // -----------------------------------------------------------------
+
+  /**
+   * AAP §2.12: {@code description} is a required field on the capability object. Registrations that
+   * omit it (or send a blank/whitespace string) must be rejected before the cap can leak into
+   * {@code /capability/list}, {@code /capability/describe}, registration grants, etc.
+   */
+  @Test
+  void registerCapabilityWithoutDescriptionReturns400() {
+    String name = "no_desc_cap_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "visibility": "public",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"))
+        .body("message", notNullValue());
+  }
+
+  @Test
+  void registerCapabilityWithBlankDescriptionReturns400() {
+    String name = "blank_desc_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "   ",
+              "visibility": "public",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  /**
+   * AAP §2.12: {@code input} and {@code output} are optional, but when present they MUST be JSON
+   * objects (mapping to {@code Map<String, Object>}). Strings, scalars, and arrays are rejected so
+   * downstream consumers can rely on the schema-shaped contract.
+   */
+  @Test
+  void registerCapabilityWithScalarInputReturns400() {
+    String name = "scalar_input_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Bad input shape",
+              "visibility": "public",
+              "requires_approval": false,
+              "input": "not-an-object"
+            }
+            """, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  @Test
+  void registerCapabilityWithArrayOutputReturns400() {
+    String name = "array_output_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Bad output shape",
+              "visibility": "public",
+              "requires_approval": false,
+              "output": ["not", "an", "object"]
+            }
+            """, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  /**
+   * Same shape contract applies on PUT: the body wholesale-replaces the cap, so missing description
+   * must fail rather than letting a previously-valid cap regress to a no-description state.
+   */
+  @Test
+  void updateCapabilityWithoutDescriptionReturns400() {
+    String name = "upd_no_desc_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String token = adminAccessToken();
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Initial",
+              "visibility": "public",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "visibility": "public",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .put("/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  @Test
+  void updateCapabilityWithScalarInputReturns400() {
+    String name = "upd_scalar_input_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String token = adminAccessToken();
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Initial",
+              "visibility": "public",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Bad shape on update",
+              "visibility": "public",
+              "requires_approval": false,
+              "input": 42
+            }
+            """, name))
+        .when()
+        .put("/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
 }

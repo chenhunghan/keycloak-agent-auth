@@ -497,6 +497,131 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
         .statusCode(org.hamcrest.Matchers.anyOf(equalTo(201), equalTo(204)));
   }
 
+  // --- AAP §2.12 shape validation on org-scoped POST/PUT ---
+
+  /**
+   * AAP §2.12: {@code description} is required. Org-scoped POST must enforce the same shape rule as
+   * the realm-level endpoint so a cap can't sneak in via the per-org path missing required fields.
+   */
+  @Test
+  void registerOrgScopedCapabilityWithoutDescriptionReturns400() {
+    String name = "p5_no_desc_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "visibility": "authenticated",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  @Test
+  void registerOrgScopedCapabilityWithScalarInputReturns400() {
+    String name = "p5_scalar_input_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Bad input shape on org POST",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "input": "not-an-object"
+            }
+            """, name))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  @Test
+  void registerOrgScopedCapabilityWithArrayOutputReturns400() {
+    String name = "p5_array_output_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Bad output shape on org POST",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "output": ["a", "b"]
+            }
+            """, name))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  @Test
+  void updateOrgScopedCapabilityWithoutDescriptionReturns400() {
+    String name = "p5_upd_no_desc_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createOrgScopedCap(acmeOrgId, name);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "visibility": "authenticated",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .put("/organizations/" + acmeOrgId + "/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  @Test
+  void updateOrgScopedCapabilityWithScalarOutputReturns400() {
+    String name = "p5_upd_scalar_output_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createOrgScopedCap(acmeOrgId, name);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Replacing with bad output",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "output": 7
+            }
+            """, name))
+        .when()
+        .put("/organizations/" + acmeOrgId + "/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
   private static void createConfidentialClientWithSA(String clientId) {
     given()
         .baseUri(KEYCLOAK.getAuthServerUrl())
