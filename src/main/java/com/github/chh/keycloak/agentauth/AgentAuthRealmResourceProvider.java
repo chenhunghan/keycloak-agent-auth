@@ -1920,6 +1920,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       boolean requiresApproval = false;
       int alreadyActiveCount = 0;
 
+      // §5.3 / §3.1: per-host TOFU defaults. Mirror registerAgent's path so a cap already in the
+      // host's `default_capabilities` auto-grants here too — without this, /agent/register and
+      // /agent/request-capability return inconsistent statuses (active vs. pending) for the same
+      // agent + same cap when the host has previously approved that cap.
+      List<String> hostDefaults = hostDefaultCapabilities(hostData);
+
       // Phase 1 entitlement gate at request-capability: block scoped caps the agent's effective
       // user can't satisfy. Mirrors the gate added at /agent/register; closes the same gap on
       // post-registration cap requests.
@@ -2005,7 +2011,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
         boolean capReqApproval = Boolean.TRUE.equals(registeredCap.get("requires_approval"));
         boolean autoDeny = Boolean.TRUE.equals(registeredCap.get("auto_deny"));
-        if (capReqApproval && !autoDeny)
+        // §5.3: TOFU auto-grant — a cap that's already in the host's defaults auto-approves
+        // even if the cap registry says requires_approval=true, because the linked user has
+        // approved it for this host before. Without this, /agent/request-capability returns
+        // pending for caps that /agent/register would auto-grant under the same host — a
+        // semantic inconsistency between the two endpoints for the same (agent, cap) pair.
+        boolean inHostDefaults = hostDefaults.contains(capName);
+        boolean needsApproval = capReqApproval && !inHostDefaults;
+        if (needsApproval && !autoDeny)
           requiresApproval = true;
 
         Map<String, Object> grant = new HashMap<>();
@@ -2013,7 +2026,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         if (autoDeny) {
           grant.put("status", "denied");
           grant.put("reason", "Capability has auto_deny enabled");
-        } else if (capReqApproval) {
+        } else if (needsApproval) {
           grant.put("status", "pending");
           grant.put("status_url", buildGrantStatusUrl(agentId, capName));
           // §2.13: stash the requested scope so the approval can promote it into `constraints`

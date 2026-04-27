@@ -162,6 +162,239 @@ class AgentAuthHostDefaultsTofuIT extends BaseKeycloakIT {
         });
   }
 
+  /**
+   * §5.3 + §5.4: {@code /agent/request-capability} MUST follow the same auto-approval rule as
+   * {@code /agent/register} when the requested cap is in {@code host.default_capabilities}. Without
+   * this, the same agent + same cap returns {@code active} via /register but {@code pending} via
+   * /request-capability — a semantic inconsistency between sibling endpoints. Audit 02 P2.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void requestCapability_autoApprovesWhenCapInHostDefaults() {
+    String cap = registerApprovalRequiredCapability("tofu_req_active_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair firstAgentKey = TestKeys.generateEd25519();
+
+    // 1. First register: pending grant + device-auth approval seeded.
+    Response firstReg = registerDelegatedAgent(hostKey, firstAgentKey, cap);
+    String userCode = firstReg.jsonPath().getString("approval.user_code");
+
+    // 2. User approves → cap is now in host.default_capabilities.
+    String username = "tofu-req-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    // 3. Register a second agent under the same host, this time with an empty cap list — the agent
+    // is active but has no grants yet, so /agent/request-capability has work to do.
+    OctetKeyPair secondAgentKey = TestKeys.generateEd25519();
+    String secondReg = given()
+        .baseUri(issuerUrl())
+        .header("Authorization",
+            "Bearer " + TestJwts.hostJwtForRegistration(hostKey, secondAgentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "tofu-req-agent",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("active"))
+        .extract()
+        .path("agent_id");
+
+    // 4. Now /agent/request-capability for that approval-required cap. Because the host already
+    // has it in defaults, the response MUST be active (not pending) and MUST omit the approval
+    // object. This mirrors registration's path under the same conditions.
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization",
+            "Bearer " + TestJwts.agentJwt(hostKey, secondAgentKey, secondReg, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"]
+            }
+            """, cap))
+        .when()
+        .post("/agent/request-capability");
+    reqResp.then()
+        .statusCode(200)
+        .body("approval", org.hamcrest.Matchers.nullValue())
+        .body("agent_capability_grants", org.hamcrest.Matchers.hasSize(1))
+        .body("agent_capability_grants[0].capability", org.hamcrest.Matchers.equalTo(cap))
+        .body("agent_capability_grants[0].status", org.hamcrest.Matchers.equalTo("active"));
+  }
+
+  /**
+   * Regression coverage: when the requested cap is NOT in the host's defaults, /request-capability
+   * keeps the existing pending-with-approval behavior. Pairs with
+   * {@link #requestCapability_autoApprovesWhenCapInHostDefaults()} to bracket the host-defaults
+   * branch.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void requestCapability_pendingWhenCapNotInHostDefaults() {
+    // Cap A seeds the host's defaults via the first approval; cap B is requested fresh and should
+    // remain pending because B was never approved on this host.
+    String capA = registerApprovalRequiredCapability("tofu_req_seed_" + suffix());
+    String capB = registerApprovalRequiredCapability("tofu_req_other_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair firstAgentKey = TestKeys.generateEd25519();
+
+    Response firstReg = registerDelegatedAgent(hostKey, firstAgentKey, capA);
+    String userCode = firstReg.jsonPath().getString("approval.user_code");
+
+    String username = "tofu-req-other-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    // Second agent under the same host, register with empty caps (active immediately).
+    OctetKeyPair secondAgentKey = TestKeys.generateEd25519();
+    String secondAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization",
+            "Bearer " + TestJwts.hostJwtForRegistration(hostKey, secondAgentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "tofu-req-other-agent",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    // Request cap B — not in host defaults → pending + approval object emitted.
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization",
+            "Bearer " + TestJwts.agentJwt(hostKey, secondAgentKey, secondAgentId, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"]
+            }
+            """, capB))
+        .when()
+        .post("/agent/request-capability");
+    // Once the host is linked (after the first approval seeded host.user_id) the approval flow
+    // switches from device-auth to CIBA, so there's no user_code — assert on `method` instead,
+    // which is set on every approval object regardless of channel.
+    reqResp.then()
+        .statusCode(200)
+        .body("approval", org.hamcrest.Matchers.notNullValue())
+        .body("approval.method", org.hamcrest.Matchers.notNullValue())
+        .body("agent_capability_grants[0].capability", org.hamcrest.Matchers.equalTo(capB))
+        .body("agent_capability_grants[0].status", org.hamcrest.Matchers.equalTo("pending"));
+  }
+
+  /**
+   * Mixed request: one cap in host.defaults, one not. The defaulted cap MUST come back active, the
+   * non-defaulted one MUST come back pending with an approval object — same per-grant decision as
+   * registration.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void requestCapability_mixedHostDefaultsReturnsPerGrantStatus() {
+    String defaultedCap = registerApprovalRequiredCapability("tofu_req_mix_def_" + suffix());
+    String pendingCap = registerApprovalRequiredCapability("tofu_req_mix_pend_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair firstAgentKey = TestKeys.generateEd25519();
+
+    Response firstReg = registerDelegatedAgent(hostKey, firstAgentKey, defaultedCap);
+    String userCode = firstReg.jsonPath().getString("approval.user_code");
+
+    String username = "tofu-req-mix-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    OctetKeyPair secondAgentKey = TestKeys.generateEd25519();
+    String secondAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization",
+            "Bearer " + TestJwts.hostJwtForRegistration(hostKey, secondAgentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body("""
+            {
+              "name": "tofu-req-mix-agent",
+              "capabilities": [],
+              "mode": "delegated"
+            }
+            """)
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization",
+            "Bearer " + TestJwts.agentJwt(hostKey, secondAgentKey, secondAgentId, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s", "%s"]
+            }
+            """, defaultedCap, pendingCap))
+        .when()
+        .post("/agent/request-capability");
+    reqResp.then()
+        .statusCode(200)
+        .body("approval", org.hamcrest.Matchers.notNullValue())
+        .body("agent_capability_grants", org.hamcrest.Matchers.hasSize(2));
+
+    List<Map<String, Object>> grants = reqResp.jsonPath()
+        .getList("agent_capability_grants", (Class<Map<String, Object>>) (Class<?>) Map.class);
+    assertThat(grants)
+        .anySatisfy(g -> {
+          assertThat(g.get("capability")).isEqualTo(defaultedCap);
+          assertThat(g.get("status")).isEqualTo("active");
+        })
+        .anySatisfy(g -> {
+          assertThat(g.get("capability")).isEqualTo(pendingCap);
+          assertThat(g.get("status")).isEqualTo("pending");
+        });
+  }
+
   // --- helpers ---
 
   private static String suffix() {
