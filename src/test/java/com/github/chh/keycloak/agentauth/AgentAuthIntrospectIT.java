@@ -618,6 +618,86 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
   }
 
   /**
+   * A token whose signature is INVALID MUST NOT consume the {@code jti} it carried; if it did, an
+   * attacker could pre-emptively burn legitimate {@code jti} values by submitting forged tokens.
+   * §4.5/§4.6 require replay detection to run AFTER signature verification, so a subsequent token
+   * carrying the SAME {@code jti} but a VALID signature must still be accepted (active).
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#45-verification">§4.5
+   *      Verification — signature check before replay check</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#46-replay-detection">§4.6 Replay
+   *      Detection — only valid tokens consume jti</a>
+   */
+  @Test
+  void introspectInvalidSignatureDoesNotConsumeJti() {
+    String sharedJti = "a-" + UUID.randomUUID();
+    OctetKeyPair wrongKey = TestKeys.generateEd25519();
+
+    String forgedJwt = buildAgentJwtWithJti(wrongKey, sharedJti, capLocation(grantedCapability));
+    String validJwt = buildAgentJwtWithJti(agentKey, sharedJti, capLocation(grantedCapability));
+
+    // First request: invalid signature — server returns active=false but MUST NOT record the jti.
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s"
+            }
+            """, forgedJwt))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(false));
+
+    // Second request: valid signature, SAME jti — must succeed because the forged request did
+    // not consume the jti.
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s"
+            }
+            """, validJwt))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true));
+  }
+
+  /**
+   * Helper: builds an agent+jwt with an explicit {@code jti} value so two requests can share the
+   * same identifier for replay-ordering tests.
+   */
+  private static String buildAgentJwtWithJti(OctetKeyPair signingKey, String jti, String audience) {
+    try {
+      JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
+          .type(new JOSEObjectType("agent+jwt"))
+          .build();
+      long now = System.currentTimeMillis();
+      JWTClaimsSet claims = new JWTClaimsSet.Builder()
+          .issuer(TestKeys.thumbprint(hostKey))
+          .subject(agentId)
+          .audience(audience)
+          .issueTime(new Date(now))
+          .expirationTime(new Date(now + 60_000L))
+          .jwtID(jti)
+          .build();
+      SignedJWT jwt = new SignedJWT(header, claims);
+      jwt.sign(new Ed25519Signer(signingKey));
+      return jwt.serialize();
+    } catch (Exception e) {
+      throw new AssertionError("Failed to build agent JWT with explicit jti", e);
+    }
+  }
+
+  /**
    * A host JWT (whose {@code typ} header is not {@code agent+jwt}) submitted as the introspect
    * {@code token} value MUST return {@code {"active": false}}; §4.5 step 1 requires rejecting any
    * JWT whose {@code typ} is not {@code agent+jwt} to prevent token-type confusion.
