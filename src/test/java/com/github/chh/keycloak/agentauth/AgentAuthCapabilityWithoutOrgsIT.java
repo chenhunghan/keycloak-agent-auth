@@ -62,6 +62,7 @@ class AgentAuthCapabilityWithoutOrgsIT extends BaseKeycloakIT {
 
     hostKey = TestKeys.generateEd25519();
     agentKey = TestKeys.generateEd25519();
+    preRegisterHost(hostKey);
     agentId = registerDelegatedAgent(hostKey, agentKey, nullGateCap);
     linkHostToUser(TestKeys.thumbprint(hostKey), userId);
   }

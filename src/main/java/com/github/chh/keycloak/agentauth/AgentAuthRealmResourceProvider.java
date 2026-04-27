@@ -1056,7 +1056,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("agent_key_thumbprint", newAgentKey.computeThumbprint().toString());
       storage().putAgent(agentId, agentData);
 
-      return Response.ok(agentData).build();
+      return Response.ok(sanitizeAgentResponse(agentData)).build();
     } catch (Exception e) {
       return Response.status(500)
           .entity(Map.of("error", "internal_error", "message", e.getMessage()))
@@ -1124,7 +1124,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       if ("revoked".equals(agentData.get("status"))) {
-        return Response.ok(agentData).build();
+        return Response.ok(sanitizeAgentResponse(agentData)).build();
       }
 
       agentData.put("status", "revoked");
@@ -1133,7 +1133,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
       storage().putAgent(agentId, agentData);
 
-      return Response.ok(agentData).build();
+      return Response.ok(sanitizeAgentResponse(agentData)).build();
     } catch (Exception e) {
       return Response.status(500)
           .entity(Map.of("error", "internal_error", "message", e.getMessage()))
@@ -1218,7 +1218,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       if ("active".equals(status)) {
-        return Response.ok(agentData).build();
+        return Response.ok(sanitizeAgentResponse(agentData)).build();
       }
 
       if ("expired".equals(status)) {
@@ -1261,7 +1261,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           agentData.remove("approval");
         }
         storage().putAgent(agentId, agentData);
-        return Response.ok(agentData).build();
+        return Response.ok(sanitizeAgentResponse(agentData)).build();
       }
 
       return Response.status(400)

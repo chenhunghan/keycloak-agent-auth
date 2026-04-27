@@ -84,11 +84,13 @@ class AgentAuthMultiTenantCapabilityIT extends BaseKeycloakIT {
 
     aliceHostKey = TestKeys.generateEd25519();
     aliceAgentKey = TestKeys.generateEd25519();
+    preRegisterHost(aliceHostKey);
     aliceAgentId = registerDelegatedAgent(aliceHostKey, aliceAgentKey, realmCap);
     linkHostToUser(TestKeys.thumbprint(aliceHostKey), aliceUserId);
 
     bobHostKey = TestKeys.generateEd25519();
     bobAgentKey = TestKeys.generateEd25519();
+    preRegisterHost(bobHostKey);
     bobAgentId = registerDelegatedAgent(bobHostKey, bobAgentKey, realmCap);
     linkHostToUser(TestKeys.thumbprint(bobHostKey), bobUserId);
   }
