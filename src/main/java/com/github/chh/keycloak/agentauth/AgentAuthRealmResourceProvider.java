@@ -740,10 +740,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
-      if (isJtiReplay(jwt, jti)) {
-        return Response.ok(Map.of("active", false)).build();
-      }
-
       // Build valid response
       String issInJwt = jwt.getJWTClaimsSet().getIssuer();
       if (issInJwt == null) {
@@ -757,6 +753,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       Map<String, Object> hostDataForAgent = storage().getHost(hostId);
       if (hostDataForAgent == null || !"active".equals(hostDataForAgent.get("status"))) {
+        return Response.ok(Map.of("active", false)).build();
+      }
+
+      // §4.5 + §4.6: jti replay detection MUST run AFTER signature verification and identity/
+      // state validation. Otherwise a forged or stale-state token with a guessed jti could
+      // burn that jti before the legitimate signed token is processed, denying the legitimate
+      // agent its single-use credential.
+      if (isJtiReplay(jwt, jti)) {
         return Response.ok(Map.of("active", false)).build();
       }
 
@@ -1536,9 +1540,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       visibleCapabilities.add(cap);
     }
 
-    // If unauthenticated and no public capabilities are visible, require authentication
+    // If unauthenticated and no public capabilities are visible, require authentication.
+    // §5.2 + §5.14: include the AgentAuth WWW-Authenticate challenge so clients can discover
+    // the realm's agent-configuration endpoint and obtain credentials.
     if (!isAuthenticated && visibleCapabilities.isEmpty()) {
+      String discoveryUrl = agentConfigurationDiscoveryUrl();
       return Response.status(401)
+          .header("WWW-Authenticate", "AgentAuth discovery=\"" + discoveryUrl + "\"")
           .entity(Map.of("error", "authentication_required",
               "message", "Authentication required: no public capabilities available"))
           .build();
@@ -1608,7 +1616,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     response.put("capabilities", responseCapabilities);
     response.put("has_more", hasMore);
     response.put("next_cursor", nextCursor);
-    return Response.ok(response).build();
+    // §10.6: catalog responses SHOULD be cacheable; 5 minutes is the recommended max-age. Use
+    // private for authenticated callers (per-user view) and public for the unauthenticated
+    // public-only catalog view.
+    String cacheControl = isAuthenticated ? "private, max-age=300" : "public, max-age=300";
+    return Response.ok(response).header("Cache-Control", cacheControl).build();
   }
 
   @GET
@@ -1667,9 +1679,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
     }
 
-    if ("authenticated".equals(cap.get("visibility")) && !isAuthenticated) {
-      return Response.status(403)
-          .entity(Map.of("error", "access_denied", "message", "Authentication required"))
+    // For unauthenticated callers, non-public capabilities must be indistinguishable from
+    // missing ones — returning 403 confirms the cap exists and leaks the catalog. Mirror the
+    // entitlement-gate path below and respond 404 capability_not_found instead.
+    if (!"public".equals(cap.get("visibility")) && !isAuthenticated) {
+      return Response.status(404)
+          .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
           .build();
     }
 
@@ -1691,7 +1706,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       result.put("grant_status", computeGrantStatus(agentId, name));
     }
 
-    return Response.ok(result).build();
+    // §10.6: cache the describe response for 5 minutes; private when the response was tailored
+    // to an authenticated principal, public otherwise.
+    String cacheControl = isAuthenticated ? "private, max-age=300" : "public, max-age=300";
+    return Response.ok(result).header("Cache-Control", cacheControl).build();
   }
 
   @POST
@@ -2059,9 +2077,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       Map<String, Object> requestBody) {
 
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      String discoveryUrl = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName())
-          .path(".well-known/agent-configuration").build().toString();
+      String discoveryUrl = agentConfigurationDiscoveryUrl();
       return Response.status(401)
           .header("WWW-Authenticate", "AgentAuth discovery=\"" + discoveryUrl + "\"")
           .entity(Map.of("error", "authentication_required",
@@ -2110,11 +2126,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (jti == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Missing jti"))
-            .build();
-      }
-      if (isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected"))
             .build();
       }
 
@@ -2168,6 +2179,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       if (!jwt.verify(verifier)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature"))
+            .build();
+      }
+
+      // §4.5 + §4.6: jti replay detection MUST run AFTER signature verification and identity/
+      // state validation. Otherwise an unsigned/forged token with a guessed jti could burn
+      // that jti before the legitimate signed token is processed, denying the legitimate
+      // agent its single-use credential.
+      if (isJtiReplay(jwt, jti)) {
+        return Response.status(401)
+            .entity(Map.of("error", "jti_replay", "message", "Replay detected"))
             .build();
       }
 
@@ -2673,6 +2694,18 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     return session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
         .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
         .path("verify").build().getPath();
+  }
+
+  /**
+   * Build the {@code .well-known/agent-configuration} discovery URL for the current realm. Used as
+   * the {@code discovery="..."} parameter in the {@code WWW-Authenticate: AgentAuth} challenge per
+   * spec §5.14, and emitted from the catalog and execute endpoints when authentication is missing
+   * or insufficient.
+   */
+  private String agentConfigurationDiscoveryUrl() {
+    return session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
+        .path("realms").path(session.getContext().getRealm().getName())
+        .path(".well-known/agent-configuration").build().toString();
   }
 
   private boolean isSecureRequest() {

@@ -1,7 +1,6 @@
 package com.github.chh.keycloak.agentauth;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
@@ -162,6 +161,7 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .get("/capability/list")
         .then()
         .statusCode(200)
+        .header("Cache-Control", equalTo("public, max-age=300"))
         .body("capabilities.name", hasItem(publicCapability))
         .body("capabilities.name", org.hamcrest.Matchers.not(hasItem(authenticatedCapability)))
         .body("capabilities[0].grant_status", nullValue());
@@ -189,6 +189,7 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .get("/capability/list")
         .then()
         .statusCode(200)
+        .header("Cache-Control", equalTo("private, max-age=300"))
         .body("capabilities.name", hasItems(publicCapability, authenticatedCapability))
         .body("capabilities.description", hasItems("Public balance lookup", "Private transfer"));
   }
@@ -243,6 +244,7 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .get("/capability/describe")
         .then()
         .statusCode(200)
+        .header("Cache-Control", equalTo("public, max-age=300"))
         .body("name", equalTo(publicCapability))
         .body("description", equalTo("Public balance lookup"))
         .body("input.type", equalTo("object"))
@@ -272,14 +274,17 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .get("/capability/describe")
         .then()
         .statusCode(200)
+        .header("Cache-Control", equalTo("private, max-age=300"))
         .body("name", equalTo(authenticatedCapability))
         .body("grant_status", equalTo("granted"));
   }
 
   /**
    * Verifies that {@code GET /capability/describe?name=} for an {@code authenticated}-visibility
-   * capability without any authorization token returns {@code 403} or {@code 404}, preventing
-   * information leakage about non-public capabilities to unauthenticated callers.
+   * capability without any authorization token returns {@code 404 capability_not_found} —
+   * indistinguishable from the response for a non-existent capability — to prevent information
+   * leakage about the catalog to unauthenticated callers. Returning {@code 403} would confirm the
+   * capability exists.
    *
    * @see <a href=
    *      "https://agent-auth-protocol.com/specification/v1.0-draft#521-describe-capability">§5.2.1
@@ -288,14 +293,15 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
    *      Capabilities — visibility semantics</a>
    */
   @Test
-  void describeAuthenticatedCapabilityWithoutAuthReturns403Or404() {
+  void describeAuthenticatedCapabilityWithoutAuthReturns404() {
     given()
         .baseUri(issuerUrl())
         .queryParam("name", authenticatedCapability)
         .when()
         .get("/capability/describe")
         .then()
-        .statusCode(anyOf(equalTo(403), equalTo(404)));
+        .statusCode(404)
+        .body("error", equalTo("capability_not_found"));
   }
 
   /**
@@ -998,11 +1004,12 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
   /**
    * §5.2.1 mirror of {@link #listCapabilitiesWithUnknownHostJwtReturnsPublicOnly}: an unknown
    * self-signed host JWT must NOT unlock authenticated-visibility metadata on describe. The
-   * describe endpoint returns 403 access_denied for the unauthenticated path, since no public
-   * downgrade is meaningful for a single named cap.
+   * describe endpoint treats the unknown host as unauthenticated and — to avoid leaking that the
+   * named cap exists — returns the same {@code 404 capability_not_found} response a missing
+   * capability would. Returning {@code 403} here would confirm the cap's existence to a stranger.
    */
   @Test
-  void describeAuthenticatedCapabilityWithUnknownHostJwtReturns403() {
+  void describeAuthenticatedCapabilityWithUnknownHostJwtReturns404() {
     OctetKeyPair stranger = TestKeys.generateEd25519();
     String strangerJwt = TestJwts.hostJwt(stranger, issuerUrl());
 
@@ -1013,8 +1020,8 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
         .when()
         .get("/capability/describe")
         .then()
-        .statusCode(403)
-        .body("error", equalTo("access_denied"));
+        .statusCode(404)
+        .body("error", equalTo("capability_not_found"));
   }
 
   /**
