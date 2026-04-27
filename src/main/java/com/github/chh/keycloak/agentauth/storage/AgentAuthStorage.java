@@ -24,6 +24,16 @@ public interface AgentAuthStorage extends Provider {
 
   void removeHost(String hostId);
 
+  /**
+   * Locate the host registered with the given {@code host_jwks_url}, or {@code null} when none
+   * exists. Used by the AAP §4.5.1 host-JWT verification fallback when an inbound host+jwt's
+   * {@code iss} no longer matches a stored {@code host_id} but does carry a {@code host_jwks_url}
+   * claim — typical after a host rotates its JWKS-served key out of band. Implementations should
+   * return at most one match; ambiguous matches indicate corrupt state and the implementation may
+   * pick deterministically.
+   */
+  Map<String, Object> findHostByJwksUrl(String hostJwksUrl);
+
   // --- Agents (keyed by agent UUID) ---
 
   Map<String, Object> getAgent(String agentId);

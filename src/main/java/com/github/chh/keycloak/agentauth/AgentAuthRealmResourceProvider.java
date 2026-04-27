@@ -72,6 +72,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     return session.getProvider(AgentAuthStorage.class);
   }
 
+  private HostJwtVerifier hostJwtVerifier() {
+    return new HostJwtVerifier(storage(), JWKS_CACHE, this::isJtiReplay);
+  }
+
   @Override
   public Object getResource() {
     return this;
@@ -845,76 +849,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       @QueryParam("agent_id") String agentId) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401).entity(Map.of("error", "authentication_required", "message",
-          "Missing or invalid Authorization header")).build();
-    }
-
-    String token = authHeader.substring(7);
-    SignedJWT jwt;
+    HostJwtVerifier verifier = hostJwtVerifier();
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(token);
-    } catch (Exception e) {
-      return Response.status(401).entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    if (!"host+jwt".equals(jwt.getHeader().getType().getType())) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type host+jwt")).build();
+      verified = verifier.verify(authHeader, issuerUrl(), HostJwtVerifier.Options.forAgentStatus());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps")).build();
-      }
-
-      long skewMsStatus = 30_000L;
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > System.currentTimeMillis()
-          + skewMsStatus) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future")).build();
-      }
-
-      if (System.currentTimeMillis() > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired")).build();
-      }
-
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience")).build();
-      }
-
-      Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
-          .getJSONObjectClaim("host_public_key");
-      if (hostPublicKeyMap == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing host_public_key")).build();
-      }
-
-      OctetKeyPair hostKey = OctetKeyPair.parse(hostPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(hostKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature")).build();
-      }
-
-      String iss = jwt.getJWTClaimsSet().getIssuer();
-      String previousHostId = (String) jwt.getJWTClaimsSet().getClaim("previous_host_id");
-      if (!hostKey.computeThumbprint().toString().equals(iss)
-          && (previousHostId == null || !previousHostId.equals(iss))) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-      }
+      String iss = verified.iss();
+      Map<String, Object> hostData = verified.hostData();
 
       if (storage().isHostRotated(iss)) {
         return Response.status(401)
@@ -924,7 +869,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       // Check host revocation BEFORE jti replay, so a revoked host gets 403 immediately
       // even if the same JWT was used for the revoke call (jti already consumed).
-      Map<String, Object> hostData = storage().getHost(iss);
       if (hostData != null && "revoked".equals(hostData.get("status"))) {
         return Response.status(403)
             .entity(Map.of("error", "host_revoked", "message", "Host is revoked")).build();
@@ -955,9 +899,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      if (jti == null || isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
+      try {
+        verifier.enforceJtiReplay(verified);
+      } catch (HostJwtException e) {
+        return e.response();
       }
 
       if (agentId == null) {
@@ -992,79 +937,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       Map<String, Object> requestBody) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401).entity(Map.of("error", "authentication_required", "message",
-          "Missing or invalid Authorization header")).build();
-    }
-
-    String token = authHeader.substring(7);
-    SignedJWT jwt;
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(token);
-    } catch (Exception e) {
-      return Response.status(401).entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    if (!"host+jwt".equals(jwt.getHeader().getType().getType())) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type host+jwt")).build();
+      verified = hostJwtVerifier()
+          .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null || isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
-      }
-
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps")).build();
-      }
-
-      long skewMsRotateAgent = 30_000L;
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > System.currentTimeMillis()
-          + skewMsRotateAgent) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future")).build();
-      }
-
-      if (System.currentTimeMillis() > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired")).build();
-      }
-
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience")).build();
-      }
-
-      Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
-          .getJSONObjectClaim("host_public_key");
-      if (hostPublicKeyMap == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing host_public_key")).build();
-      }
-
-      OctetKeyPair hostKey = OctetKeyPair.parse(hostPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(hostKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature")).build();
-      }
-
-      String iss = jwt.getJWTClaimsSet().getIssuer();
-      if (!hostKey.computeThumbprint().toString().equals(iss)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-      }
-
+      String iss = verified.iss();
       if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
@@ -1147,79 +1029,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       Map<String, Object> requestBody) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401).entity(Map.of("error", "authentication_required", "message",
-          "Missing or invalid Authorization header")).build();
-    }
-
-    String token = authHeader.substring(7);
-    SignedJWT jwt;
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(token);
-    } catch (Exception e) {
-      return Response.status(401).entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    if (!"host+jwt".equals(jwt.getHeader().getType().getType())) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type host+jwt")).build();
+      verified = hostJwtVerifier()
+          .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null || isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
-      }
-
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps")).build();
-      }
-
-      long skewMsRevokeAgent = 30_000L;
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > System.currentTimeMillis()
-          + skewMsRevokeAgent) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future")).build();
-      }
-
-      if (System.currentTimeMillis() > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired")).build();
-      }
-
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience")).build();
-      }
-
-      Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
-          .getJSONObjectClaim("host_public_key");
-      if (hostPublicKeyMap == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing host_public_key")).build();
-      }
-
-      OctetKeyPair hostKey = OctetKeyPair.parse(hostPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(hostKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature")).build();
-      }
-
-      String iss = jwt.getJWTClaimsSet().getIssuer();
-      if (!hostKey.computeThumbprint().toString().equals(iss)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-      }
-
+      String iss = verified.iss();
       if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
@@ -1244,7 +1063,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      Map<String, Object> hostData = storage().getHost(iss);
+      Map<String, Object> hostData = verified.hostData();
       if (hostData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Unknown host key"))
@@ -1287,79 +1106,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       Map<String, Object> requestBody) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401).entity(Map.of("error", "authentication_required", "message",
-          "Missing or invalid Authorization header")).build();
-    }
-
-    String token = authHeader.substring(7);
-    SignedJWT jwt;
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(token);
-    } catch (Exception e) {
-      return Response.status(401).entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    if (!"host+jwt".equals(jwt.getHeader().getType().getType())) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type host+jwt")).build();
+      verified = hostJwtVerifier()
+          .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null || isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
-      }
-
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps")).build();
-      }
-
-      long skewMsReactivate = 30_000L;
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > System.currentTimeMillis()
-          + skewMsReactivate) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future")).build();
-      }
-
-      if (System.currentTimeMillis() > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired")).build();
-      }
-
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience")).build();
-      }
-
-      Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
-          .getJSONObjectClaim("host_public_key");
-      if (hostPublicKeyMap == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing host_public_key")).build();
-      }
-
-      OctetKeyPair hostKey = OctetKeyPair.parse(hostPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(hostKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature")).build();
-      }
-
-      String iss = jwt.getJWTClaimsSet().getIssuer();
-      if (!hostKey.computeThumbprint().toString().equals(iss)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-      }
-
+      String iss = verified.iss();
       if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
@@ -1383,7 +1139,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      Map<String, Object> hostData = storage().getHost(iss);
+      Map<String, Object> hostData = verified.hostData();
       if (hostData == null) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Unknown host key"))
@@ -1482,86 +1238,23 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       Map<String, Object> requestBody) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401).entity(Map.of("error", "authentication_required", "message",
-          "Missing or invalid Authorization header")).build();
-    }
-
-    String token = authHeader.substring(7);
-    SignedJWT jwt;
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(token);
-    } catch (Exception e) {
-      return Response.status(401).entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    if (!"host+jwt".equals(jwt.getHeader().getType().getType())) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type host+jwt")).build();
+      verified = hostJwtVerifier()
+          .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null || isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
-      }
-
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps")).build();
-      }
-
-      long skewMsRevokeHost = 30_000L;
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > System.currentTimeMillis()
-          + skewMsRevokeHost) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future")).build();
-      }
-
-      if (System.currentTimeMillis() > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired")).build();
-      }
-
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience")).build();
-      }
-
-      Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
-          .getJSONObjectClaim("host_public_key");
-      if (hostPublicKeyMap == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing host_public_key")).build();
-      }
-
-      OctetKeyPair hostKey = OctetKeyPair.parse(hostPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(hostKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature")).build();
-      }
-
-      String iss = jwt.getJWTClaimsSet().getIssuer();
-      if (!hostKey.computeThumbprint().toString().equals(iss)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-      }
-
+      String iss = verified.iss();
       if (storage().isHostRotated(iss)) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
       }
 
-      Map<String, Object> hostData = storage().getHost(iss);
+      Map<String, Object> hostData = verified.hostData();
       if (hostData != null && "revoked".equals(hostData.get("status"))) {
         return Response.status(409)
             .entity(Map.of("error", "already_revoked", "message", "Host already revoked")).build();
@@ -1606,83 +1299,49 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       Map<String, Object> requestBody) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401).entity(Map.of("error", "authentication_required", "message",
-          "Missing or invalid Authorization header")).build();
-    }
-
-    String token = authHeader.substring(7);
-    SignedJWT jwt;
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(token);
-    } catch (Exception e) {
-      return Response.status(401).entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    if (!"host+jwt".equals(jwt.getHeader().getType().getType())) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type host+jwt")).build();
+      verified = hostJwtVerifier()
+          .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.forRotateHostKey());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null || isJtiReplay(jwt, jti)) {
+      String iss = verified.iss();
+
+      // §5.9 safety: a rotated key (its thumbprint listed in the rotation history) must not be
+      // accepted on this endpoint. Otherwise an attacker holding a stale, retired key could try
+      // to "rotate" again — even though the legitimate post-rotation iss has already moved on.
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected")).build();
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
+            .build();
       }
 
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps")).build();
+      Map<String, Object> hostData = verified.hostData();
+      // Bug 1 fix: rotate-key is a mutation on an existing active host record. Unknown hosts
+      // (post-verification with hostData == null) MUST be rejected here, otherwise a self-signed
+      // host JWT could materialize a brand-new active host on the server. The dynamic-registration
+      // path that creates pending hosts is /agent/register, not this one.
+      if (hostData == null) {
+        return Response.status(404)
+            .entity(Map.of("error", "host_not_found", "message", "Host not found"))
+            .build();
       }
 
-      long skewMsRotateHost = 30_000L;
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > System.currentTimeMillis()
-          + skewMsRotateHost) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future")).build();
-      }
-
-      if (System.currentTimeMillis() > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired")).build();
-      }
-
-      String expectedAudience = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-          .path("realms").path(session.getContext().getRealm().getName()).build().toString()
-          + "/agent-auth";
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(expectedAudience)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience")).build();
-      }
-
-      Map<String, Object> hostPublicKeyMap = jwt.getJWTClaimsSet()
-          .getJSONObjectClaim("host_public_key");
-      if (hostPublicKeyMap == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing host_public_key")).build();
-      }
-
-      OctetKeyPair hostKey = OctetKeyPair.parse(hostPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(hostKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature")).build();
-      }
-
-      String iss = jwt.getJWTClaimsSet().getIssuer();
-      if (!hostKey.computeThumbprint().toString().equals(iss)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Issuer mismatch")).build();
-      }
-
-      Map<String, Object> hostData = storage().getHost(iss);
-      if (hostData != null && "revoked".equals(hostData.get("status"))) {
+      String hostStatus = (String) hostData.get("status");
+      if ("revoked".equals(hostStatus)) {
         return Response.status(403)
             .entity(Map.of("error", "host_revoked", "message", "Host already revoked")).build();
+      }
+      // §5.9 requires the host be active before rotating; pending/rejected hosts have no
+      // §2.8-approved owner so a key rotation would silently bypass the approval flow.
+      if (!"active".equals(hostStatus)) {
+        return Response.status(409)
+            .entity(Map.of("error", "invalid_state",
+                "message", "Host must be active to rotate the key"))
+            .build();
       }
 
       if (requestBody == null || !requestBody.containsKey("public_key")) {
@@ -1716,20 +1375,20 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       String newIss = newHostKey.computeThumbprint().toString();
-      String oldIss = iss;
-
-      if (hostData == null) {
-        hostData = new HashMap<>();
-        hostData.put("status", "active");
-      }
+      // When the host was located via the JWKS-URL fallback, the row's PK is the prior thumbprint
+      // stored in hostData.host_id, not the JWT's iss. Use the stored PK to record rotation and to
+      // remove the old row; otherwise iss already equals the stored PK.
+      String oldIss = verified.foundByJwksFallback() && hostData.get("host_id") instanceof String
+          ? (String) hostData.get("host_id")
+          : iss;
       hostData.put("public_key", newHostPublicKeyMap);
       hostData.put("host_id", newIss);
 
       storage().recordHostRotation(oldIss, newIss);
       storage().putHost(newIss, hostData);
-      storage().removeHost(iss);
+      storage().removeHost(oldIss);
 
-      for (Map<String, Object> agentData : storage().findAgentsByHost(iss)) {
+      for (Map<String, Object> agentData : storage().findAgentsByHost(oldIss)) {
         agentData.put("host_id", newIss);
         storage().putAgent((String) agentData.get("agent_id"), agentData);
       }

@@ -19,7 +19,8 @@ import jakarta.persistence.Table;
     @Index(name = "IDX_AGENT_AUTH_HOST_USER", columnList = "USER_ID")
 })
 @NamedQueries({
-    @NamedQuery(name = "HostEntity.findByUserId", query = "select h from HostEntity h where h.userId = :userId")
+    @NamedQuery(name = "HostEntity.findByUserId", query = "select h from HostEntity h where h.userId = :userId"),
+    @NamedQuery(name = "HostEntity.findByJwksUrl", query = "select h from HostEntity h where h.hostJwksUrl = :hostJwksUrl")
 })
 public class HostEntity {
 

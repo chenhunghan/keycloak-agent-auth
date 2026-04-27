@@ -67,6 +67,19 @@ public class JpaStorage implements AgentAuthStorage {
     }
   }
 
+  @Override
+  public Map<String, Object> findHostByJwksUrl(String hostJwksUrl) {
+    if (hostJwksUrl == null || hostJwksUrl.isBlank()) {
+      return null;
+    }
+    List<HostEntity> rows = em()
+        .createNamedQuery("HostEntity.findByJwksUrl", HostEntity.class)
+        .setParameter("hostJwksUrl", hostJwksUrl)
+        .setMaxResults(1)
+        .getResultList();
+    return rows.isEmpty() ? null : hostToMap(rows.get(0));
+  }
+
   // --- Agents ---
 
   @Override

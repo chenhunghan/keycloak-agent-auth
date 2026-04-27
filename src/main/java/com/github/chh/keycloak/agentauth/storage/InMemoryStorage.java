@@ -33,6 +33,19 @@ public class InMemoryStorage implements AgentAuthStorage {
   }
 
   @Override
+  public Map<String, Object> findHostByJwksUrl(String hostJwksUrl) {
+    if (hostJwksUrl == null || hostJwksUrl.isBlank()) {
+      return null;
+    }
+    for (Map<String, Object> host : HOSTS.values()) {
+      if (hostJwksUrl.equals(host.get("host_jwks_url"))) {
+        return host;
+      }
+    }
+    return null;
+  }
+
+  @Override
   public Map<String, Object> getAgent(String agentId) {
     return AGENTS.get(agentId);
   }

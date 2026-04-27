@@ -1827,6 +1827,7 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
   @Order(71)
   void rotateHostKeyWithMalformedPublicKeyReturns400() {
     OctetKeyPair rotateHostKey = TestKeys.generateEd25519();
+    preRegisterHost(rotateHostKey);
     String hostJwt = TestJwts.hostJwt(rotateHostKey, issuerUrl());
 
     given()

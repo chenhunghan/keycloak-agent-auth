@@ -168,6 +168,37 @@ public final class TestJwts {
   }
 
   /**
+   * Builds a host+jwt that references the host signing key through {@code host_jwks_url} only — no
+   * inline {@code host_public_key} claim. Used to exercise §4.5.1 verification of JWKS-only hosts
+   * on lifecycle endpoints.
+   */
+  public static String hostJwtWithHostJwksUrl(
+      OctetKeyPair hostKey, String hostJwksUrl, String hostKid, String audience) {
+    try {
+      JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
+          .type(new JOSEObjectType("host+jwt"))
+          .keyID(hostKid)
+          .build();
+
+      long now = System.currentTimeMillis();
+      JWTClaimsSet claims = new JWTClaimsSet.Builder()
+          .issuer(TestKeys.thumbprint(hostKey))
+          .audience(audience)
+          .issueTime(new Date(now))
+          .expirationTime(new Date(now + 60_000))
+          .jwtID("h-" + UUID.randomUUID())
+          .claim("host_jwks_url", hostJwksUrl)
+          .build();
+
+      SignedJWT jwt = new SignedJWT(header, claims);
+      jwt.sign(new Ed25519Signer(hostKey));
+      return jwt.serialize();
+    } catch (JOSEException e) {
+      throw new AssertionError("Failed to create host JWT for JWKS-only host", e);
+    }
+  }
+
+  /**
    * Builds an agent+jwt for capability execution or authenticated requests.
    *
    * @param hostKey
