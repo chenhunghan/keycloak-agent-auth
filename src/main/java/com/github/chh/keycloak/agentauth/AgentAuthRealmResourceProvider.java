@@ -424,8 +424,19 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             }
             grant.put("granted_by", iss);
           }
-          if (requestedConstraints != null && !"pending".equals(grant.get("status"))) {
-            grant.put("constraints", requestedConstraints);
+          // §2.13: "the server MUST NOT widen constraints beyond what the agent requested
+          // without new approval." For active grants we record `constraints` directly. For
+          // pending grants we stash the requested scope in `requested_constraints` so the
+          // pending response stays compact (§5.3 / §5.4) while the approval activation can
+          // restore the originally-requested scope into `constraints` — without this, a
+          // pending grant promoted to active would lose its scope and become broader than
+          // the agent ever asked for.
+          if (requestedConstraints != null) {
+            if ("pending".equals(grant.get("status"))) {
+              grant.put("requested_constraints", requestedConstraints);
+            } else if (!"denied".equals(grant.get("status"))) {
+              grant.put("constraints", requestedConstraints);
+            }
           }
           grants.add(grant);
         }
@@ -496,7 +507,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           return Response.status(409)
               .entity(Map.of("error", "agent_exists", "message", "Agent already exists")).build();
         } else if ("pending".equals(existingStatus)) {
-          return Response.ok(existingAgent).build(); // Return existing pending agent
+          // Return existing pending agent (sanitized — pending grants stash requested
+          // constraints internally but the wire shape stays compact per §5.3).
+          return Response.ok(sanitizeAgentResponse(existingAgent)).build();
         } else if ("revoked".equals(existingStatus) || "rejected".equals(existingStatus)
             || "claimed".equals(existingStatus)) {
           return Response.status(409)
@@ -589,7 +602,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       storage().putAgent(agentId, agentData);
 
-      return Response.ok(agentData).build();
+      return Response.ok(sanitizeAgentResponse(agentData)).build();
 
     } catch (Exception e) {
       return Response.status(500)
@@ -951,7 +964,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
-      return Response.ok(agentData).build();
+      return Response.ok(sanitizeAgentResponse(agentData)).build();
     } catch (Exception e) {
       return Response.status(500)
           .entity(Map.of("error", "internal_error", "message", e.getMessage()))
@@ -1445,7 +1458,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @QueryParam("cursor") String cursor,
       @QueryParam("limit") Integer limit) {
     String agentId = null;
-    String verifiedHostId = null;
     Map<String, Object> verifiedAgentData = null;
     Map<String, Object> verifiedHostData = null;
     boolean isAuthenticated = false;
@@ -1469,7 +1481,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         if (verified.storedHost() && hostData != null
             && "active".equals(hostData.get("status"))
             && hostData.get("user_id") != null) {
-          verifiedHostId = verified.iss();
           verifiedHostData = hostData;
           isAuthenticated = true;
         }
@@ -1957,6 +1968,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         } else if (capReqApproval) {
           grant.put("status", "pending");
           grant.put("status_url", buildGrantStatusUrl(agentId, capName));
+          // §2.13: stash the requested scope so the approval can promote it into `constraints`
+          // without re-asking. Mirrors the pending-grant path in registerAgent. The pending
+          // response stays compact (§5.4) — sanitizeAgentResponse strips this key on the way out.
+          if (requestedConstraints != null) {
+            grant.put("requested_constraints", requestedConstraints);
+          }
         } else {
           grant.put("status", "active");
           grant.put("description", registeredCap.get("description"));
@@ -2007,7 +2024,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       Map<String, Object> responseMap = new HashMap<>();
       responseMap.put("agent_id", agentId);
-      responseMap.put("agent_capability_grants", newGrants);
+      // §5.4: pending grants are returned in compact shape — sanitize strips the internal
+      // `requested_constraints` stash from any pending entry so storage retains scope while
+      // the wire payload stays compact.
+      responseMap.put("agent_capability_grants", sanitizeGrantsForResponse(newGrants));
       if (requiresApproval) {
         Map<String, Object> hostDataForApproval = storage().getHost(hostId);
         String bindingMessage = requestBody.get("binding_message") instanceof String bm
@@ -2939,6 +2959,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
                 grant.put("status", "denied");
                 grant.put("reason", "insufficient_authority");
                 grant.remove("status_url");
+                grant.remove("requested_constraints");
                 continue;
               }
               grant.put("status", "active");
@@ -2951,11 +2972,21 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
                 grant.put("output", registeredCap.get("output"));
               }
               grant.put("granted_by", userId);
+              // §2.13: restore the agent's originally-requested constraint scope onto the
+              // active grant. The pending grant stashed it under `requested_constraints` at
+              // register/request-capability time so the user is approving the same scope the
+              // agent declared. The approver doesn't redeclare scope at /verify/approve, so
+              // dropping the stash here would widen the grant beyond what the agent asked for.
+              Object stashed = grant.remove("requested_constraints");
+              if (stashed instanceof Map<?, ?>) {
+                grant.put("constraints", stashed);
+              }
               tofuAdds.add(capName);
             } else {
               grant.put("status", "denied");
               grant.put("reason", "user_denied");
               grant.remove("status_url");
+              grant.remove("requested_constraints");
             }
           }
         }
@@ -2971,6 +3002,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           if ("pending".equals(grant.get("status"))) {
             grant.put("status", "denied");
             grant.remove("status_url");
+            // The user denied this grant — discard the requested scope so a denied entry
+            // never carries leftover request metadata into storage or future responses.
+            grant.remove("requested_constraints");
           }
         }
       }
@@ -3025,7 +3059,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
     }
 
-    return Response.ok(agentData).build();
+    return Response.ok(sanitizeAgentResponse(agentData)).build();
   }
 
   /**
@@ -3115,7 +3149,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
       for (Map<String, Object> agent : storage.findAgentsByHost(hostId)) {
         if ("pending".equals(agent.get("status")) || hasPendingGrants(agent)) {
-          pending.add(agent);
+          // Strip the internal `requested_constraints` stash; approvers see the same
+          // compact pending-grant shape that the original register/request response carried.
+          pending.add(sanitizeAgentResponse(agent));
         }
       }
     }
@@ -3152,6 +3188,50 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
     }
     return false;
+  }
+
+  /**
+   * §5.3 / §5.4: pending registrations and capability requests return a compact grant shape
+   * ({@code capability}, {@code status}, optional {@code status_url}) without echoing the
+   * agent-requested constraint scope. Internally we stash the requested scope under
+   * {@code requested_constraints} on each pending grant so {@link #transitionPendingAgent} can
+   * promote it to {@code constraints} on approval (§2.13: server MUST NOT widen scope beyond what
+   * was requested without new approval). This helper returns a shallow agent-data copy whose grants
+   * list strips the internal {@code requested_constraints} key so the wire shape stays compact
+   * while storage retains the full scope.
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> sanitizeAgentResponse(Map<String, Object> agentData) {
+    if (agentData == null) {
+      return null;
+    }
+    Object rawGrants = agentData.get("agent_capability_grants");
+    if (!(rawGrants instanceof List<?>)) {
+      return agentData;
+    }
+    Map<String, Object> copy = new HashMap<>(agentData);
+    copy.put("agent_capability_grants",
+        sanitizeGrantsForResponse((List<Map<String, Object>>) rawGrants));
+    return copy;
+  }
+
+  /**
+   * Builds a wire-shape copy of a grants list, stripping the internal {@code requested_constraints}
+   * stash from any pending grant entry. See {@link #sanitizeAgentResponse} for rationale.
+   */
+  private static List<Map<String, Object>> sanitizeGrantsForResponse(
+      List<Map<String, Object>> grants) {
+    List<Map<String, Object>> out = new ArrayList<>(grants.size());
+    for (Map<String, Object> grant : grants) {
+      if (grant.containsKey("requested_constraints")) {
+        Map<String, Object> grantCopy = new HashMap<>(grant);
+        grantCopy.remove("requested_constraints");
+        out.add(grantCopy);
+      } else {
+        out.add(grant);
+      }
+    }
+    return out;
   }
 
   private static boolean isEd25519Jwk(Map<String, Object> jwk) {

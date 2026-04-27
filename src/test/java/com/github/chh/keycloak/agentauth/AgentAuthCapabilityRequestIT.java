@@ -671,6 +671,74 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .body("approval.status_url", notNullValue());
   }
 
+  /**
+   * §5.4 + §2.13: when {@code /agent/request-capability} returns a pending grant for an
+   * approval-required cap that the agent requested with a constraint scope, the response MUST stay
+   * in the compact pending shape — neither {@code constraints} nor the internal
+   * {@code requested_constraints} stash may appear on the wire. The constraint is held in storage
+   * so the activation flow can promote it onto the active grant on approval (covered by the
+   * round-trip test in {@link AgentAuthDeviceApprovalIT}).
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
+   *      §5.4 Request Capability — pending response shape</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#213-scoped-grants-constraints">
+   *      §2.13 Scoped Grants (Constraints)</a>
+   */
+  @Test
+  void requestApprovalRequiredCapabilityWithConstraintsReturnsCompactPendingGrant() {
+    String approvalCap = "constrained_pending_request_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Requires user approval",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, approvalCap, approvalCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": [
+                {
+                  "name": "%s",
+                  "constraints": {"amount": {"max": 75}}
+                }
+              ]
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants[0].capability", equalTo(approvalCap))
+        .body("agent_capability_grants[0].status", equalTo("pending"))
+        .body("agent_capability_grants[0].status_url", notNullValue())
+        // §5.4: pending grant MUST NOT echo `constraints` (compact response shape).
+        .body("agent_capability_grants[0].constraints", nullValue())
+        // The internal stash MUST NOT leak onto the wire.
+        .body("agent_capability_grants[0].requested_constraints", nullValue());
+  }
+
   // ---------------------------------------------------------------------------
   // TODO stubs — spec requirements not yet covered by tests above
   // ---------------------------------------------------------------------------

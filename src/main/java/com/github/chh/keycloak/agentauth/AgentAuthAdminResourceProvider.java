@@ -252,6 +252,9 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           grant.put("status", "denied");
           grant.put("reason", reason);
           grant.remove("status_url");
+          // Discard the agent's pending request scope on denial so a denied entry never
+          // carries leftover request metadata into storage or future responses.
+          grant.remove("requested_constraints");
         }
       }
     }
@@ -307,6 +310,14 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
     targetGrant.put("granted_by", approverUserId());
     targetGrant.remove("status_url");
+    // §2.13: promote the agent's originally-requested scope from the pending stash into
+    // `constraints`. The pending grant carries `requested_constraints`; admin approval — like
+    // user approval at /verify/approve — endorses that scope without redeclaring it. Dropping
+    // the stash here would widen the grant beyond what the agent ever asked for.
+    Object stashedConstraints = targetGrant.remove("requested_constraints");
+    if (stashedConstraints instanceof Map<?, ?>) {
+      targetGrant.put("constraints", stashedConstraints);
+    }
 
     boolean hasPendingGrant = false;
     for (Map<String, Object> grant : grants) {

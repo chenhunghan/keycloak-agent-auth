@@ -583,6 +583,250 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .statusCode(401);
   }
 
+  /**
+   * §2.13: when an agent registers with a constrained, approval-required capability, the pending
+   * response MUST stay in the compact {@code {capability, status[, status_url]}} shape (the server
+   * does not echo the requested scope at registration time). On approval, the originally requested
+   * constraint scope MUST be restored onto the active grant — the approver endorses the scope the
+   * agent declared, never widening it. After approval, attempting to execute with an argument that
+   * violates the restored constraint MUST be rejected with {@code constraint_violated}, proving the
+   * constraint survived the pending→active flip.
+   *
+   * <p>
+   * Regression coverage for the bug where pending grants discarded the agent's requested constraint
+   * scope and the activation logic produced a constraint-less active grant — silently widening the
+   * agent's effective scope beyond what was originally requested.
+   *
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#213-scoped-grants-constraints">
+   *      §2.13 Scoped Grants (Constraints)</a>
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration">
+   *      §5.3 Agent Registration — pending grant response shape</a>
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void registrationWithConstraints_pendingCompactResponse_approvalRestoresConstraintsAndExecuteEnforces() {
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String capName = registerApprovalRequiredCapability(
+        "devauth_constrained_reg_" + suffix());
+
+    // Register a delegated agent requesting the approval-required cap with a `max` scope.
+    Response regResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "constrained-pending agent",
+              "capabilities": [
+                {
+                  "name": "%s",
+                  "constraints": {"amount": {"max": 100}}
+                }
+              ],
+              "mode": "delegated"
+            }
+            """, capName))
+        .when()
+        .post("/agent/register");
+    regResp.then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .body("agent_capability_grants", org.hamcrest.Matchers.hasSize(1))
+        .body("agent_capability_grants[0].capability", equalTo(capName))
+        .body("agent_capability_grants[0].status", equalTo("pending"))
+        // §5.3: pending response MUST be compact — no `constraints`, no internal stash.
+        .body("agent_capability_grants[0].constraints", org.hamcrest.Matchers.nullValue())
+        .body("agent_capability_grants[0].requested_constraints",
+            org.hamcrest.Matchers.nullValue());
+    String agentId = regResp.jsonPath().getString("agent_id");
+    String userCode = regResp.jsonPath().getString("approval.user_code");
+
+    // User approves.
+    String username = "constrained-reg-approver-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    // §2.13: active grant carries the originally-requested scope.
+    Map<String, Object> status = agentStatusBody(agentId, hostKey);
+    assertThat(status.get("status")).isEqualTo("active");
+    java.util.List<Map<String, Object>> grants = (java.util.List<Map<String, Object>>) status
+        .get("agent_capability_grants");
+    Map<String, Object> grant = grants.stream()
+        .filter(g -> capName.equals(g.get("capability")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("Grant missing on active agent"));
+    assertThat(grant.get("status")).isEqualTo("active");
+    assertThat(grant.get("requested_constraints"))
+        .as("internal stash MUST NOT leak in agent/status response")
+        .isNull();
+    Map<String, Object> activeConstraints = (Map<String, Object>) grant.get("constraints");
+    assertThat(activeConstraints)
+        .as("active grant MUST carry the originally-requested scope after approval")
+        .isNotNull();
+    Map<String, Object> amountConstraint = (Map<String, Object>) activeConstraints.get("amount");
+    assertThat(amountConstraint)
+        .as("constraint operator survives pending→active flip")
+        .isNotNull()
+        .containsEntry("max", 100);
+
+    // Execute with a violating argument MUST be rejected — the active grant carries the
+    // restored scope, so ConstraintValidator catches the breach before the gateway forwards.
+    String execJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        "https://resource.example.test/" + capName);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + execJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capability": "%s",
+              "arguments": {"amount": 200}
+            }
+            """, capName))
+        .when()
+        .post("/capability/execute")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("constraint_violated"));
+  }
+
+  /**
+   * §2.13 + §5.4: same constraint-preservation rule applies to capability requests on an
+   * already-active agent. The pending response from {@code /agent/request-capability} MUST be
+   * compact, and approval MUST restore the requested scope onto the now-active grant.
+   *
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#213-scoped-grants-constraints">
+   *      §2.13 Scoped Grants (Constraints)</a>
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#54-request-capability">
+   *      §5.4 Request Capability — pending grant response shape</a>
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void requestCapabilityWithConstraints_pendingCompactResponse_approvalRestoresConstraintsAndExecuteEnforces() {
+    String autoCap = registerAutoCapability("devauth_capreq_constrained_auto_" + suffix());
+    String approvalCap = registerApprovalRequiredCapability(
+        "devauth_capreq_constrained_" + suffix());
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    preRegisterHost(hostKey);
+
+    // Register active agent with only the auto-approved cap so /agent/request-capability is
+    // the entry point we exercise next.
+    String agentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "constrained capreq agent",
+              "capabilities": ["%s"],
+              "mode": "delegated"
+            }
+            """, autoCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("active"))
+        .extract()
+        .path("agent_id");
+
+    // Agent requests the approval-required cap with a `max` scope.
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": [
+                {
+                  "name": "%s",
+                  "constraints": {"amount": {"max": 50}}
+                }
+              ]
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability");
+    reqResp.then()
+        .statusCode(200)
+        .body("agent_capability_grants",
+            org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.allOf(
+                org.hamcrest.Matchers.hasEntry("capability", approvalCap),
+                org.hamcrest.Matchers.hasEntry("status", "pending"))))
+        // §5.4 compact pending shape — no `constraints`, no internal stash.
+        .body("agent_capability_grants.find { it.capability == '" + approvalCap + "' }.constraints",
+            org.hamcrest.Matchers.nullValue())
+        .body("agent_capability_grants.find { it.capability == '" + approvalCap
+            + "' }.requested_constraints", org.hamcrest.Matchers.nullValue());
+    String userCode = reqResp.jsonPath().getString("approval.user_code");
+
+    // User approves.
+    String username = "capreq-constrained-approver-" + suffix();
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+
+    // §2.13: now-active grant carries the originally-requested scope.
+    Map<String, Object> status = agentStatusBody(agentId, hostKey);
+    java.util.List<Map<String, Object>> grants = (java.util.List<Map<String, Object>>) status
+        .get("agent_capability_grants");
+    Map<String, Object> grant = grants.stream()
+        .filter(g -> approvalCap.equals(g.get("capability")))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("Approval cap grant missing"));
+    assertThat(grant.get("status")).isEqualTo("active");
+    assertThat(grant.get("requested_constraints"))
+        .as("internal stash MUST NOT leak in agent/status response")
+        .isNull();
+    Map<String, Object> activeConstraints = (Map<String, Object>) grant.get("constraints");
+    assertThat(activeConstraints).isNotNull();
+    Map<String, Object> amountConstraint = (Map<String, Object>) activeConstraints.get("amount");
+    assertThat(amountConstraint).isNotNull().containsEntry("max", 50);
+
+    // Execute with a violating argument MUST be rejected.
+    String execJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
+        "https://resource.example.test/" + approvalCap);
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + execJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capability": "%s",
+              "arguments": {"amount": 100}
+            }
+            """, approvalCap))
+        .when()
+        .post("/capability/execute")
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("constraint_violated"));
+  }
+
   // --- helpers ---
 
   private static String suffix() {

@@ -393,6 +393,59 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
   }
 
   /**
+   * §5.3 + §2.13: when a registration's only capability requires approval AND the agent supplied a
+   * constraint scope, the pending response MUST stay in the compact {@code {capability, status,
+   * status_url}} shape — {@code constraints} are NOT echoed at this stage. The server still has to
+   * remember the requested scope internally so the approval activation can restore it (the sister
+   * test in {@link AgentAuthDeviceApprovalIT} drives the full approval round-trip and checks the
+   * post-approve grant carries the constraint), but the pending wire payload itself must not
+   * surface either {@code constraints} or the internal {@code requested_constraints} stash.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#53-agent-registration">
+   *      §5.3 Agent Registration — pending response shape</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#213-scoped-grants-constraints">
+   *      §2.13 Scoped Grants (Constraints)</a>
+   */
+  @Test
+  void registerPendingWithConstraintsReturnsCompactPendingGrant() {
+    OctetKeyPair pendingConstrainedAgentKey = TestKeys.generateEd25519();
+    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, pendingConstrainedAgentKey,
+        issuerUrl());
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Pending Constrained Agent",
+              "host_name": "test-host",
+              "capabilities": [
+                {
+                  "name": "%s",
+                  "constraints": {"amount": {"max": 250}}
+                }
+              ],
+              "mode": "delegated"
+            }
+            """, pendingCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .body("agent_capability_grants", hasSize(1))
+        .body("agent_capability_grants[0].capability", equalTo(pendingCapability))
+        .body("agent_capability_grants[0].status", equalTo("pending"))
+        .body("agent_capability_grants[0].status_url", notNullValue())
+        // §5.3: pending grant MUST NOT echo `constraints` (compact response shape).
+        .body("agent_capability_grants[0].constraints", nullValue())
+        // The internal stash MUST NOT leak onto the wire.
+        .body("agent_capability_grants[0].requested_constraints", nullValue());
+  }
+
+  /**
    * When an agent re-registers with the same host/key pair while already in {@code pending} state,
    * the server SHOULD treat the request as an idempotent retry and return the original
    * {@code agent_id} with {@code status} still set to {@code "pending"} rather than creating a
