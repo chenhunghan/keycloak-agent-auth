@@ -23,6 +23,7 @@ public final class TestcontainersSupport {
         .withProviderClassesFrom("target/classes")
         .withProviderLibsFrom(providerLibs())
         .withFeaturesEnabled("organization")
+        .withEnv("JAVA_OPTS_APPEND", "-Dagent-auth.test-mode=true")
         .withRealmImportFile(TEST_REALM_IMPORT);
   }
 

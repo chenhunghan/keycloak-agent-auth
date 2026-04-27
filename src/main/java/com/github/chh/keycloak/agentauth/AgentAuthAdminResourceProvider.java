@@ -239,6 +239,9 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Produces(MediaType.APPLICATION_JSON)
   public Response backdateAgentClocks(@PathParam("id") String id, String rawBody) {
     requireManageRealm();
+    if (!"true".equals(System.getProperty("agent-auth.test-mode"))) {
+      return Response.status(404).entity(Map.of("error", "not_found")).build();
+    }
     Map<String, Object> requestBody = null;
     if (rawBody != null && !rawBody.isBlank()) {
       try {
