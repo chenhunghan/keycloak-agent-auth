@@ -1,7 +1,10 @@
 package com.github.chh.keycloak.agentauth;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -10,10 +13,12 @@ import java.util.Map;
  * spec §2.13.
  *
  * <p>
- * Supported operators: {@code max}, {@code min}, {@code in}, {@code not_in}, and exact-value (plain
- * string).
+ * Supported operators: {@code max}, {@code min}, {@code in}, {@code not_in}, and exact-value
+ * literals for any JSON type (string, number, boolean, null, array, object).
  */
 public class ConstraintValidator {
+
+  private final ObjectMapper objectMapper = new ObjectMapper();
 
   /**
    * Validates the supplied arguments against the granted constraints.
@@ -39,13 +44,54 @@ public class ConstraintValidator {
         @SuppressWarnings("unchecked")
         Map<String, Object> ops = (Map<String, Object>) constraintDef;
         checkOperators(field, ops, actualValue, violations);
-      } else if (constraintDef instanceof String && !constraintDef.equals(actualValue)) {
+      } else if (!jsonEquals(constraintDef, actualValue)) {
         Map<String, Object> exactConstraint = new HashMap<>();
         exactConstraint.put("exact", constraintDef);
         violations.add(new ConstraintViolation(field, exactConstraint, actualValue));
       }
     }
     return violations;
+  }
+
+  private boolean jsonEquals(Object a, Object b) {
+    return jsonNodeEquals(objectMapper.valueToTree(a), objectMapper.valueToTree(b));
+  }
+
+  // Recursive structural equality that treats numeric nodes by value (so 500 == 500.0), matching
+  // JSON-level semantics rather than Java type identity. Jackson's JsonNode#equals is type-strict
+  // for numbers, which would falsely reject equivalent integer/double pairs.
+  private boolean jsonNodeEquals(JsonNode a, JsonNode b) {
+    if (a == null || b == null) {
+      return a == b;
+    }
+    if (a.isNumber() && b.isNumber()) {
+      return a.decimalValue().compareTo(b.decimalValue()) == 0;
+    }
+    if (a.isArray() && b.isArray()) {
+      if (a.size() != b.size()) {
+        return false;
+      }
+      for (int i = 0; i < a.size(); i++) {
+        if (!jsonNodeEquals(a.get(i), b.get(i))) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (a.isObject() && b.isObject()) {
+      if (a.size() != b.size()) {
+        return false;
+      }
+      Iterator<String> fields = a.fieldNames();
+      while (fields.hasNext()) {
+        String f = fields.next();
+        if (!b.has(f) || !jsonNodeEquals(a.get(f), b.get(f))) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return a.equals(b);
   }
 
   private void checkOperators(String field, Map<String, Object> ops, Object actualValue,
