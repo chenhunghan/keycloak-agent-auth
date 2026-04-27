@@ -1,6 +1,7 @@
 package com.github.chh.keycloak.agentauth;
 
 import static io.restassured.RestAssured.given;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasItem;
@@ -14,7 +15,9 @@ import com.github.chh.keycloak.agentauth.support.TestJwts;
 import com.github.chh.keycloak.agentauth.support.TestKeys;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -1611,5 +1614,333 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .body("agent_capability_grants", hasSize(2))
         .body("agent_capability_grants.status", hasItem("active"))
         .body("agent_capability_grants.status", hasItem("pending"));
+  }
+
+  // ---------------------------------------------------------------------------
+  // §5.4 + §7.1 approval-expiry persistence (Audit 02 P1 regression)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * §5.4 + §7.1: a capability-request that returns a pending {@code approval} object MUST persist
+   * {@code approval.issued_at_ms} on the agent so {@code /verify/approve} can enforce the same
+   * window it advertised. Regression coverage for Audit 02 P1 — previously the approval blob was
+   * only echoed in the response and never stored, leaving capability-request approvals redeemable
+   * indefinitely past {@code expires_in}.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#71-approval-flow">§7.1
+   *      Approval Flow — expiry enforcement</a>
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void requestCapabilityWithApproval_persistsIssuedAtMsOnAgent() {
+    String approvalCap = "approval_persist_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Persist issued_at_ms test",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, approvalCap, approvalCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    long beforeMs = System.currentTimeMillis();
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "Persist issued_at_ms regression"
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200)
+        .body("approval.method", equalTo("device_authorization"))
+        .body("approval.expires_in", greaterThan(0));
+    long afterMs = System.currentTimeMillis();
+
+    // Read the persisted approval blob via the admin GET /agents/{id} endpoint.
+    java.util.Map<String, Object> agentBody = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/agents/" + agentId)
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getMap("$");
+
+    Object approvalRaw = agentBody.get("approval");
+    assertThat(approvalRaw)
+        .as("Audit 02 P1: capability-request MUST persist approval blob on agent")
+        .isInstanceOf(java.util.Map.class);
+    java.util.Map<String, Object> approval = (java.util.Map<String, Object>) approvalRaw;
+    Object issuedAtRaw = approval.get("issued_at_ms");
+    assertThat(issuedAtRaw)
+        .as("approval.issued_at_ms is required for verifyApprove expiry enforcement")
+        .isInstanceOf(Number.class);
+    long issuedAt = ((Number) issuedAtRaw).longValue();
+    // Allow 5s clock-skew tolerance between the IT JVM and the Keycloak container. The exact
+    // value is not the assertion target — what matters is that some non-stale millisecond
+    // timestamp landed in the persisted blob so /verify/approve can compare against it.
+    assertThat(issuedAt)
+        .as("issued_at_ms must be a recent wall-clock millisecond timestamp")
+        .isBetween(beforeMs - 5000L, afterMs + 5000L);
+  }
+
+  /**
+   * §5.4 + §7.1: when an agent posts {@code /agent/request-capability} for an approval-required
+   * cap, the {@code user_code} returned in the {@code approval} object MUST become unredeemable
+   * once {@code expires_in} elapses. The realm's {@code agent_auth_approval_expires_in_seconds} is
+   * temporarily lowered so the test can wait past the window without slowing the suite. Mirrors the
+   * registration-path expiry test in {@link AgentAuthDeviceApprovalIT}.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#71-approval-flow">§7.1
+   *      Approval Flow — stale user_code MUST be rejected with {@code approval_expired}</a>
+   */
+  @Test
+  void approveCapabilityRequestAfterUserCodeExpired_returns410() throws InterruptedException {
+    long previous = currentApprovalExpirySeconds();
+    setApprovalExpirySeconds(2L);
+    try {
+      String approvalCap = "capreq_expiry_cap_"
+          + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+      given()
+          .baseUri(adminApiUrl())
+          .header("Authorization", "Bearer " + adminAccessToken())
+          .contentType(ContentType.JSON)
+          .body(String.format("""
+              {
+                "name": "%s",
+                "description": "Capreq expiry test",
+                "visibility": "authenticated",
+                "requires_approval": true,
+                "location": "https://resource.example.test/%s",
+                "input": {"type": "object"},
+                "output": {"type": "object"}
+              }
+              """, approvalCap, approvalCap))
+          .when()
+          .post("/capabilities")
+          .then()
+          .statusCode(201);
+
+      String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+      Response reqResp = given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer " + agentJwt)
+          .contentType(ContentType.JSON)
+          .body(String.format("""
+              {
+                "capabilities": ["%s"],
+                "reason": "Capreq expiry"
+              }
+              """, approvalCap))
+          .when()
+          .post("/agent/request-capability");
+      reqResp.then()
+          .statusCode(200)
+          .body("approval.expires_in", equalTo(2));
+      String userCode = reqResp.jsonPath().getString("approval.user_code");
+
+      // Wait past the expiry threshold (with margin for test latency).
+      Thread.sleep(3000L);
+
+      String username = "capreq-expiry-approver-"
+          + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+      createTestUser(username);
+      String token = realmUserAccessToken(username);
+
+      given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer " + token)
+          .contentType(ContentType.JSON)
+          .body(Map.of("user_code", userCode))
+          .when()
+          .post("/verify/approve")
+          .then()
+          .statusCode(410)
+          .body("error", equalTo("approval_expired"));
+    } finally {
+      setApprovalExpirySeconds(previous);
+    }
+  }
+
+  /**
+   * §5.4 + §7.1: control test for the expiry-after-N-seconds case — when the approver acts within
+   * the advertised {@code expires_in} window the approval MUST succeed and flip the pending grant
+   * to {@code active}. Pairs with
+   * {@link #approveCapabilityRequestAfterUserCodeExpired_returns410()} to bracket the expiry
+   * boundary.
+   */
+  @Test
+  void approveCapabilityRequestWithinWindow_succeeds() {
+    String approvalCap = "capreq_within_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Capreq within-window approval test",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, approvalCap, approvalCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    Response reqResp = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "Capreq within window"
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability");
+    reqResp.then()
+        .statusCode(200)
+        .body("approval.user_code", notNullValue());
+    String userCode = reqResp.jsonPath().getString("approval.user_code");
+
+    String username = "capreq-within-approver-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createTestUser(username);
+    String token = realmUserAccessToken(username);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_code", userCode))
+        .when()
+        .post("/verify/approve")
+        .then()
+        .statusCode(200);
+  }
+
+  // --- helpers for approval-expiry tests ---
+
+  private static long currentApprovalExpirySeconds() {
+    String token = adminAccessToken();
+    Response resp = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .when()
+        .get("/admin/realms/" + REALM);
+    resp.then().statusCode(200);
+    String raw = resp.jsonPath().getString("attributes.agent_auth_approval_expires_in_seconds");
+    if (raw == null || raw.isBlank()) {
+      return 600L;
+    }
+    return Long.parseLong(raw.trim());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void setApprovalExpirySeconds(long seconds) {
+    String token = adminAccessToken();
+    Response current = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .when()
+        .get("/admin/realms/" + REALM);
+    current.then().statusCode(200);
+    Map<String, Object> body = current.jsonPath().getMap("$");
+    Map<String, Object> attrs = body.get("attributes") instanceof Map
+        ? (Map<String, Object>) body.get("attributes")
+        : new java.util.HashMap<>();
+    attrs = new java.util.HashMap<>(attrs);
+    attrs.put("agent_auth_approval_expires_in_seconds", String.valueOf(seconds));
+    body.put("attributes", attrs);
+
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(body)
+        .when()
+        .put("/admin/realms/" + REALM)
+        .then()
+        .statusCode(204);
+  }
+
+  private static String createTestUser(String username) {
+    String adminToken = adminAccessToken();
+    Response resp = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + adminToken)
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "username", username,
+            "enabled", true,
+            "emailVerified", true,
+            "email", username + "@example.test",
+            "firstName", "Test",
+            "lastName", "User",
+            "requiredActions", java.util.List.of()))
+        .when()
+        .post("/admin/realms/" + REALM + "/users");
+    resp.then().statusCode(201);
+    String location = resp.getHeader("Location");
+    String userId = location.substring(location.lastIndexOf('/') + 1);
+
+    given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + adminToken)
+        .contentType(ContentType.JSON)
+        .body(Map.of("type", "password", "value", "testpass", "temporary", false))
+        .when()
+        .put("/admin/realms/" + REALM + "/users/" + userId + "/reset-password")
+        .then()
+        .statusCode(204);
+    return userId;
+  }
+
+  private static String realmUserAccessToken(String username) {
+    String tokenUrl = KEYCLOAK.getAuthServerUrl() + "/realms/" + REALM;
+    Response resp = given()
+        .baseUri(tokenUrl)
+        .contentType(ContentType.URLENC)
+        .formParam("grant_type", "password")
+        .formParam("client_id", "agent-auth-test-client")
+        .formParam("username", username)
+        .formParam("password", "testpass")
+        .when()
+        .post("/protocol/openid-connect/token");
+    if (resp.getStatusCode() != 200) {
+      throw new AssertionError("Password grant failed: status=" + resp.getStatusCode()
+          + " body=" + resp.getBody().asString());
+    }
+    return resp.jsonPath().getString("access_token");
   }
 }
