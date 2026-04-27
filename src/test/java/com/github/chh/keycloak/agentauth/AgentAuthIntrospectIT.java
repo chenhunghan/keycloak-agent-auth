@@ -928,10 +928,13 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("active", equalTo(true))
-        .body("capability", equalTo(constrainedCap))
-        .body("grant_status", equalTo("active"))
-        .body("constraints.amount.max", equalTo(500))
-        .body("violations", hasSize(0));
+        // Audit-04 P1: constraints/violations are extension-only — never on the base response.
+        .body("constraints", nullValue())
+        .body("violations", nullValue())
+        .body("agent_capability_grants[0].constraints", nullValue())
+        .body("extensions.constraint_check.capability", equalTo(constrainedCap))
+        .body("extensions.constraint_check.constraints.amount.max", equalTo(500))
+        .body("extensions.constraint_check.violations", hasSize(0));
 
     String violatingArgsJwt = TestJwts.agentJwt(hostKey, agentKey2, constrainedAgentId,
         capLocation(constrainedCap));
@@ -951,8 +954,10 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("active", equalTo(true))
-        .body("violations", hasSize(1))
-        .body("violations[0].field", equalTo("amount"));
+        // Audit-04 P1: violations live under `extensions.constraint_check`, not the base response.
+        .body("violations", nullValue())
+        .body("extensions.constraint_check.violations", hasSize(1))
+        .body("extensions.constraint_check.violations[0].field", equalTo("amount"));
   }
 
   /**
@@ -1430,6 +1435,291 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .body("active", equalTo(true))
         .body("agent_capability_grants[0].capability", equalTo(minCap))
         .body("agent_capability_grants[0].constraints", nullValue());
+  }
+
+  // -------------------------------------------------------------------------
+  // Audit-04 P1 — §5.12 spec-compliance fixes:
+  // 1) `user_id` on active introspection responses for linked hosts
+  // 2) {capability, arguments} extension restricted to entitlement-filtered active grants
+  // 3) Compact base grants; constraints/violations under `extensions.constraint_check`
+  // -------------------------------------------------------------------------
+
+  /**
+   * §5.12 active introspection MUST include {@code user_id} when the host is linked to a user.
+   * Delegated agents inherit {@code user_id} from the host at registration time (see §3.2), so the
+   * field MUST surface in the response when the agent's record carries it.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect">§5.12
+   *      Introspect — {@code user_id} on active responses</a>
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#32-agent-record">§3.2
+   *      Agent Record — {@code user_id} cascade from host</a>
+   */
+  @Test
+  void introspectActiveResponseIncludesUserIdWhenHostLinked() {
+    // Provision a fresh host + user + agent so user_id has a deterministic value.
+    OctetKeyPair linkedHostKey = TestKeys.generateEd25519();
+    OctetKeyPair linkedAgentKey = TestKeys.generateEd25519();
+    String linkedCap = "user_id_introspect_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    registerCapability(linkedCap);
+
+    preRegisterHost(linkedHostKey);
+    String linkedHostId = TestKeys.thumbprint(linkedHostKey);
+
+    // Pull (or create) a user from the realm and link the host to it BEFORE registration so
+    // the delegated agent inherits user_id at create time (§3.2).
+    String linkedUserId = ensureUser();
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(Map.of("user_id", linkedUserId))
+        .when()
+        .post("/hosts/" + linkedHostId + "/link")
+        .then()
+        .statusCode(200);
+
+    String linkedRegJwt = TestJwts.hostJwtForRegistration(linkedHostKey, linkedAgentKey,
+        issuerUrl());
+    String linkedAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + linkedRegJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "User-Id Introspect Agent",
+              "host_name": "user-id-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "user_id introspect test"
+            }
+            """, linkedCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    String linkedAgentJwt = TestJwts.agentJwt(linkedHostKey, linkedAgentKey, linkedAgentId,
+        capLocation(linkedCap));
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(linkedHostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s"
+            }
+            """, linkedAgentJwt))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true))
+        .body("user_id", equalTo(linkedUserId));
+  }
+
+  /**
+   * Audit-04 P1: when the introspect request includes {@code capability} that is NOT in the agent's
+   * entitlement-filtered active grant set, the server MUST return an extension-shaped response of
+   * {@code {active: false, error: "capability_not_granted"}} and MUST NOT silently fall back to a
+   * different grant. This prevents constraint checks from running against a grant the agent did not
+   * actually request, which previously could surface empty {@code violations} for tokens that
+   * should not be allowed.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect">§5.12
+   *      Introspect — {@code {capability, arguments}} extension</a>
+   */
+  @Test
+  void introspectExtensionWithUngrantedCapabilityReturnsInactive() {
+    // The agent registered in @BeforeAll only holds `grantedCapability`. Ask the extension to
+    // resolve a totally different capability name. The server must NOT fall back to the
+    // agent's existing grant.
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, capLocation(grantedCapability));
+    String otherCap = "ungranted_introspect_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s",
+              "capability": "%s",
+              "arguments": {"amount": 999999}
+            }
+            """, agentJwt, otherCap))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(false))
+        .body("error", equalTo("capability_not_granted"))
+        // Critical: the response MUST NOT carry the agent's other grant, scope, or any
+        // constraint-check artifacts that would imply the request was honoured.
+        .body("agent_capability_grants", nullValue())
+        .body("scope", nullValue())
+        .body("violations", nullValue())
+        .body("extensions", nullValue());
+  }
+
+  /**
+   * Audit-04 P1: per §5.12 the base introspection response's {@code agent_capability_grants} MUST
+   * be compact ({@code capability} + {@code status} only). Constraint data and violation outcomes —
+   * when surfaced via the {@code {capability, arguments}} extension — MUST live under a separate
+   * {@code extensions.constraint_check} key, NOT as top-level {@code constraints}/
+   * {@code violations} on the base response.
+   *
+   * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#512-introspect">§5.12
+   *      Introspect — compact base grants; extension-shaped constraint check</a>
+   * @see <a href=
+   *      "https://agent-auth-protocol.com/specification/v1.0-draft#213-scoped-grants-constraints">§2.13
+   *      Scoped Grants — constraints surfaced separately from the compact grant list</a>
+   */
+  @Test
+  void introspectExtensionPlacesConstraintsUnderExtensionsKey() {
+    String extCap = "ext_constraint_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Extension constraint test",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s",
+              "input": {
+                "type": "object",
+                "properties": {
+                  "amount": {"type": "number"}
+                }
+              },
+              "output": {"type": "object"}
+            }
+            """, extCap, extCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    OctetKeyPair extAgentKey = TestKeys.generateEd25519();
+    String extRegJwt = TestJwts.hostJwtForRegistration(hostKey, extAgentKey, issuerUrl());
+    preRegisterHost(hostKey);
+
+    String extAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + extRegJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Extension Constraint Agent",
+              "host_name": "ext-constraint-host",
+              "capabilities": [
+                {
+                  "name": "%s",
+                  "constraints": {"amount": {"max": 250}}
+                }
+              ],
+              "mode": "delegated",
+              "reason": "Extension constraint placement test"
+            }
+            """, extCap))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
+
+    String extAgentJwt = TestJwts.agentJwt(hostKey, extAgentKey, extAgentId, capLocation(extCap));
+
+    // No-extension request: base response has compact grants; no constraints/violations leak.
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s"
+            }
+            """, extAgentJwt))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true))
+        .body("agent_capability_grants[0].capability", equalTo(extCap))
+        .body("agent_capability_grants[0].status", equalTo("active"))
+        .body("agent_capability_grants[0].constraints", nullValue())
+        .body("constraints", nullValue())
+        .body("violations", nullValue())
+        .body("extensions", nullValue());
+
+    // Extension request with violating arguments: outcome lives under extensions.constraint_check.
+    String extAgentJwt2 = TestJwts.agentJwt(hostKey, extAgentKey, extAgentId, capLocation(extCap));
+    given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + TestJwts.hostJwt(hostKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "token": "%s",
+              "capability": "%s",
+              "arguments": {"amount": 9999}
+            }
+            """, extAgentJwt2, extCap))
+        .when()
+        .post("/agent/introspect")
+        .then()
+        .statusCode(200)
+        .body("active", equalTo(true))
+        // Base response stays compact.
+        .body("agent_capability_grants[0].capability", equalTo(extCap))
+        .body("agent_capability_grants[0].constraints", nullValue())
+        .body("constraints", nullValue())
+        .body("violations", nullValue())
+        // Extension envelope carries the constraint-check outcome.
+        .body("extensions.constraint_check.capability", equalTo(extCap))
+        .body("extensions.constraint_check.constraints.amount.max", equalTo(250))
+        .body("extensions.constraint_check.violations", hasSize(1))
+        .body("extensions.constraint_check.violations[0].field", equalTo("amount"));
+  }
+
+  /** Find any user id from the realm so we can link a host; create one if the realm is empty. */
+  private static String ensureUser() {
+    Object id = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl() + "/admin/realms/" + REALM)
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .queryParam("first", 0)
+        .queryParam("max", 1)
+        .when()
+        .get("/users")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("[0].id");
+    if (id == null) {
+      String newUsername = "introspect-user-" + UUID.randomUUID();
+      String location = given()
+          .baseUri(KEYCLOAK.getAuthServerUrl() + "/admin/realms/" + REALM)
+          .header("Authorization", "Bearer " + adminAccessToken())
+          .contentType(ContentType.JSON)
+          .body(Map.of("username", newUsername, "enabled", true))
+          .when()
+          .post("/users")
+          .then()
+          .statusCode(201)
+          .extract()
+          .header("Location");
+      return location.substring(location.lastIndexOf('/') + 1);
+    }
+    return id.toString();
   }
 
   // -------------------------------------------------------------------------

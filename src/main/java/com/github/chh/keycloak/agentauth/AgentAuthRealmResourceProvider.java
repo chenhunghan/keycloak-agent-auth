@@ -780,7 +780,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .get("agent_capability_grants");
       List<Map<String, Object>> returnedGrants = new ArrayList<>();
       List<String> scopeList = new ArrayList<>();
-      Map<String, Object> selectedGrant = null;
+      // §5.12 + audit-04 P1: the entitlement-filtered active-grant set is the ONLY grant pool
+      // the {capability, arguments} extension may resolve against. Falling back to any stored
+      // grant (regardless of status/entitlement) when the requested capability is missing here
+      // would let constraint checks run on the wrong grant, returning empty `violations` for a
+      // token that should not be allowed. We track active grants by name in a parallel map so
+      // the extension lookup below cannot accidentally widen the search to the raw `allGrants`.
+      Map<String, Map<String, Object>> activeGrantsByName = new HashMap<>();
 
       // Phase 2 of the multi-tenant authz plan: lazy re-evaluation of the layer-2 gate against
       // the agent's user. Q4 cascade is hybrid — eager on org-membership changes (Phase 4),
@@ -810,35 +816,49 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           compactGrant.put("status", grant.get("status"));
           returnedGrants.add(compactGrant);
           scopeList.add(capName);
-          if (selectedGrant == null) {
-            selectedGrant = grant;
-          }
+          activeGrantsByName.put(capName, grant);
         }
       }
 
-      String selectedCapability = null;
+      // §5.12 introspection extension: resolve {capability, arguments} ONLY against the
+      // entitlement-filtered active-grant set built above. If the requested capability is not
+      // in that set, return an extension-shaped {active: false, error: "capability_not_granted"}
+      // response — never silently fall back to a different grant.
       Object requestedCapability = requestBody.get("capability");
-      if (requestedCapability instanceof String requestedCapabilityName
-          && !requestedCapabilityName.isBlank()) {
-        selectedCapability = requestedCapabilityName;
-      } else if (restrictedCaps != null && restrictedCaps.size() == 1) {
-        selectedCapability = restrictedCaps.get(0);
-      } else if (returnedGrants.size() == 1) {
-        selectedCapability = (String) returnedGrants.get(0).get("capability");
+      Object rawArguments = requestBody.get("arguments");
+      String requestedCapabilityName = null;
+      if (requestedCapability instanceof String s && !s.isBlank()) {
+        requestedCapabilityName = s;
       }
-      if (selectedCapability != null && allGrants != null) {
-        for (Map<String, Object> grant : allGrants) {
-          if (selectedCapability.equals(grant.get("capability"))) {
-            selectedGrant = grant;
-            break;
-          }
+
+      Map<String, Object> selectedGrant = null;
+      if (requestedCapabilityName != null) {
+        selectedGrant = activeGrantsByName.get(requestedCapabilityName);
+        if (selectedGrant == null) {
+          return Response.ok(Map.of(
+              "active", false,
+              "error", "capability_not_granted")).build();
         }
+      }
+
+      // Validate `arguments` shape early so we can return 400 before building the response, and
+      // so the constraint-check extension below can rely on a typed Map.
+      Map<String, Object> argumentsMap = null;
+      if (rawArguments != null) {
+        if (!(rawArguments instanceof Map<?, ?>)) {
+          return Response.status(400)
+              .entity(Map.of("error", "invalid_request", "message", "arguments must be an object"))
+              .build();
+        }
+        argumentsMap = (Map<String, Object>) rawArguments;
       }
 
       Map<String, Object> response = new HashMap<>();
       response.put("active", true);
       response.put("agent_id", agentId);
       response.put("host_id", hostId);
+      // §5.12: agent_capability_grants is compact — {capability, status} only. Constraints and
+      // their evaluation outcome are extension-only (see `extensions.constraint_check` below).
       response.put("agent_capability_grants", returnedGrants);
       response.put("sub", agentId);
       response.put("iss", hostId);
@@ -852,35 +872,45 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       response.put("aud", aud.size() == 1 ? aud.get(0) : aud);
       response.put("jti", jti);
 
-      if (selectedGrant != null) {
-        response.put("capability", selectedGrant.get("capability"));
-        response.put("grant_status", selectedGrant.get("status"));
-        if (selectedGrant.containsKey("constraints")) {
-          response.put("constraints", selectedGrant.get("constraints"));
-        }
+      // §5.12: active introspection includes user_id when the host is linked. Prefer the agent's
+      // user_id (set at registration for delegated agents under linked hosts), fall back to the
+      // host's user_id when the agent row hasn't picked it up yet.
+      Object userIdForResponse = agentData.get("user_id");
+      if (userIdForResponse == null) {
+        userIdForResponse = hostDataForAgent.get("user_id");
+      }
+      if (userIdForResponse != null) {
+        response.put("user_id", userIdForResponse);
       }
 
-      Object rawArguments = requestBody.get("arguments");
-      if (rawArguments != null) {
-        if (!(rawArguments instanceof Map<?, ?>)) {
-          return Response.status(400)
-              .entity(Map.of("error", "invalid_request", "message", "arguments must be an object"))
-              .build();
+      // {capability, arguments} extension — emit constraint-check outcome under an extension key,
+      // NOT as a top-level `constraints`/`violations` block on the base response. The compact
+      // grant list (above) carries no constraint data.
+      if (selectedGrant != null) {
+        Map<String, Object> constraintCheck = new HashMap<>();
+        constraintCheck.put("capability", selectedGrant.get("capability"));
+        if (selectedGrant.containsKey("constraints")) {
+          constraintCheck.put("constraints", selectedGrant.get("constraints"));
         }
-        List<Map<String, Object>> violationMaps = new ArrayList<>();
-        if (selectedGrant != null && selectedGrant.containsKey("constraints")) {
-          List<ConstraintViolation> violations = new ConstraintValidator().validate(
-              (Map<String, Object>) selectedGrant.get("constraints"),
-              (Map<String, Object>) rawArguments);
-          for (ConstraintViolation v : violations) {
-            Map<String, Object> vmap = new HashMap<>();
-            vmap.put("field", v.field());
-            vmap.put("constraint", v.constraint());
-            vmap.put("actual", v.actual());
-            violationMaps.add(vmap);
+        if (argumentsMap != null) {
+          List<Map<String, Object>> violationMaps = new ArrayList<>();
+          if (selectedGrant.containsKey("constraints")) {
+            List<ConstraintViolation> violations = new ConstraintValidator().validate(
+                (Map<String, Object>) selectedGrant.get("constraints"),
+                argumentsMap);
+            for (ConstraintViolation v : violations) {
+              Map<String, Object> vmap = new HashMap<>();
+              vmap.put("field", v.field());
+              vmap.put("constraint", v.constraint());
+              vmap.put("actual", v.actual());
+              violationMaps.add(vmap);
+            }
           }
+          constraintCheck.put("violations", violationMaps);
         }
-        response.put("violations", violationMaps);
+        Map<String, Object> extensions = new HashMap<>();
+        extensions.put("constraint_check", constraintCheck);
+        response.put("extensions", extensions);
       }
 
       return Response.ok(response).build();
@@ -2051,8 +2081,26 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         String bindingMessage = requestBody.get("binding_message") instanceof String bm
             ? bm
             : null;
-        responseMap.put("approval", selectApprovalObject(agentId, agentData,
-            hostDataForApproval, (String) agentData.get("mode"), bindingMessage));
+        // §5.4 + §7.1 expiry persistence: persist the approval blob on the agent so verifyApprove
+        // can enforce `issued_at_ms` against the same window we advertise here. Without this,
+        // capability-request approvals were redeemable indefinitely past `expires_in` because
+        // /verify/approve reads `agentData.approval.issued_at_ms` and that key was never stored.
+        // Concurrent-approval safety: if the agent already has a pending approval blob (e.g. a
+        // registration that hasn't been resolved yet), reuse it — the user's single approve action
+        // covers all pending grants together, and stamping a fresh `issued_at_ms` would extend the
+        // existing approval's window beyond what was originally advertised.
+        Object existingApproval = agentData.get("approval");
+        Map<String, Object> selectedApproval;
+        if (existingApproval instanceof Map<?, ?>) {
+          @SuppressWarnings("unchecked")
+          Map<String, Object> reused = (Map<String, Object>) existingApproval;
+          selectedApproval = reused;
+        } else {
+          selectedApproval = selectApprovalObject(agentId, agentData,
+              hostDataForApproval, (String) agentData.get("mode"), bindingMessage);
+          agentData.put("approval", selectedApproval);
+        }
+        responseMap.put("approval", selectedApproval);
       }
       agentData.put("updated_at", nowTimestamp());
       agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
