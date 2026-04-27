@@ -170,6 +170,16 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
     }
+    String currentStatus = (String) agentData.get("status");
+    if ("expired".equals(currentStatus)) {
+      return Response.ok(agentData).build();
+    }
+    if (!"active".equals(currentStatus)) {
+      return Response.status(409)
+          .entity(Map.of("error", "invalid_state",
+              "message", "Cannot force-expire agent in '" + currentStatus + "' state"))
+          .build();
+    }
     agentData.put("status", "expired");
     if (requestBody != null && (Boolean.TRUE.equals(requestBody.get("absolute_lifetime_elapsed"))
         || Boolean.TRUE.equals(requestBody.get("exceed_absolute_lifetime")))) {
@@ -202,6 +212,17 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     Map<String, Object> agentData = storage.getAgent(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "not_found")).build();
+    }
+
+    String currentStatus = (String) agentData.get("status");
+    if ("rejected".equals(currentStatus)) {
+      return Response.ok(agentData).build();
+    }
+    if (!"pending".equals(currentStatus)) {
+      return Response.status(409)
+          .entity(Map.of("error", "invalid_state",
+              "message", "Cannot reject agent in '" + currentStatus + "' state"))
+          .build();
     }
 
     String reason = "Approval denied";

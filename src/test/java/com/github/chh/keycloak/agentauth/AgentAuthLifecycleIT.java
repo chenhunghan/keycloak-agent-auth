@@ -2833,11 +2833,21 @@ class AgentAuthLifecycleIT extends BaseKeycloakIT {
    * {@code pending} and the response must include the {@code approval} polling object as defined in
    * §7.5.
    *
+   * <p>
+   * Disabled: this stub depended on the pre-fix admin {@code /expire} endpoint overwriting a
+   * {@code pending} agent. With the §§2.3/2.6/2.10 terminal-state guards now enforced, force-expire
+   * only accepts {@code active} agents. A spec-correct rewrite of this scenario needs a path to
+   * land an {@code active} agent whose host has an approval-required cap in
+   * {@code default_capability_grants} that is NOT yet in {@code default_capabilities} — the
+   * existing admin grant-approve flow appends to defaults, so this needs a different bootstrap
+   * (e.g., direct storage seeding or a new admin-only test hook). Tracked as a follow-up.
+   *
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#56-reactivate">§5.6
    *      Reactivate</a>
    * @see <a href="https://agent-auth-protocol.com/specification/v1.0-draft#23-agent-states">§2.3
    *      Agent States</a>
    */
+  @org.junit.jupiter.api.Disabled("Depended on pre-fix expire-overwrites-pending bug; needs rewrite")
   @Test
   void todoReactivationResultingInPendingIncludesApprovalObject() {
     // Register a capability that requires approval (host default)
