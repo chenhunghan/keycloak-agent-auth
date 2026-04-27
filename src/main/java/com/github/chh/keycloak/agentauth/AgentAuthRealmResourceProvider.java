@@ -76,6 +76,36 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     return new HostJwtVerifier(storage(), JWKS_CACHE, this::isJtiReplay);
   }
 
+  private AgentJwtVerifier agentJwtVerifier() {
+    return new AgentJwtVerifier(storage(), JWKS_CACHE, this::isJtiReplay);
+  }
+
+  /**
+   * Peek at a Bearer token's {@code typ} header to decide which verifier to dispatch. Returns
+   * {@code "host+jwt"}, {@code "agent+jwt"}, or {@code null} for missing/malformed/unknown-typ
+   * tokens. Used by the §5.2 catalog endpoints so the typed verifiers can produce protocol-correct
+   * 401 responses (parse failure, etc.) rather than the catalog endpoint silently treating any
+   * unparseable token as unauthenticated.
+   */
+  private static String sniffJwtType(String authHeader) {
+    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+      return null;
+    }
+    try {
+      SignedJWT jwt = SignedJWT.parse(authHeader.substring(7));
+      if (jwt.getHeader().getType() == null) {
+        return null;
+      }
+      String typ = jwt.getHeader().getType().getType();
+      if ("host+jwt".equals(typ) || "agent+jwt".equals(typ)) {
+        return typ;
+      }
+      return null;
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
   @Override
   public Object getResource() {
     return this;
@@ -1416,45 +1446,45 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @QueryParam("limit") Integer limit) {
     String agentId = null;
     String verifiedHostId = null;
+    Map<String, Object> verifiedAgentData = null;
+    Map<String, Object> verifiedHostData = null;
     boolean isAuthenticated = false;
 
-    if (authHeader != null && authHeader.startsWith("Bearer ")) {
+    // §5.2 catalog auth: route by JWT type to the appropriate full-pipeline verifier. The
+    // pre-2026-04 implementation open-coded a signature-only check that ignored aud, iat/exp,
+    // jti replay, and host/agent status — making it possible for a self-signed unknown host or
+    // expired/replayed token to surface authenticated-visibility caps. The verifiers below
+    // enforce the full §4.5 / §4.5.1 pipeline; the §5.2-specific downgrade for unknown-but-valid
+    // hosts is applied post-verification.
+    String authType = sniffJwtType(authHeader);
+    if ("host+jwt".equals(authType)) {
       try {
-        SignedJWT jwt = SignedJWT.parse(authHeader.substring(7));
-        String jwtType = jwt.getHeader().getType() != null
-            ? jwt.getHeader().getType().getType()
-            : null;
-        if ("agent+jwt".equals(jwtType)) {
-          String sub = jwt.getJWTClaimsSet().getSubject();
-          if (sub != null) {
-            Map<String, Object> agentData = storage().getAgent(sub);
-            if (agentData != null) {
-              Map<String, Object> keyMap = resolveAgentPublicKeyMap(agentData, jwt);
-              OctetKeyPair agentKey = OctetKeyPair.parse(keyMap);
-              JWSVerifier verifier = new Ed25519Verifier(agentKey);
-              if (jwt.verify(verifier)) {
-                agentId = sub;
-                isAuthenticated = true;
-              }
-            }
-          }
-        } else if ("host+jwt".equals(jwtType)) {
-          Map<String, Object> hostKeyMap = jwt.getJWTClaimsSet()
-              .getJSONObjectClaim("host_public_key");
-          if (hostKeyMap != null) {
-            OctetKeyPair hostKey = OctetKeyPair.parse(hostKeyMap);
-            JWSVerifier verifier = new Ed25519Verifier(hostKey);
-            if (jwt.verify(verifier)) {
-              String iss = jwt.getJWTClaimsSet().getIssuer();
-              if (iss != null && iss.equals(hostKey.computeThumbprint().toString())) {
-                verifiedHostId = iss;
-                isAuthenticated = true;
-              }
-            }
-          }
+        HostJwtVerifier.Result verified = hostJwtVerifier()
+            .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+        // Per the §5.2 hardening: only treat the host as a catalog-authenticated principal when
+        // the host record is known, active, and linked to a KC user. Unknown self-signed hosts
+        // (verified.storedHost == false), pending/revoked hosts, and unlinked hosts all fall
+        // through to the public-only catalog read so they can't peek at authenticated caps.
+        Map<String, Object> hostData = verified.hostData();
+        if (verified.storedHost() && hostData != null
+            && "active".equals(hostData.get("status"))
+            && hostData.get("user_id") != null) {
+          verifiedHostId = verified.iss();
+          verifiedHostData = hostData;
+          isAuthenticated = true;
         }
-      } catch (Exception e) {
-        isAuthenticated = false; // NOPMD: invalid JWT treated as unauthenticated
+      } catch (HostJwtException e) {
+        return e.response();
+      }
+    } else if ("agent+jwt".equals(authType)) {
+      try {
+        AgentJwtVerifier.Result verified = agentJwtVerifier().verify(authHeader, issuerUrl());
+        agentId = verified.agentId();
+        verifiedAgentData = verified.agentData();
+        verifiedHostData = verified.hostData();
+        isAuthenticated = true;
+      } catch (AgentJwtException e) {
+        return e.response();
       }
     }
 
@@ -1463,11 +1493,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     capabilities.sort(Comparator.comparing(cap -> String.valueOf(cap.get("name"))));
 
     // Resolve the caller's owning KC user once: agent → agent.user_id, host → host.user_id.
-    // Re-loaded after the auth block to keep the verification logic readable.
-    Map<String, Object> verifiedAgentData = agentId == null ? null : storage().getAgent(agentId);
-    Map<String, Object> verifiedHostData = verifiedHostId == null
-        ? null
-        : storage().getHost(verifiedHostId);
+    // Verifier already loaded these maps; reuse them rather than re-reading storage.
     String effectiveUserId = resolveEffectiveUserId(verifiedAgentData, verifiedHostData);
 
     // Phase 1 of the multi-tenant authz plan: snapshot the caller's KC org memberships
@@ -1596,46 +1622,37 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
 
     String agentId = null;
-    String verifiedHostId = null;
+    Map<String, Object> verifiedAgentData = null;
+    Map<String, Object> verifiedHostData = null;
     boolean isAuthenticated = false;
 
-    if (authHeader != null && authHeader.startsWith("Bearer ")) {
+    // §5.2.1 catalog auth: same routing as listCapabilities — full §4.5 verification via the
+    // typed verifiers, with the §5.2 unknown-host downgrade applied to the host path so an
+    // unverified self-signed host can't unlock authenticated-visibility metadata.
+    String authType = sniffJwtType(authHeader);
+    if ("host+jwt".equals(authType)) {
       try {
-        SignedJWT jwt = SignedJWT.parse(authHeader.substring(7));
-        String jwtType = jwt.getHeader().getType() != null
-            ? jwt.getHeader().getType().getType()
-            : null;
-        if ("agent+jwt".equals(jwtType)) {
-          String sub = jwt.getJWTClaimsSet().getSubject();
-          if (sub != null) {
-            Map<String, Object> agentData = storage().getAgent(sub);
-            if (agentData != null) {
-              Map<String, Object> keyMap = resolveAgentPublicKeyMap(agentData, jwt);
-              OctetKeyPair agentKey = OctetKeyPair.parse(keyMap);
-              JWSVerifier verifier = new Ed25519Verifier(agentKey);
-              if (jwt.verify(verifier)) {
-                agentId = sub;
-                isAuthenticated = true;
-              }
-            }
-          }
-        } else if ("host+jwt".equals(jwtType)) {
-          Map<String, Object> hostKeyMap = jwt.getJWTClaimsSet()
-              .getJSONObjectClaim("host_public_key");
-          if (hostKeyMap != null) {
-            OctetKeyPair hostKey = OctetKeyPair.parse(hostKeyMap);
-            JWSVerifier verifier = new Ed25519Verifier(hostKey);
-            if (jwt.verify(verifier)) {
-              String iss = jwt.getJWTClaimsSet().getIssuer();
-              if (iss != null && iss.equals(hostKey.computeThumbprint().toString())) {
-                verifiedHostId = iss;
-                isAuthenticated = true;
-              }
-            }
-          }
+        HostJwtVerifier.Result verified = hostJwtVerifier()
+            .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+        Map<String, Object> hostData = verified.hostData();
+        if (verified.storedHost() && hostData != null
+            && "active".equals(hostData.get("status"))
+            && hostData.get("user_id") != null) {
+          verifiedHostData = hostData;
+          isAuthenticated = true;
         }
-      } catch (Exception e) {
-        isAuthenticated = false; // NOPMD: invalid JWT treated as unauthenticated
+      } catch (HostJwtException e) {
+        return e.response();
+      }
+    } else if ("agent+jwt".equals(authType)) {
+      try {
+        AgentJwtVerifier.Result verified = agentJwtVerifier().verify(authHeader, issuerUrl());
+        agentId = verified.agentId();
+        verifiedAgentData = verified.agentData();
+        verifiedHostData = verified.hostData();
+        isAuthenticated = true;
+      } catch (AgentJwtException e) {
+        return e.response();
       }
     }
 
@@ -1649,10 +1666,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     // caps for authenticated callers. Public caps bypass entirely (anonymous can see them).
     // Failed gate returns 404 capability_not_found to avoid leaking the cap's existence.
     if (isAuthenticated && "authenticated".equals(cap.get("visibility"))) {
-      Map<String, Object> verifiedAgentData = agentId == null ? null : storage().getAgent(agentId);
-      Map<String, Object> verifiedHostData = verifiedHostId == null
-          ? null
-          : storage().getHost(verifiedHostId);
       String effectiveUserId = resolveEffectiveUserId(verifiedAgentData, verifiedHostData);
       UserEntitlement entitlement = loadUserEntitlement(effectiveUserId);
       if (!userEntitlementAllows(cap, entitlement)) {
@@ -3366,6 +3379,22 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   private String computeGrantStatus(String agentId, String capabilityName) {
     Map<String, Object> agentData = storage().getAgent(agentId);
     if (agentData == null) {
+      return "not_granted";
+    }
+    // §2.12 grant_status semantics: a grant only counts as "granted" when the agent itself is
+    // active AND the agent's owning host is active. Pre-2026-04 the catalog endpoints would emit
+    // grant_status=granted even if the agent had been revoked/expired or if the host was pending,
+    // because computeGrantStatus only inspected the per-grant status row. Surface that state by
+    // demoting to "not_granted" when the principal cannot exercise the grant anyway.
+    if (!"active".equals(agentData.get("status"))) {
+      return "not_granted";
+    }
+    String hostId = (String) agentData.get("host_id");
+    if (hostId == null || hostId.isBlank()) {
+      return "not_granted";
+    }
+    Map<String, Object> hostData = storage().getHost(hostId);
+    if (hostData == null || !"active".equals(hostData.get("status"))) {
       return "not_granted";
     }
     @SuppressWarnings("unchecked")
