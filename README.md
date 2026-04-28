@@ -179,7 +179,7 @@ Each capability record carries:
 |-------|-------------|
 | `name` | Stable identifier (`check_balance`, `transfer_money`). Admin validation accepts `[a-zA-Z0-9_]+`; the spec recommends lowercase `snake_case` ([§2.14] SHOULD), so this implementation is a documented relaxation — choose lowercase for cross-implementation interoperability. |
 | `description` | Human-readable explanation |
-| `location` | URL where the resource server executes the capability. If omitted, clients fall back to `default_location` from discovery ([§2.15] / [§5.1]). Capabilities without a location appear in discovery and grants but can't be proxied through gateway mode. |
+| `location` | URL where the resource server executes the capability. **Required at admin create/update time** — discovery publishes a `default_location` per [§2.15] / [§5.1], but this implementation has no backend that dispatches to it, so locationless caps are rejected (`400 invalid_capability_location`) before they can leak into the catalog. |
 | `input` / `output` | JSON Schema for arguments and results |
 | `visibility` *(extension)* | `public` (visible to anyone) or `authenticated` (visible to realm users only) |
 | `requires_approval` *(extension)* | Whether user approval is needed before granting |

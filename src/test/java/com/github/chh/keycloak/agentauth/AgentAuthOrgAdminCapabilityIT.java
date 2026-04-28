@@ -538,9 +538,10 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
               "description": "Bad input shape on org POST",
               "visibility": "authenticated",
               "requires_approval": false,
+              "location": "https://x/%s",
               "input": "not-an-object"
             }
-            """, name))
+            """, name, name))
         .when()
         .post("/organizations/" + acmeOrgId + "/capabilities")
         .then()
@@ -562,9 +563,10 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
               "description": "Bad output shape on org POST",
               "visibility": "authenticated",
               "requires_approval": false,
+              "location": "https://x/%s",
               "output": ["a", "b"]
             }
-            """, name))
+            """, name, name))
         .when()
         .post("/organizations/" + acmeOrgId + "/capabilities")
         .then()
@@ -586,9 +588,10 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
             {
               "name": "%s",
               "visibility": "authenticated",
-              "requires_approval": false
+              "requires_approval": false,
+              "location": "https://x/%s"
             }
-            """, name))
+            """, name, name))
         .when()
         .put("/organizations/" + acmeOrgId + "/capabilities/" + name)
         .then()
@@ -612,14 +615,119 @@ class AgentAuthOrgAdminCapabilityIT extends BaseKeycloakIT {
               "description": "Replacing with bad output",
               "visibility": "authenticated",
               "requires_approval": false,
-              "output": 7
+              "output": 7,
+              "location": "https://x/%s"
+            }
+            """, name, name))
+        .when()
+        .put("/organizations/" + acmeOrgId + "/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_request"));
+  }
+
+  // --- AAP §2.12 location-required (admin-time) ---
+
+  /**
+   * Per AAP §2.12 a locationless cap MUST execute at {@code default_location} from discovery. This
+   * implementation has no backend that can dispatch to {@code default_location}, so the org-scoped
+   * admin endpoint enforces the same shape rule as the realm-level endpoint: {@code location} is
+   * required at admin time, returning {@code invalid_capability_location} when missing or blank.
+   */
+  @Test
+  void registerOrgScopedCapabilityWithoutLocationReturns400() {
+    String name = "p5_no_loc_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Missing location (org POST)",
+              "visibility": "authenticated",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
+  }
+
+  @Test
+  void registerOrgScopedCapabilityWithBlankLocationReturns400() {
+    String name = "p5_blank_loc_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Blank location (org POST)",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "   "
+            }
+            """, name))
+        .when()
+        .post("/organizations/" + acmeOrgId + "/capabilities")
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
+  }
+
+  @Test
+  void updateOrgScopedCapabilityWithoutLocationReturns400() {
+    String name = "p5_upd_no_loc_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createOrgScopedCap(acmeOrgId, name);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Replacement without location",
+              "visibility": "authenticated",
+              "requires_approval": false
             }
             """, name))
         .when()
         .put("/organizations/" + acmeOrgId + "/capabilities/" + name)
         .then()
         .statusCode(400)
-        .body("error", equalTo("invalid_request"));
+        .body("error", equalTo("invalid_capability_location"));
+  }
+
+  @Test
+  void updateOrgScopedCapabilityWithBlankLocationReturns400() {
+    String name = "p5_upd_blank_loc_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    createOrgScopedCap(acmeOrgId, name);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Replacement with blank location",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "   "
+            }
+            """, name))
+        .when()
+        .put("/organizations/" + acmeOrgId + "/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
   }
 
   private static void createConfidentialClientWithSA(String clientId) {

@@ -2532,46 +2532,25 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       @PathParam("agentId") String agentId,
       @PathParam("capabilityName") String capabilityName) {
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401)
-          .entity(Map.of("error", "authentication_required",
-              "message", "Missing or invalid Authorization header"))
-          .build();
-    }
-
-    SignedJWT jwt;
+    // §5.5 polling semantics: the per-grant status URL is published into the registration response
+    // for pending grants. Pending agents cannot mint a valid agent+jwt (§2.3), so the host — the
+    // owner that registered the agent — is the principal that polls this endpoint. Auth therefore
+    // matches the §4.5.1 host-JWT pipeline used by the lifecycle endpoints. After the host JWT is
+    // verified we look up the agent and confirm it belongs to the host (`agentData.host_id` ==
+    // verified `iss`, which the verifier rebinds for JWKS-fallback hosts).
+    HostJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(authHeader.substring(7));
-    } catch (Exception e) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    String jwtType = jwt.getHeader().getType() != null ? jwt.getHeader().getType().getType() : null;
-    if (!"agent+jwt".equals(jwtType)) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type agent+jwt"))
-          .build();
+      verified = hostJwtVerifier()
+          .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
+    } catch (HostJwtException e) {
+      return e.response();
     }
 
     try {
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
+      String iss = verified.iss();
+      if (storage().isHostRotated(iss)) {
         return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps"))
-            .build();
-      }
-      long now = System.currentTimeMillis();
-      if (now > jwt.getJWTClaimsSet().getExpirationTime().getTime()
-          || jwt.getJWTClaimsSet().getIssueTime().getTime() > now + CLOCK_SKEW_MS) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid timestamps"))
-            .build();
-      }
-      if (!agentId.equals(jwt.getJWTClaimsSet().getSubject())) {
-        return Response.status(403)
-            .entity(Map.of("error", "unauthorized", "message", "Agent mismatch"))
+            .entity(Map.of("error", "invalid_jwt", "message", "Host key has been rotated"))
             .build();
       }
 
@@ -2581,12 +2560,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "agent_not_found", "message", "Agent not found"))
             .build();
       }
-      Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
-      OctetKeyPair agentKey = OctetKeyPair.parse(agentPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(agentKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature"))
+
+      if (!iss.equals(agentData.get("host_id"))) {
+        return Response.status(403)
+            .entity(Map.of("error", "unauthorized", "message", "Host mismatch"))
             .build();
       }
 

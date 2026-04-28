@@ -620,12 +620,27 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @GET
   @Path("agents/{id}")
   @Produces(MediaType.APPLICATION_JSON)
+  @SuppressWarnings("unchecked")
   public Response getAgent(@PathParam("id") String id) {
     requireManageRealm();
-    Map<String, Object> agentData = storage().getAgent(id);
+    AgentAuthStorage storage = storage();
+    Map<String, Object> agentData = storage.getAgent(id);
     if (agentData == null) {
       return Response.status(404).entity(Map.of("error", "agent_not_found",
           "message", "Agent not found")).build();
+    }
+    // Audit 05 P2: when a capability is deleted from the registry, runtime paths fail closed
+    // (execute / introspect / reactivate skip the orphan grant) but the stored grant blob is
+    // intentionally left intact. Without this read-time decoration, GET /agents/{id} would still
+    // advertise the orphan grant as `active`, which is misleading for operators reasoning about
+    // what authority the agent actually carries. Decorate without mutating the stored record.
+    Object rawGrants = agentData.get("agent_capability_grants");
+    if (rawGrants instanceof List<?>) {
+      List<Map<String, Object>> grants = (List<Map<String, Object>>) rawGrants;
+      List<Map<String, Object>> decorated = decorateGrantsWithInoperative(grants, storage);
+      Map<String, Object> copy = new HashMap<>(agentData);
+      copy.put("agent_capability_grants", decorated);
+      return Response.ok(copy).build();
     }
     return Response.ok(agentData).build();
   }
@@ -641,7 +656,36 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
   @Produces(MediaType.APPLICATION_JSON)
   public Response getAgentGrants(@PathParam("id") String id) {
     requireManageRealm();
-    return Response.ok(Map.of("grants", storage().findGrantsByAgent(id))).build();
+    AgentAuthStorage storage = storage();
+    List<Map<String, Object>> rows = storage.findGrantsByAgent(id);
+    // Audit 05 P2: same read-time decoration as getAgent — flag grants whose capability has been
+    // removed from the registry so admin tooling doesn't display them as live authority. Runtime
+    // paths already fail closed for these orphan grants; this is purely an operator-facing hint.
+    List<Map<String, Object>> decorated = decorateGrantsWithInoperative(rows, storage);
+    return Response.ok(Map.of("grants", decorated)).build();
+  }
+
+  /**
+   * Audit 05 P2 read-time decoration: returns a fresh list of grant maps with {@code inoperative:
+   * true} added to any grant whose capability is no longer present in the registry. The stored
+   * grant blob is never mutated — capability deletion deliberately leaves grants in place so an
+   * operator who re-registers the cap (or reads the audit trail) can still see what authority an
+   * agent once held. Runtime authorization paths (execute / introspect / reactivate) already fail
+   * closed when the cap is missing, so the {@code inoperative} hint is purely cosmetic for
+   * admin-facing GET endpoints.
+   */
+  private static List<Map<String, Object>> decorateGrantsWithInoperative(
+      List<Map<String, Object>> grants, AgentAuthStorage storage) {
+    List<Map<String, Object>> out = new ArrayList<>(grants.size());
+    for (Map<String, Object> grant : grants) {
+      Map<String, Object> copy = new HashMap<>(grant);
+      Object capName = grant.get("capability");
+      if (capName instanceof String && storage.getCapability((String) capName) == null) {
+        copy.put("inoperative", true);
+      }
+      out.add(copy);
+    }
+    return out;
   }
 
   /**
@@ -1504,6 +1548,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
    *
    * <ul>
    * <li>{@code description} — required, non-blank string.</li>
+   * <li>{@code location} — required, non-blank string. Per AAP §2.12 a locationless capability MUST
+   * execute at {@code default_location} from discovery (§2.15 / §5.1). This implementation lacks a
+   * backend that can dispatch to {@code default_location}, so admin-time registration rejects
+   * locationless caps before they enter the catalog. Clients therefore never see a capability they
+   * can't validly execute. Returns {@code invalid_capability_location}.</li>
    * <li>{@code input} — optional; if present, MUST be a JSON object (a {@code Map}). Scalars,
    * arrays, and strings are rejected.</li>
    * <li>{@code output} — same rule as {@code input}.</li>
@@ -1520,6 +1569,13 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       return Response.status(400)
           .entity(Map.of("error", "invalid_request",
               "message", "description is required and must be a non-blank string"))
+          .build();
+    }
+    Object rawLocation = requestBody.get("location");
+    if (!(rawLocation instanceof String) || ((String) rawLocation).trim().isEmpty()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_capability_location",
+              "message", "location is required and must be a non-blank string"))
           .build();
     }
     if (requestBody.containsKey("input") && !(requestBody.get("input") instanceof Map)) {

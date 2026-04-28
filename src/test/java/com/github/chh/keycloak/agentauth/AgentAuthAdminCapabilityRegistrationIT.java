@@ -1,14 +1,19 @@
 package com.github.chh.keycloak.agentauth;
 
 import static io.restassured.RestAssured.given;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
-import static org.hamcrest.Matchers.nullValue;
 
 import com.github.chh.keycloak.agentauth.support.BaseKeycloakIT;
+import com.github.chh.keycloak.agentauth.support.TestJwts;
+import com.github.chh.keycloak.agentauth.support.TestKeys;
+import com.nimbusds.jose.jwk.OctetKeyPair;
 import io.restassured.http.ContentType;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -607,8 +612,15 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
         .body("error", equalTo("invalid_request"));
   }
 
+  /**
+   * AAP §2.12 says a locationless capability MUST execute at {@code default_location} from
+   * discovery. This implementation lacks a backend that can dispatch to {@code default_location},
+   * so admin-time registration rejects locationless caps before they enter the catalog. Returning
+   * 400 with {@code invalid_capability_location} keeps clients from discovering caps they can't
+   * validly execute — they would otherwise hit a 500 at execute time.
+   */
   @Test
-  void registerCapabilityWithoutLocationIsAccepted() {
+  void registerCapabilityWithoutLocationReturns400() {
     String name = "no_location_cap_"
         + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 
@@ -627,19 +639,120 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
         .when()
         .post("/capabilities")
         .then()
-        .statusCode(201)
-        .body("name", equalTo(name))
-        .body("location", nullValue());
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
+  }
+
+  @Test
+  void registerCapabilityWithBlankLocationReturns400() {
+    String name = "blank_location_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 
     given()
-        .baseUri(issuerUrl())
-        .queryParam("name", name)
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Blank location",
+              "visibility": "public",
+              "requires_approval": false,
+              "location": "   "
+            }
+            """, name))
         .when()
-        .get("/capability/describe")
+        .post("/capabilities")
         .then()
-        .statusCode(200)
-        .body("name", equalTo(name))
-        .body("location", nullValue());
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
+  }
+
+  @Test
+  void updateCapabilityWithoutLocationReturns400() {
+    String name = "upd_no_loc_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String token = adminAccessToken();
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Initial",
+              "visibility": "public",
+              "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s"
+            }
+            """, name, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Replacement without location",
+              "visibility": "public",
+              "requires_approval": false
+            }
+            """, name))
+        .when()
+        .put("/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
+  }
+
+  @Test
+  void updateCapabilityWithBlankLocationReturns400() {
+    String name = "upd_blank_loc_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String token = adminAccessToken();
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Initial",
+              "visibility": "public",
+              "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s"
+            }
+            """, name, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Replacement with blank location",
+              "visibility": "public",
+              "requires_approval": false,
+              "location": "   "
+            }
+            """, name))
+        .when()
+        .put("/capabilities/" + name)
+        .then()
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
   }
 
   @Test
@@ -887,9 +1000,10 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
               "description": "Bad input shape",
               "visibility": "public",
               "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s",
               "input": "not-an-object"
             }
-            """, name))
+            """, name, name))
         .when()
         .post("/capabilities")
         .then()
@@ -911,9 +1025,10 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
               "description": "Bad output shape",
               "visibility": "public",
               "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s",
               "output": ["not", "an", "object"]
             }
-            """, name))
+            """, name, name))
         .when()
         .post("/capabilities")
         .then()
@@ -940,9 +1055,10 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
               "name": "%s",
               "description": "Initial",
               "visibility": "public",
-              "requires_approval": false
+              "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s"
             }
-            """, name))
+            """, name, name))
         .when()
         .post("/capabilities")
         .then()
@@ -956,9 +1072,10 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
             {
               "name": "%s",
               "visibility": "public",
-              "requires_approval": false
+              "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s"
             }
-            """, name))
+            """, name, name))
         .when()
         .put("/capabilities/" + name)
         .then()
@@ -981,9 +1098,10 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
               "name": "%s",
               "description": "Initial",
               "visibility": "public",
-              "requires_approval": false
+              "requires_approval": false,
+              "location": "https://resource.example.test/capabilities/%s"
             }
-            """, name))
+            """, name, name))
         .when()
         .post("/capabilities")
         .then()
@@ -999,13 +1117,149 @@ class AgentAuthAdminCapabilityRegistrationIT extends BaseKeycloakIT {
               "description": "Bad shape on update",
               "visibility": "public",
               "requires_approval": false,
-              "input": 42
+              "input": 42,
+              "location": "https://resource.example.test/capabilities/%s"
             }
-            """, name))
+            """, name, name))
         .when()
         .put("/capabilities/" + name)
         .then()
         .statusCode(400)
         .body("error", equalTo("invalid_request"));
+  }
+
+  /**
+   * Audit 05 P2: when an admin deletes a capability after agents have been granted access to it,
+   * the registry row goes away but per-spec semantics intentionally leave the agents' grant blobs
+   * intact (so an operator can audit historical authority and so re-registering the cap restores
+   * it). Runtime paths fail closed for the orphan grant, but the admin GET endpoints used to
+   * advertise it as a live {@code active} grant — misleading for operators reasoning about the
+   * agent's current authority.
+   *
+   * <p>
+   * The fix is read-time: GET /agents/{id} and GET /agents/{id}/grants annotate orphan grants with
+   * {@code inoperative: true}. Grants whose capability is still registered are unchanged.
+   */
+  @Test
+  void getAgentMarksGrantsForRemovedCapabilityAsInoperative() {
+    String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String capRemoved = registerInoperativeAuthCap("inop_removed_" + suffix);
+    String capKept = registerInoperativeAuthCap("inop_kept_" + suffix);
+
+    OctetKeyPair hostKey = TestKeys.generateEd25519();
+    OctetKeyPair agentKey = TestKeys.generateEd25519();
+    String agentId = registerInoperativeDelegatedAgent(hostKey, agentKey,
+        List.of(capRemoved, capKept));
+
+    // Sanity: before deleting the cap, neither grant carries `inoperative` in either view.
+    List<Map<String, Object>> beforeGrants = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/agents/" + agentId)
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getList("agent_capability_grants");
+    assertThat(beforeGrants).hasSize(2);
+    assertThat(beforeGrants).allMatch(g -> !g.containsKey("inoperative"));
+
+    // Delete capRemoved while it still has a live grant on this agent.
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .delete("/capabilities/" + capRemoved)
+        .then()
+        .statusCode(204);
+
+    // GET /agents/{id} — full agent view: orphan grant is now inoperative, kept grant is not.
+    List<Map<String, Object>> afterGrants = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/agents/" + agentId)
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getList("agent_capability_grants");
+    assertThat(afterGrants).hasSize(2);
+    Map<String, Map<String, Object>> agentByCap = new java.util.HashMap<>();
+    for (Map<String, Object> g : afterGrants) {
+      agentByCap.put((String) g.get("capability"), g);
+    }
+    assertThat(agentByCap.get(capRemoved)).containsEntry("inoperative", true);
+    assertThat(agentByCap.get(capKept)).doesNotContainKey("inoperative");
+
+    // GET /agents/{id}/grants — grants-only view: same decoration.
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> afterRows = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .when()
+        .get("/agents/" + agentId + "/grants")
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getList("grants");
+    Map<String, Map<String, Object>> rowByCap = new java.util.HashMap<>();
+    for (Map<String, Object> g : afterRows) {
+      rowByCap.put((String) g.get("capability"), g);
+    }
+    assertThat(rowByCap.get(capRemoved)).containsEntry("inoperative", true);
+    assertThat(rowByCap.get(capKept)).doesNotContainKey("inoperative");
+  }
+
+  private static String registerInoperativeAuthCap(String name) {
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Audit 05 P2 inoperative-grant test cap",
+              "visibility": "authenticated",
+              "requires_approval": false,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, name, name))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+    return name;
+  }
+
+  private static String registerInoperativeDelegatedAgent(
+      OctetKeyPair hostKey, OctetKeyPair agentKey, List<String> capabilities) {
+    String regJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
+    String capsArray = capabilities.stream()
+        .map(c -> "\"" + c + "\"")
+        .collect(java.util.stream.Collectors.joining(","));
+    return given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + regJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Audit 05 P2 inoperative-grant agent",
+              "host_name": "p2-inop-host",
+              "capabilities": [%s],
+              "mode": "delegated",
+              "reason": "Audit 05 P2 inoperative-grant test"
+            }
+            """, capsArray))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .extract()
+        .path("agent_id");
   }
 }

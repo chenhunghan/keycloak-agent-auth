@@ -1529,7 +1529,10 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
             org.hamcrest.Matchers.matchesPattern(
                 "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
 
-    String pollingJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    // §5.5 polling: the per-grant status URL is published for pending grants too, so it must be
+    // host-authenticated — pending agents can't mint a valid agent+jwt (§2.3). The host owns the
+    // grant lifecycle and is therefore the principal that polls.
+    String pollingJwt = TestJwts.hostJwt(hostKey, issuerUrl());
 
     given()
         .header("Authorization", "Bearer " + pollingJwt)
@@ -1847,6 +1850,138 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/verify/approve")
         .then()
         .statusCode(200);
+  }
+
+  // --- §5.5 per-grant status URL: host+jwt polling semantics ---
+
+  /**
+   * §5.5 polling: the per-grant status URL ({@code GET /agent/{agentId}/capabilities/{cap}/status})
+   * is published in the registration response for pending grants too. Pending agents cannot mint a
+   * valid agent+jwt (§2.3), so the host — the principal that registered the agent — is what polls
+   * the URL. With the agent still in {@code pending}, the host's host+jwt MUST authenticate on this
+   * endpoint and the response MUST surface the grant's {@code pending} status. Without this, hosts
+   * watching for an agent to clear approval would never reach a usable signal.
+   */
+  @Test
+  void pendingAgentHostCanPollPerGrantStatusAndSeesPending() {
+    OctetKeyPair pendingHostKey = TestKeys.generateEd25519();
+    OctetKeyPair pendingAgentKey = TestKeys.generateEd25519();
+    preRegisterHost(pendingHostKey);
+
+    String approvalCap = "host_poll_pending_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Host polling pending-agent grant",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, approvalCap, approvalCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    String hostJwt = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
+    Response register = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + hostJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Pending host-poll agent",
+              "host_name": "host-poll-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "host polling regression"
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/register");
+    register.then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .body("agent_capability_grants[0].status_url", notNullValue());
+    String statusUrl = register.jsonPath().getString("agent_capability_grants[0].status_url");
+
+    String pollingHostJwt = TestJwts.hostJwt(pendingHostKey, issuerUrl());
+    given()
+        .header("Authorization", "Bearer " + pollingHostJwt)
+        .when()
+        .get(statusUrl)
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("pending"))
+        .body("capability", equalTo(approvalCap));
+  }
+
+  /**
+   * §5.5 polling: the per-grant status endpoint must reject a host JWT signed by a different host
+   * than the one that owns the agent. Even a fully-valid host+jwt for some other host MUST surface
+   * 403 {@code unauthorized} so that one tenant's host can never inspect another tenant's grants.
+   */
+  @Test
+  void perGrantStatusRejectsHostJwtFromDifferentHost() {
+    String approvalCap = "host_poll_wrong_host_cap_"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Host polling wrong-host rejection",
+              "visibility": "authenticated",
+              "requires_approval": true,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, approvalCap, approvalCap))
+        .when()
+        .post("/capabilities")
+        .then()
+        .statusCode(201);
+
+    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    String statusUrl = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer " + agentJwt)
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "capabilities": ["%s"],
+              "reason": "Wrong-host rejection"
+            }
+            """, approvalCap))
+        .when()
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200)
+        .body("agent_capability_grants[0].status_url", notNullValue())
+        .extract()
+        .path("agent_capability_grants[0].status_url");
+
+    OctetKeyPair otherHostKey = TestKeys.generateEd25519();
+    preRegisterHost(otherHostKey);
+    String wrongHostJwt = TestJwts.hostJwt(otherHostKey, issuerUrl());
+
+    given()
+        .header("Authorization", "Bearer " + wrongHostJwt)
+        .when()
+        .get(statusUrl)
+        .then()
+        .statusCode(403)
+        .body("error", equalTo("unauthorized"));
   }
 
   // --- helpers for approval-expiry tests ---
