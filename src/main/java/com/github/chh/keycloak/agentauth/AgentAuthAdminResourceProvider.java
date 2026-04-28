@@ -1,6 +1,7 @@
 package com.github.chh.keycloak.agentauth;
 
 import com.github.chh.keycloak.agentauth.storage.AgentAuthStorage;
+import com.nimbusds.jose.jwk.Curve;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -12,6 +13,8 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -82,6 +85,20 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .entity(Map.of("error", "invalid_request", "message", "Invalid visibility")).build();
     }
 
+    // AAP-ADMIN-005: realm-scoped capability writes MUST NOT carry an `organization_id` body
+    // field. Org-scoped writes belong on /organizations/{orgId}/capabilities, where the path
+    // determines the tenant. Without this rejection a caller could mint a cap that shows up
+    // in another org's listings (validateGateFields only checks shape, not whether the body
+    // is permitted on this endpoint).
+    if (requestBody.containsKey("organization_id")) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message",
+              "organization_id is not accepted on realm-scoped capability endpoints; use"
+                  + " /organizations/{orgId}/capabilities for org-scoped writes"))
+          .build();
+    }
+
     Response capabilityFieldValidation = validateCapabilityFields(requestBody);
     if (capabilityFieldValidation != null) {
       return capabilityFieldValidation;
@@ -119,6 +136,18 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     if (existingCapability == null) {
       return Response.status(404)
           .entity(Map.of("error", "capability_not_found", "message", "Capability not found"))
+          .build();
+    }
+
+    // AAP-ADMIN-005: realm-scoped updates MUST NOT carry an `organization_id` body field. See
+    // registerCapability for full rationale; org-scoped writes belong on the path-derived
+    // /organizations/{orgId}/capabilities endpoint.
+    if (requestBody.containsKey("organization_id")) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message",
+              "organization_id is not accepted on realm-scoped capability endpoints; use"
+                  + " /organizations/{orgId}/capabilities for org-scoped writes"))
           .build();
     }
 
@@ -432,6 +461,54 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .build();
     }
 
+    // AAP-ADMIN-001: an admin-approved grant on a delegated agent under a host with no owning
+    // user has no entitlement to gate against — and after approval, the agent itself would
+    // inherit no user_id. Require the host be linked first so admin approval doesn't mint
+    // unowned authority. Autonomous agents bring their own user_id (set at register/claim
+    // time) so the host-side requirement only applies to delegated mode.
+    String agentMode = (String) agentData.get("mode");
+    String agentHostId = (String) agentData.get("host_id");
+    Map<String, Object> hostForOwnership = agentHostId == null
+        ? null
+        : storage.getHost(agentHostId);
+    String hostUserId = hostForOwnership == null
+        ? null
+        : (String) hostForOwnership.get("user_id");
+    String agentUserIdExisting = (String) agentData.get("user_id");
+    if ("delegated".equals(agentMode)
+        && (hostUserId == null || hostUserId.isBlank())
+        && (agentUserIdExisting == null || agentUserIdExisting.isBlank())) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_state",
+              "message",
+              "Host must be linked to a user before approving delegated grants;"
+                  + " POST /hosts/{id}/link or pre-register with user_id/client_id first"))
+          .build();
+    }
+
+    // AAP-ADMIN-002: mirror the user-approval gate at AgentAuthRealmResourceProvider#3270.
+    // Resolve the effective user (agent.user_id wins, then host.user_id) and run the same
+    // org/role entitlement check that /verify/approve uses. When the cap is no longer in the
+    // catalog, or the user can't grant under the cap's gate, flip to denied(reason=
+    // insufficient_authority) instead of activating — same shape as the user-approval flow.
+    String effectiveUserId = (agentUserIdExisting != null && !agentUserIdExisting.isBlank())
+        ? agentUserIdExisting
+        : hostUserId;
+    AgentAuthRealmResourceProvider.UserEntitlement approverEntitlement = AgentAuthRealmResourceProvider
+        .loadUserEntitlement(session, effectiveUserId);
+    if (!AgentAuthRealmResourceProvider.userEntitlementAllows(registeredCap,
+        approverEntitlement)) {
+      targetGrant.put("status", "denied");
+      targetGrant.put("reason", "insufficient_authority");
+      targetGrant.remove("status_url");
+      targetGrant.remove("requested_constraints");
+      agentData.put("updated_at", Instant.now().toString());
+      storage.putAgent(id, agentData);
+      emitAdminEvent("agent-auth/agent/" + id + "/capability/" + capability + "/approve",
+          OperationType.ACTION, targetGrant);
+      return Response.ok(targetGrant).build();
+    }
+
     boolean wasPending = "pending".equals(targetGrant.get("status"));
     targetGrant.put("status", "active");
     targetGrant.put("description", registeredCap.get("description"));
@@ -463,6 +540,15 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       agentData.put("status", "active");
       agentData.put("activated_at", Instant.now().toString());
       agentData.remove("approval");
+    }
+    // AAP-ADMIN-001: stamp agent.user_id from host.user_id so a delegated agent activated by
+    // admin approval ends up with the same owning-user binding it would have via the user
+    // approval flow at /verify/approve. `granted_by` stays as the approver/admin id —
+    // distinct field, distinct purpose (audit/trace, per §3.3.1).
+    if ("delegated".equals(agentMode)
+        && (agentUserIdExisting == null || agentUserIdExisting.isBlank())
+        && hostUserId != null && !hostUserId.isBlank()) {
+      agentData.put("user_id", hostUserId);
     }
     agentData.put("updated_at", Instant.now().toString());
     storage.putAgent(id, agentData);
@@ -534,13 +620,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
     Map<String, Object> hostPublicKeyMap = (Map<String, Object>) rawKey;
 
-    String hostId;
-    try {
-      hostId = OctetKeyPair.parse(hostPublicKeyMap).computeThumbprint().toString();
-    } catch (Exception e) {
-      return Response.status(400).entity(Map.of("error", "invalid_request", "message",
-          "Invalid host_public_key")).build();
+    HostKeyParseResult parsed = parseEd25519HostKeyThumbprint(hostPublicKeyMap);
+    if (parsed.errorResponse() != null) {
+      return parsed.errorResponse();
     }
+    String hostId = parsed.thumbprint();
 
     AgentAuthStorage storage = storage();
     if (storage.getHost(hostId) != null) {
@@ -552,7 +636,6 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     Map<String, Object> hostData = new HashMap<>();
     hostData.put("host_id", hostId);
     hostData.put("public_key", hostPublicKeyMap);
-    hostData.put("status", "active");
     hostData.put("created_at", nowTs);
     hostData.put("updated_at", nowTs);
 
@@ -565,13 +648,33 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       hostData.put("description", description);
     }
 
+    // AAP-ADMIN-001: a pre-registered host without an owning user is unsafe — delegated agents
+    // registered under it would have no `user_id` to gate against, and the existing approve
+    // flow can't bind one (the agent is auto-active because the host is active). Three branches:
+    // (a) `client_id` present → SA-as-host pattern, host.user_id := SA user, status active.
+    // (b) `user_id` present and resolves to a realm user → host pre-bound, status active.
+    // (c) neither → status pending. The standard /verify/approve flow on the first delegated
+    // agent under this host will both link the user and activate the host.
+    // This closes the "active-but-unowned" hole (admin-created host with status=active and no
+    // user_id) that previously let a delegated agent accept any approver without entitlement
+    // checks downstream.
+    Object rawClientId = requestBody.get("client_id");
+    Object rawUserId = requestBody.get("user_id");
+    boolean hasClientId = rawClientId instanceof String && !((String) rawClientId).isBlank();
+    boolean hasUserId = rawUserId instanceof String && !((String) rawUserId).isBlank();
+    if (hasClientId && hasUserId) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "Specify at most one of client_id or user_id"))
+          .build();
+    }
     // Phase 5 SA-as-host pattern: optionally resolve a confidential client's service-account
     // user as the host's owner. The recommended pattern (see TODO.md) is one SA per
     // confidential client; the operator pre-registers the client with serviceAccountsEnabled
     // and passes the client_id here so the host's user_id is set up-front, skipping the
     // post-claim /verify/approve flow that delegated agents normally need.
-    Object rawClientId = requestBody.get("client_id");
-    if (rawClientId instanceof String clientId && !clientId.isBlank()) {
+    if (hasClientId) {
+      String clientId = (String) rawClientId;
       RealmModel realm = session.getContext().getRealm();
       org.keycloak.models.ClientModel client = realm == null
           ? null
@@ -597,6 +700,25 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
       }
       hostData.put("user_id", saUser.getId());
       hostData.put("service_account_client_id", clientId);
+      hostData.put("status", "active");
+      hostData.put("activated_at", nowTs);
+    } else if (hasUserId) {
+      String userId = (String) rawUserId;
+      RealmModel realm = session.getContext().getRealm();
+      if (realm == null || session.users().getUserById(realm, userId) == null) {
+        return Response.status(400)
+            .entity(Map.of("error", "invalid_request",
+                "message", "user_id does not resolve to a realm user"))
+            .build();
+      }
+      hostData.put("user_id", userId);
+      hostData.put("status", "active");
+      hostData.put("activated_at", nowTs);
+    } else {
+      // No user binding supplied: stage as pending. The first /verify/approve under this host
+      // links a real user and activates the host (mirrors the dynamic-registration path at
+      // §2.8 / §2.11), so a delegated agent never operates without an owning user.
+      hostData.put("status", "pending");
     }
 
     storage.putHost(hostId, hostData);
@@ -898,13 +1020,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
     String clientId = (String) rawClientId;
 
-    String hostId;
-    try {
-      hostId = OctetKeyPair.parse(hostPublicKeyMap).computeThumbprint().toString();
-    } catch (Exception e) {
-      return Response.status(400).entity(Map.of("error", "invalid_request", "message",
-          "Invalid host_public_key")).build();
+    HostKeyParseResult parsed = parseEd25519HostKeyThumbprint(hostPublicKeyMap);
+    if (parsed.errorResponse() != null) {
+      return parsed.errorResponse();
     }
+    String hostId = parsed.thumbprint();
 
     RealmModel realm = session.getContext().getRealm();
     org.keycloak.models.ClientModel client = realm == null
@@ -1029,14 +1149,11 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
     }
     Map<String, Object> hostPublicKeyMap = (Map<String, Object>) rawKey;
 
-    String hostId;
-    try {
-      hostId = OctetKeyPair.parse(hostPublicKeyMap).computeThumbprint().toString();
-    } catch (Exception e) {
-      return Response.status(400)
-          .entity(Map.of("error", "invalid_request", "message", "Invalid host_public_key"))
-          .build();
+    HostKeyParseResult parsed = parseEd25519HostKeyThumbprint(hostPublicKeyMap);
+    if (parsed.errorResponse() != null) {
+      return parsed.errorResponse();
     }
+    String hostId = parsed.thumbprint();
 
     AgentAuthStorage storage = storage();
     if (storage.getHost(hostId) != null) {
@@ -1578,6 +1695,16 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
               "message", "location is required and must be a non-blank string"))
           .build();
     }
+    // AAP-ADMIN-004: location must be a syntactically valid absolute URL whose scheme is https
+    // (or http for localhost / when the test-only insecure override is set). The original check
+    // only enforced non-blankness, so a cap with `location: "not a url"` would land in the
+    // catalog and fail later at execute-time. Parsing here moves the failure to admin time and
+    // makes the error symmetric with the rest of the catalog shape rules.
+    Response locationUrlValidation = validateCapabilityLocationUrl(
+        ((String) rawLocation).trim());
+    if (locationUrlValidation != null) {
+      return locationUrlValidation;
+    }
     if (requestBody.containsKey("input") && !(requestBody.get("input") instanceof Map)) {
       return Response.status(400)
           .entity(Map.of("error", "invalid_request",
@@ -1591,6 +1718,52 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .build();
     }
     return null;
+  }
+
+  /**
+   * AAP-ADMIN-004: parse the cap's {@code location} as an absolute URL and reject anything that
+   * isn't well-formed. {@code https} is required in production; {@code http} is permitted only for
+   * {@code localhost} / {@code 127.0.0.1} / {@code ::1} or when the test-only system property
+   * {@code agent-auth.allow-insecure-capability-location} is {@code true}. Returns a 400
+   * {@code invalid_capability_location} response on failure, or null when the URL is acceptable.
+   */
+  private static Response validateCapabilityLocationUrl(String location) {
+    URI uri;
+    try {
+      uri = new URI(location);
+    } catch (URISyntaxException e) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_capability_location",
+              "message", "location must be a syntactically valid URL"))
+          .build();
+    }
+    if (!uri.isAbsolute() || uri.getScheme() == null || uri.getHost() == null
+        || uri.getHost().isBlank()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_capability_location",
+              "message", "location must be an absolute URL with a scheme and host"))
+          .build();
+    }
+    String scheme = uri.getScheme().toLowerCase(java.util.Locale.ROOT);
+    if ("https".equals(scheme)) {
+      return null;
+    }
+    if ("http".equals(scheme)) {
+      String host = uri.getHost().toLowerCase(java.util.Locale.ROOT);
+      boolean isLocalhost = "localhost".equals(host) || "127.0.0.1".equals(host)
+          || "[::1]".equals(host) || "::1".equals(host);
+      if (isLocalhost) {
+        return null;
+      }
+      if ("true".equals(System.getProperty("agent-auth.allow-insecure-capability-location"))) {
+        return null;
+      }
+    }
+    return Response.status(400)
+        .entity(Map.of("error", "invalid_capability_location",
+            "message", "location must use https (http allowed only for localhost or when"
+                + " agent-auth.allow-insecure-capability-location=true)"))
+        .build();
   }
 
   /**
@@ -1617,6 +1790,52 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
           .build();
     }
     return null;
+  }
+
+  /**
+   * AAP-ADMIN-003: discriminated result of admin host-key parsing. Either {@link #thumbprint} is
+   * non-null (key is a valid Ed25519 OKP and the JWK thumbprint is the host id), or
+   * {@link #errorResponse} is non-null (the caller should return that 400 response immediately).
+   */
+  private record HostKeyParseResult(String thumbprint, Response errorResponse) {
+  }
+
+  /**
+   * AAP-ADMIN-003: parse the admin-supplied {@code host_public_key} JWK as an Ed25519 OKP and
+   * compute its thumbprint. Without the curve check, any OctetKeyPair-shaped key (e.g. X25519)
+   * survives admin-time validation, lands in storage as an active host record, and only fails at
+   * first JWT verification when {@link HostJwtVerifier} requires {@code Ed25519}. That leaves an
+   * unverifiable host wedged in the catalog. Failing here keeps the catalog consistent with the
+   * runtime crypto contract.
+   */
+  private static HostKeyParseResult parseEd25519HostKeyThumbprint(
+      Map<String, Object> hostPublicKeyMap) {
+    OctetKeyPair okp;
+    try {
+      okp = OctetKeyPair.parse(hostPublicKeyMap);
+    } catch (Exception e) {
+      return new HostKeyParseResult(null,
+          Response.status(400)
+              .entity(Map.of("error", "invalid_request",
+                  "message", "Invalid host_public_key"))
+              .build());
+    }
+    if (!Curve.Ed25519.equals(okp.getCurve())) {
+      return new HostKeyParseResult(null,
+          Response.status(400)
+              .entity(Map.of("error", "unsupported_algorithm",
+                  "message", "host_public_key must be an Ed25519 OKP JWK"))
+              .build());
+    }
+    try {
+      return new HostKeyParseResult(okp.computeThumbprint().toString(), null);
+    } catch (Exception e) {
+      return new HostKeyParseResult(null,
+          Response.status(400)
+              .entity(Map.of("error", "invalid_request",
+                  "message", "Invalid host_public_key"))
+              .build());
+    }
   }
 
   /**
