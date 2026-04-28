@@ -40,8 +40,7 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
     String userId = createTestUser(username);
 
     OctetKeyPair hostKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey, "ciba-host");
-    linkHost(TestKeys.thumbprint(hostKey), userId);
+    preRegisterHostLinked(hostKey, userId);
 
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     Response resp = given()
@@ -78,8 +77,7 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
     String token = passwordGrantToken(username);
 
     OctetKeyPair hostKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey, "ciba-inbox-host");
-    linkHost(TestKeys.thumbprint(hostKey), userId);
+    preRegisterHostLinked(hostKey, userId);
 
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     Response regResp = given()
@@ -119,8 +117,7 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
     String token = passwordGrantToken(username);
 
     OctetKeyPair hostKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey, "ciba-approve-host");
-    linkHost(TestKeys.thumbprint(hostKey), userId);
+    preRegisterHostLinked(hostKey, userId);
 
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     Response regResp = given()
@@ -163,8 +160,7 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
     String strangerToken = passwordGrantToken(strangerUsername);
 
     OctetKeyPair hostKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey, "ciba-stranger-host");
-    linkHost(TestKeys.thumbprint(hostKey), ownerUserId);
+    preRegisterHostLinked(hostKey, ownerUserId);
 
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     Response regResp = given()
@@ -206,8 +202,7 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
     String userId = createTestUser(username);
 
     OctetKeyPair hostKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey, "ciba-capreq-host");
-    linkHost(TestKeys.thumbprint(hostKey), userId);
+    preRegisterHostLinked(hostKey, userId);
 
     OctetKeyPair agentKey = TestKeys.generateEd25519();
     String agentId = given()
@@ -314,8 +309,7 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
           "fromDisplayName", "Agent Auth")));
 
       OctetKeyPair hostKey = TestKeys.generateEd25519();
-      preRegisterHost(hostKey, "smtp-fail-host");
-      linkHost(TestKeys.thumbprint(hostKey), userId);
+      preRegisterHostLinked(hostKey, userId);
 
       OctetKeyPair agentKey = TestKeys.generateEd25519();
       Response resp = given()
@@ -401,30 +395,30 @@ class AgentAuthCibaApprovalIT extends BaseKeycloakIT {
     return UUID.randomUUID().toString().replace("-", "").substring(0, 8);
   }
 
-  private static void preRegisterHost(OctetKeyPair hostKey, String name) {
+  /**
+   * Pre-registers a host bound to {@code userId} so the host comes up active+linked in one admin
+   * call. Wave 5 AAP-ADMIN-001: admin {@code POST /hosts} without {@code user_id} now stages the
+   * host as {@code pending}, and the subsequent {@code POST /hosts/{id}/link} only sets the
+   * {@code user_id} attribute without flipping the host to active. Pending hosts cascade to pending
+   * agents — which breaks every CIBA test that needs the linked-host approval-method selector to
+   * fire on register. Folding the link into the pre-register step keeps the same surface
+   * (active+linked host with a known user_id) the tests were originally written against.
+   */
+  private static void preRegisterHostLinked(OctetKeyPair hostKey, String userId) {
+    java.util.Map<String, Object> body = new java.util.HashMap<>();
+    body.put("host_public_key", hostKey.toPublicJWK().toJSONObject());
+    body.put("user_id", userId);
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
         .contentType(ContentType.JSON)
-        .body(Map.of(
-            "host_public_key", hostKey.toPublicJWK().toJSONObject(),
-            "name", name))
+        .body(body)
         .when()
         .post("/hosts")
         .then()
-        .statusCode(201);
-  }
-
-  private static void linkHost(String hostId, String userId) {
-    given()
-        .baseUri(adminApiUrl())
-        .header("Authorization", "Bearer " + adminAccessToken())
-        .contentType(ContentType.JSON)
-        .body(Map.of("user_id", userId))
-        .when()
-        .post("/hosts/" + hostId + "/link")
-        .then()
-        .statusCode(200);
+        .statusCode(org.hamcrest.Matchers.anyOf(
+            org.hamcrest.Matchers.equalTo(201),
+            org.hamcrest.Matchers.equalTo(409)));
   }
 
   private static String registerApprovalCap(String name) {

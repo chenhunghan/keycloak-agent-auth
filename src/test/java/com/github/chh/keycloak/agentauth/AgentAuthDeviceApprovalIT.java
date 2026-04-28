@@ -233,13 +233,17 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
   @Test
   void capabilityRequestApproval_activatesGrantsWithoutChangingAgentStatus() {
     // §5.4 + §7 + §7.1: a capability-request on an already-active agent that needs user
-    // approval MUST go through the same device_authorization flow. The agent stays `active`;
-    // only the pending grants flip to `active`.
+    // approval MUST go through an approval flow (device_authorization for unlinked hosts, CIBA
+    // for linked hosts). The agent stays `active`; only the pending grants flip to `active`.
+    // Wave 5 made active+unlinked hosts impossible, so this test exercises the CIBA flow under
+    // a linked host — the approval-routing semantics being tested are the same on both flows.
     String autoCap = registerAutoCapability("devauth_capreq_auto_" + suffix());
     String approvalCap = registerApprovalRequiredCapability("devauth_capreq_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey);
+    String username = "capreq-approver-" + suffix();
+    String userId = createTestUser(username);
+    preRegisterHostForUser(hostKey, userId);
 
     // Register the agent with only the auto-approved capability → status=active straight away.
     String agentId = given()
@@ -277,19 +281,15 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .post("/agent/request-capability");
     reqResp.then()
         .statusCode(200)
-        .body("approval.method", org.hamcrest.Matchers.equalTo("device_authorization"))
-        .body("approval.user_code", matchesPattern("[A-Z]{4}-[A-Z]{4}"));
-    String userCode = reqResp.jsonPath().getString("approval.user_code");
+        .body("approval.method", org.hamcrest.Matchers.equalTo("ciba"));
 
-    // User approves.
-    String username = "capreq-approver-" + suffix();
-    createTestUser(username);
+    // User approves via agent_id (CIBA path).
     String userAccessToken = realmUserAccessToken(username);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + userAccessToken)
         .contentType(ContentType.JSON)
-        .body(Map.of("user_code", userCode))
+        .body(Map.of("agent_id", agentId))
         .when()
         .post("/verify/approve")
         .then()
@@ -509,7 +509,15 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
     String approvB = registerApprovalRequiredCapability("devauth_capreq_partial_b_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey);
+    // Wave 5 made active+unlinked hosts impossible: a pre-registered pending host cascades to a
+    // pending agent (§2.11 MUST), so the autoCap auto-approval can't raise the agent to active.
+    // Active delegated agents now necessarily live under a linked host, which routes the
+    // cap-request through CIBA (agent_id-based approve) instead of device_authorization
+    // (user_code-based). The partial-approval semantics being tested are identical on both
+    // flows; we just key off agent_id and the username we control.
+    String username = "partial-capreq-" + suffix();
+    String userId = createTestUser(username);
+    preRegisterHostForUser(hostKey, userId);
 
     String agentId = given()
         .baseUri(issuerUrl())
@@ -527,6 +535,7 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         .post("/agent/register")
         .then()
         .statusCode(200)
+        .body("status", org.hamcrest.Matchers.equalTo("active"))
         .extract()
         .path("agent_id");
 
@@ -542,17 +551,15 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
             """, approvA, approvB))
         .when()
         .post("/agent/request-capability");
-    String userCode = reqResp.jsonPath().getString("approval.user_code");
+    reqResp.then().statusCode(200);
 
-    String username = "partial-capreq-" + suffix();
-    createTestUser(username);
     String token = realmUserAccessToken(username);
 
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + token)
         .contentType(ContentType.JSON)
-        .body(Map.of("user_code", userCode, "capabilities", java.util.List.of(approvA)))
+        .body(Map.of("agent_id", agentId, "capabilities", java.util.List.of(approvA)))
         .when()
         .post("/verify/approve")
         .then()
@@ -721,7 +728,12 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
         "devauth_capreq_constrained_" + suffix());
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey);
+    // Wave 5: active+unlinked hosts impossible. Run constraint-preservation under linked host
+    // (CIBA flow) — the wire shape contract is identical; only the user_code-vs-agent_id
+    // approval surface changes.
+    String username = "capreq-constrained-approver-" + suffix();
+    String userId = createTestUser(username);
+    preRegisterHostForUser(hostKey, userId);
 
     // Register active agent with only the auto-approved cap so /agent/request-capability is
     // the entry point we exercise next.
@@ -774,17 +786,14 @@ class AgentAuthDeviceApprovalIT extends BaseKeycloakIT {
             org.hamcrest.Matchers.nullValue())
         .body("agent_capability_grants.find { it.capability == '" + approvalCap
             + "' }.requested_constraints", org.hamcrest.Matchers.nullValue());
-    String userCode = reqResp.jsonPath().getString("approval.user_code");
 
-    // User approves.
-    String username = "capreq-constrained-approver-" + suffix();
-    createTestUser(username);
+    // User approves via agent_id (CIBA).
     String token = realmUserAccessToken(username);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + token)
         .contentType(ContentType.JSON)
-        .body(Map.of("user_code", userCode))
+        .body(Map.of("agent_id", agentId))
         .when()
         .post("/verify/approve")
         .then()

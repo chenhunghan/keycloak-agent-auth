@@ -309,7 +309,10 @@ class AgentAuthVerifyPageIT extends BaseKeycloakIT {
         .post("/verify")
         .then()
         .statusCode(400)
-        .body(containsString("Missing user_code or decision"));
+        // Updated error copy: the page now also covers the agent_id-based CIBA path, so the
+        // user-visible heading reads "user_code/agent_id". Pin the substring that's stable across
+        // device-auth and CIBA forms.
+        .body(containsString("Missing user_code/agent_id or decision"));
   }
 
   @Test

@@ -82,17 +82,17 @@ class AgentAuthMultiTenantCapabilityIT extends BaseKeycloakIT {
     registerCapability(roleGatedCap, "authenticated", null, ROLE_NAME);
     registerCapability(publicCap, "public", null, null);
 
+    // Pre-register hosts bound directly to their user (Wave 5 AAP-ADMIN-001: default
+    // preRegisterHost binds to admin; subsequent linkHostToUser to a different user would 409).
     aliceHostKey = TestKeys.generateEd25519();
     aliceAgentKey = TestKeys.generateEd25519();
-    preRegisterHost(aliceHostKey);
+    preRegisterHostForUser(aliceHostKey, aliceUserId);
     aliceAgentId = registerDelegatedAgent(aliceHostKey, aliceAgentKey, realmCap);
-    linkHostToUser(TestKeys.thumbprint(aliceHostKey), aliceUserId);
 
     bobHostKey = TestKeys.generateEd25519();
     bobAgentKey = TestKeys.generateEd25519();
-    preRegisterHost(bobHostKey);
+    preRegisterHostForUser(bobHostKey, bobUserId);
     bobAgentId = registerDelegatedAgent(bobHostKey, bobAgentKey, realmCap);
-    linkHostToUser(TestKeys.thumbprint(bobHostKey), bobUserId);
   }
 
   @Test
@@ -255,20 +255,22 @@ class AgentAuthMultiTenantCapabilityIT extends BaseKeycloakIT {
         .append("\"location\":\"https://resource.example.test/").append(name).append("\",")
         .append("\"input\":{\"type\":\"object\"},")
         .append("\"output\":{\"type\":\"object\"}");
-    if (organizationId != null) {
-      body.append(",\"organization_id\":\"").append(organizationId).append("\"");
-    }
     if (requiredRole != null) {
       body.append(",\"required_role\":\"").append(requiredRole).append("\"");
     }
     body.append("}");
+    // AAP-ADMIN-005: realm POST /capabilities rejects body `organization_id`. Org-tagged caps
+    // route through /organizations/{orgId}/capabilities; null-org caps stay on the realm path.
+    String url = organizationId != null
+        ? "/organizations/" + organizationId + "/capabilities"
+        : "/capabilities";
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
         .contentType(ContentType.JSON)
         .body(body.toString())
         .when()
-        .post("/capabilities")
+        .post(url)
         .then()
         .statusCode(201);
   }

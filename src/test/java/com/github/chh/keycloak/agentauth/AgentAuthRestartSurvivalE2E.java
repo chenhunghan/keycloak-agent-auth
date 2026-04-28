@@ -65,6 +65,12 @@ class AgentAuthRestartSurvivalE2E {
     // --- KC #1: register + approve ---
     try (KeycloakContainer kc = startKeycloak()) {
       registerCapability(kc, capability);
+      // AAP-ADMIN-001: admin grant approval on a delegated agent now requires the host be linked
+      // to a realm user. Pre-register the host bound to the master-realm admin so the dynamic
+      // /agent/register call below registers under a linked host and the subsequent admin
+      // approve succeeds. The dynamic-register path stays the same; only the host-bootstrap
+      // step changes.
+      preRegisterHostToAdmin(kc, hostKey);
       agentId = registerAgent(kc, hostKey, agentKey, capability);
       assertThat(statusOf(kc, agentId, hostKey))
           .as("before approve").isEqualTo("pending");
@@ -148,6 +154,46 @@ class AgentAuthRestartSurvivalE2E {
         .post("/capabilities")
         .then()
         .statusCode(201);
+  }
+
+  /**
+   * AAP-ADMIN-001: pre-bind the host to the master admin user before dynamic registration so the
+   * subsequent admin grant approval has an owning user to gate against. Mirrors what
+   * {@code BaseKeycloakIT#preRegisterHost} does for the testcontainers-managed harness; replicated
+   * here because this E2E starts/stops its own Keycloak container per phase and can't extend the
+   * shared base class.
+   */
+  @SuppressWarnings("unchecked")
+  private static void preRegisterHostToAdmin(KeycloakContainer kc, OctetKeyPair hostKey) {
+    String token = adminAccessToken(kc);
+    java.util.List<java.util.Map<String, Object>> matches = given()
+        .baseUri(kc.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .queryParam("username", kc.getAdminUsername())
+        .queryParam("exact", true)
+        .when()
+        .get("/admin/realms/" + ADMIN_REALM + "/users")
+        .then()
+        .statusCode(200)
+        .extract()
+        .as(new io.restassured.common.mapper.TypeRef<java.util.List<java.util.Map<String, Object>>>() {
+        });
+    String userId = (String) matches.get(0).get("id");
+    java.util.Map<String, Object> body = new java.util.HashMap<>();
+    body.put("host_public_key", hostKey.toPublicJWK().toJSONObject());
+    body.put("user_id", userId);
+    given()
+        .baseUri(adminApiUrl(kc))
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(body)
+        .when()
+        .post("/hosts")
+        .then()
+        // Idempotent: 201 fresh, 409 if container restart re-runs against persisted Postgres.
+        .statusCode(org.hamcrest.Matchers.anyOf(
+            org.hamcrest.Matchers.equalTo(201),
+            org.hamcrest.Matchers.equalTo(409)));
   }
 
   private static String registerAgent(KeycloakContainer kc, OctetKeyPair hostKey,

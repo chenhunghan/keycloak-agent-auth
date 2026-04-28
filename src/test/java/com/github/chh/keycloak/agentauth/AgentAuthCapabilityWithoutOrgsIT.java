@@ -48,23 +48,71 @@ class AgentAuthCapabilityWithoutOrgsIT extends BaseKeycloakIT {
   static void setUp() {
     suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 
-    disableOrganizationsOnRealm();
-
-    userId = createTestUser("nofeat-" + suffix);
-
     nullGateCap = "phase1_nofeat_nullgate_" + suffix;
     orgGatedCap = "phase1_nofeat_orggated_" + suffix;
     publicCap = "phase1_nofeat_public_" + suffix;
 
+    // Phase 1 of setup: while orgs are still enabled, create a real org and bind the org-gated
+    // cap through the org-scoped endpoint. AAP-ADMIN-005 closed the realm-POST `organization_id`
+    // body field, so this is the only path to a persisted org-tagged cap row. The test then
+    // disables orgs to assert visibility behaviour — the cap row outlives the feature flip.
+    String tempOrgId = createOrganization("nofeat-org-" + suffix);
+    registerOrgScopedCapability(tempOrgId, orgGatedCap, "authenticated");
+
+    // Phase 2: now disable orgs and register the remaining (null-org) caps.
+    disableOrganizationsOnRealm();
+
+    userId = createTestUser("nofeat-" + suffix);
+
     registerCapability(nullGateCap, "authenticated", null);
-    registerCapability(orgGatedCap, "authenticated", "some-org-id");
     registerCapability(publicCap, "public", null);
 
     hostKey = TestKeys.generateEd25519();
     agentKey = TestKeys.generateEd25519();
-    preRegisterHost(hostKey);
+    // Pre-register the host bound to the test user directly. The default preRegisterHost binds
+    // to the master admin user and a subsequent linkHostToUser call to a different user would
+    // 409 with host_already_linked.
+    preRegisterHostForUser(hostKey, userId);
     agentId = registerDelegatedAgent(hostKey, agentKey, nullGateCap);
-    linkHostToUser(TestKeys.thumbprint(hostKey), userId);
+  }
+
+  private static String createOrganization(String alias) {
+    String token = adminAccessToken();
+    Response resp = given()
+        .baseUri(KEYCLOAK.getAuthServerUrl())
+        .header("Authorization", "Bearer " + token)
+        .contentType(ContentType.JSON)
+        .body(Map.of(
+            "name", alias,
+            "alias", alias,
+            "domains", java.util.List.of(Map.of("name", alias + ".test"))))
+        .when()
+        .post("/admin/realms/" + REALM + "/organizations");
+    resp.then().statusCode(201);
+    String location = resp.getHeader("Location");
+    return location.substring(location.lastIndexOf('/') + 1);
+  }
+
+  private static void registerOrgScopedCapability(String orgId, String name, String visibility) {
+    given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "%s",
+              "description": "Phase 1 feature-off org-tagged test cap",
+              "visibility": "%s",
+              "requires_approval": false,
+              "location": "https://resource.example.test/%s",
+              "input": {"type": "object"},
+              "output": {"type": "object"}
+            }
+            """, name, visibility, name))
+        .when()
+        .post("/organizations/" + orgId + "/capabilities")
+        .then()
+        .statusCode(201);
   }
 
   @Test
@@ -175,6 +223,11 @@ class AgentAuthCapabilityWithoutOrgsIT extends BaseKeycloakIT {
   }
 
   private static void registerCapability(String name, String visibility, String organizationId) {
+    if (organizationId != null) {
+      throw new IllegalArgumentException(
+          "AAP-ADMIN-005: realm POST /capabilities no longer accepts body organization_id; "
+              + "use registerOrgScopedCapability() with a real org id instead.");
+    }
     StringBuilder body = new StringBuilder();
     body.append("{")
         .append("\"name\":\"").append(name).append("\",")
@@ -183,11 +236,8 @@ class AgentAuthCapabilityWithoutOrgsIT extends BaseKeycloakIT {
         .append("\"requires_approval\":false,")
         .append("\"location\":\"https://resource.example.test/").append(name).append("\",")
         .append("\"input\":{\"type\":\"object\"},")
-        .append("\"output\":{\"type\":\"object\"}");
-    if (organizationId != null) {
-      body.append(",\"organization_id\":\"").append(organizationId).append("\"");
-    }
-    body.append("}");
+        .append("\"output\":{\"type\":\"object\"}")
+        .append("}");
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())

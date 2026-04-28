@@ -39,6 +39,10 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     String expectedHostId = TestKeys.thumbprint(hostKey);
 
+    // Wave 5 AAP-ADMIN-001: admin POST /hosts must supply user_id (or client_id) to come up
+    // active. Without one of those, the host stages as `pending` and the first /verify/approve
+    // links a user. Use defaultTestUserId so this test still asserts the active-pre-registered
+    // shape end-to-end.
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -47,9 +51,10 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
             {
               "host_public_key": %s,
               "name": "cron-runner",
-              "description": "Nightly batch host"
+              "description": "Nightly batch host",
+              "user_id": "%s"
             }
-            """, hostKey.toPublicJWK().toJSONString()))
+            """, hostKey.toPublicJWK().toJSONString(), defaultTestUserId()))
         .when()
         .post("/hosts")
         .then()
@@ -67,6 +72,8 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
   void preRegisterHostOmittingMetadataReturnsHostWithoutThoseFields() {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
 
+    // AAP-ADMIN-001: omitting both user_id and client_id stages the host as pending — the
+    // status assertion is updated accordingly. The metadata-absence assertions are unchanged.
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -80,7 +87,7 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
         .post("/hosts")
         .then()
         .statusCode(201)
-        .body("status", equalTo("active"))
+        .body("status", equalTo("pending"))
         .body("name", nullValue())
         .body("description", nullValue());
   }
@@ -175,6 +182,7 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
   @Test
   void getPreRegisteredHostReturnsRecord() {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
+    // Wave 5 AAP-ADMIN-001: supply user_id at admin POST so the host comes up active.
     String hostId = given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -182,9 +190,10 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
         .body(String.format("""
             {
               "host_public_key": %s,
-              "name": "fetch-test"
+              "name": "fetch-test",
+              "user_id": "%s"
             }
-            """, hostKey.toPublicJWK().toJSONString()))
+            """, hostKey.toPublicJWK().toJSONString(), defaultTestUserId()))
         .when()
         .post("/hosts")
         .then()
@@ -220,6 +229,9 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
   void agentRegistrationForPreRegisteredHostPreservesAdminMetadata() {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
+    // Wave 5 AAP-ADMIN-001: bind to user_id so the host comes up active and the autonomous-mode
+    // agent registers active under the linked host (autonomous on a pending host fails the
+    // host_pre_registration_required guard).
     String hostId = given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -228,9 +240,10 @@ class AgentAuthAdminHostPreRegistrationIT extends BaseKeycloakIT {
             {
               "host_public_key": %s,
               "name": "linked-service",
-              "description": "Pre-approved service host"
+              "description": "Pre-approved service host",
+              "user_id": "%s"
             }
-            """, hostKey.toPublicJWK().toJSONString()))
+            """, hostKey.toPublicJWK().toJSONString(), defaultTestUserId()))
         .when()
         .post("/hosts")
         .then()

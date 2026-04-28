@@ -34,6 +34,11 @@ class AgentAuthGrantTableSyncIT extends BaseKeycloakIT {
 
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair agentKey = TestKeys.generateEd25519();
+    // AAP-ADMIN-001: admin grant approval on a delegated agent now requires the host be linked
+    // to a realm user. Pre-register the host bound to the test admin so the subsequent admin
+    // approve call below succeeds. This test only cares that the secondary index mirrors the
+    // blob, not how the host got linked.
+    preRegisterHost(hostKey);
     String agentId = registerDelegatedAgent(hostKey, agentKey, List.of(capA, capB));
 
     // After register, both grants should be in pending state in the table.

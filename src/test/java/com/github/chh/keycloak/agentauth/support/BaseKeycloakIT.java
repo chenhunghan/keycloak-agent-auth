@@ -5,7 +5,9 @@ import static io.restassured.RestAssured.given;
 import com.nimbusds.jose.jwk.OctetKeyPair;
 import dasniko.testcontainers.keycloak.KeycloakContainer;
 import io.restassured.http.ContentType;
+import io.restassured.response.Response;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 
@@ -23,6 +25,13 @@ public abstract class BaseKeycloakIT {
 
   /** Realm hosting the Keycloak admin user; used to mint admin tokens. */
   private static final String ADMIN_REALM = "master";
+
+  /**
+   * Cached resolution of the master-realm admin user id. The master admin is the only user
+   * guaranteed to exist after realm import, so it doubles as the default {@code user_id} when
+   * pre-registering a host that needs to come up active.
+   */
+  private static volatile String CACHED_ADMIN_USER_ID;
 
   @SuppressWarnings("resource")
   protected static KeycloakContainer KEYCLOAK;
@@ -71,16 +80,96 @@ public abstract class BaseKeycloakIT {
   }
 
   /**
+   * Resolves the master-realm admin user id (cached) by querying Keycloak's user search. Used as
+   * the default {@code user_id} for {@link #preRegisterHost(OctetKeyPair)} so Wave-5's
+   * "active-but-unowned host" guard is satisfied without the test having to provision its own user.
+   * The lookup runs once per JVM.
+   */
+  protected static String defaultTestUserId() {
+    ensureStarted();
+    String cached = CACHED_ADMIN_USER_ID;
+    if (cached != null) {
+      return cached;
+    }
+    synchronized (BaseKeycloakIT.class) {
+      if (CACHED_ADMIN_USER_ID != null) {
+        return CACHED_ADMIN_USER_ID;
+      }
+      List<Map<String, Object>> matches = given()
+          .baseUri(KEYCLOAK.getAuthServerUrl())
+          .header("Authorization", "Bearer " + adminAccessToken())
+          .queryParam("username", KEYCLOAK.getAdminUsername())
+          .queryParam("exact", true)
+          .when()
+          .get("/admin/realms/" + ADMIN_REALM + "/users")
+          .then()
+          .statusCode(200)
+          .extract()
+          .as(new io.restassured.common.mapper.TypeRef<List<Map<String, Object>>>() {
+          });
+      if (matches == null || matches.isEmpty() || matches.get(0).get("id") == null) {
+        throw new IllegalStateException(
+            "Unable to resolve master-realm admin user id; got " + matches);
+      }
+      CACHED_ADMIN_USER_ID = (String) matches.get(0).get("id");
+      return CACHED_ADMIN_USER_ID;
+    }
+  }
+
+  /**
    * Pre-registers a host via the admin API (§2.8 path #2) so the host comes up {@code active}
    * immediately, bypassing the dynamic-register pending state. Use in tests that don't care about
    * the §2.11 host-pending bootstrap (the common case — most ITs just want a working agent).
    *
    * <p>
-   * The host's public JWK is sent inline; no {@code client_id} is supplied, so the resulting host
-   * is not bound to a service-account user. Idempotent: returns silently if the host already exists
-   * (HTTP 409). Intended for {@code @BeforeAll} or per-test setup.
+   * The host's public JWK is sent inline; the master-realm admin user id is supplied as
+   * {@code user_id} so Wave-5's gate (admin POST /hosts without {@code client_id} AND without
+   * {@code user_id} now stages the host as {@code pending}) is satisfied — the host therefore comes
+   * up active and pre-bound to a real user, matching pre-Wave-5 behavior. Idempotent: returns
+   * silently if the host already exists (HTTP 409). Intended for {@code @BeforeAll} or per-test
+   * setup.
    */
   protected static void preRegisterHost(OctetKeyPair hostKey) {
+    preRegisterHostForUser(hostKey, defaultTestUserId());
+  }
+
+  /**
+   * Pre-registers a host bound to a specific {@code userId}. Use when the test needs a host owned
+   * by a freshly-provisioned realm user (CIBA flows, multi-user authz checks). Idempotent on 409.
+   *
+   * <p>
+   * Named distinctly from the single-arg helper so subclasses that already define a private
+   * {@code preRegisterHost(OctetKeyPair, String)} (e.g. {@code AgentAuthCibaApprovalIT}, where the
+   * second arg is a host {@code name}) keep compiling. New tests should prefer this name.
+   */
+  protected static void preRegisterHostForUser(OctetKeyPair hostKey, String userId) {
+    ensureStarted();
+    Map<String, Object> jwk = new HashMap<>(hostKey.toPublicJWK().toJSONObject());
+    Map<String, Object> body = new HashMap<>();
+    body.put("host_public_key", jwk);
+    if (userId != null && !userId.isBlank()) {
+      body.put("user_id", userId);
+    }
+    Response resp = given()
+        .baseUri(adminApiUrl())
+        .header("Authorization", "Bearer " + adminAccessToken())
+        .contentType(ContentType.JSON)
+        .body(body)
+        .when()
+        .post("/hosts");
+    resp.then().statusCode(org.hamcrest.Matchers.anyOf(
+        org.hamcrest.Matchers.equalTo(201),
+        org.hamcrest.Matchers.equalTo(409)));
+  }
+
+  /**
+   * Pre-registers a host without supplying {@code user_id} or {@code client_id}, so the host comes
+   * up in {@code pending} state per Wave-5. Reserved for tests that intentionally exercise the
+   * §2.11 admin-pending-host bootstrap (e.g. verifying the first /verify/approve flips it to
+   * active). Most tests should prefer {@link #preRegisterHost(OctetKeyPair)} which yields an active
+   * host.
+   */
+  protected static void preRegisterHostAsPending(OctetKeyPair hostKey) {
     ensureStarted();
     Map<String, Object> jwk = new HashMap<>(hostKey.toPublicJWK().toJSONObject());
     given()
@@ -111,5 +200,6 @@ public abstract class BaseKeycloakIT {
       KEYCLOAK.stop();
       KEYCLOAK = null;
     }
+    CACHED_ADMIN_USER_ID = null;
   }
 }

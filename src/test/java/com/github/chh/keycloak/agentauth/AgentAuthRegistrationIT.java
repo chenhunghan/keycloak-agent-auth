@@ -438,7 +438,8 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .body("agent_capability_grants", hasSize(1))
         .body("agent_capability_grants[0].capability", equalTo(pendingCapability))
         .body("agent_capability_grants[0].status", equalTo("pending"))
-        .body("agent_capability_grants[0].status_url", notNullValue())
+        // Wave 2 R-F4: pending grants no longer publish per-grant `status_url`; clients poll
+        // the agent-level approval polling URL instead.
         // §5.3: pending grant MUST NOT echo `constraints` (compact response shape).
         .body("agent_capability_grants[0].constraints", nullValue())
         // The internal stash MUST NOT leak onto the wire.
@@ -459,8 +460,14 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void retryingPendingRegistrationReturnsExistingPendingAgentId() {
+    // The shared @BeforeAll-pre-registered hostKey is admin-linked (Wave 5 default), which would
+    // route the approval to CIBA. The test's spec assertion is about device_authorization on an
+    // unlinked host, so use a fresh pending host. Wave 4 B-P3b also moved approval.status_url
+    // under approval.extensions — assertion path updated accordingly.
+    OctetKeyPair pendingHostKey = TestKeys.generateEd25519();
     OctetKeyPair pendingAgentKey = TestKeys.generateEd25519();
-    String hostJwt1 = TestJwts.hostJwtForRegistration(hostKey, pendingAgentKey, issuerUrl());
+    preRegisterHostAsPending(pendingHostKey);
+    String hostJwt1 = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
 
     String agentId = given()
         .baseUri(issuerUrl())
@@ -481,11 +488,11 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("status", equalTo("pending"))
         .body("approval.method", equalTo("device_authorization"))
-        .body("approval.status_url", notNullValue())
+        .body("approval.extensions.status_url", notNullValue())
         .extract()
         .path("agent_id");
 
-    String hostJwt2 = TestJwts.hostJwtForRegistration(hostKey, pendingAgentKey, issuerUrl());
+    String hostJwt2 = TestJwts.hostJwtForRegistration(pendingHostKey, pendingAgentKey, issuerUrl());
 
     given()
         .baseUri(issuerUrl())
@@ -855,11 +862,13 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
     // Spec: "Partial approval allows users to deny specific capabilities while approving others."
     // Strategy: registering one auto-approved capability alongside one approval-required capability
     // in a single call must produce a grant list with mixed statuses, and the overall agent status
-    // must be "pending" because at least one grant is awaiting approval.
+    // must be "pending" because at least one grant is awaiting approval. Wave 5 + §2.11: a pending
+    // host cascades ALL grants to pending, so we need a linked (admin-linked default) host to
+    // exercise the mixed-status flow. That routes the approval to CIBA; the wire shape contract
+    // is identical aside from approval.method and the status_url location.
     OctetKeyPair mixedAgentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, mixedAgentKey, issuerUrl());
 
-    preRegisterHost(hostKey);
     List<Map<String, String>> grants = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + hostJwt)
@@ -878,8 +887,8 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("approval.method", equalTo("device_authorization"))
-        .body("approval.status_url", notNullValue())
+        .body("approval.method", equalTo("ciba"))
+        .body("approval.extensions.status_url", notNullValue())
         .body("agent_capability_grants", hasSize(2))
         .extract()
         .path("agent_capability_grants");
@@ -1366,8 +1375,14 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoUnsupportedPreferredMethodHintFallsBackToAdminApprovalObject() {
+    // Use a fresh pending host so the approval method stays device_authorization (the shared
+    // hostKey is admin-linked → CIBA after Wave 5). approval.status_url moved under
+    // approval.extensions per Wave 4 B-P3b.
+    OctetKeyPair preferredHostKey = TestKeys.generateEd25519();
     OctetKeyPair preferredAgentKey = TestKeys.generateEd25519();
-    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, preferredAgentKey, issuerUrl());
+    preRegisterHostAsPending(preferredHostKey);
+    String hostJwt = TestJwts.hostJwtForRegistration(preferredHostKey, preferredAgentKey,
+        issuerUrl());
 
     given()
         .baseUri(issuerUrl())
@@ -1388,7 +1403,7 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("status", equalTo("pending"))
         .body("approval.method", equalTo("device_authorization"))
-        .body("approval.status_url", notNullValue())
+        .body("approval.extensions.status_url", notNullValue())
         .body("approval.verification_uri", notNullValue())
         .body("approval.user_code", notNullValue());
   }
@@ -1403,8 +1418,12 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoLoginHintIsForwardedToApprovalFlow() {
+    // Fresh pending host so device_authorization fires (Wave 5 default admin-linked → CIBA).
+    OctetKeyPair loginHintHostKey = TestKeys.generateEd25519();
     OctetKeyPair loginHintAgentKey = TestKeys.generateEd25519();
-    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, loginHintAgentKey, issuerUrl());
+    preRegisterHostAsPending(loginHintHostKey);
+    String hostJwt = TestJwts.hostJwtForRegistration(loginHintHostKey, loginHintAgentKey,
+        issuerUrl());
 
     given()
         .baseUri(issuerUrl())
@@ -1437,8 +1456,13 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
    */
   @Test
   void todoBindingMessageAppearsInApprovalInteraction() {
+    // Fresh pending host so device_authorization fires (admin-linked → CIBA, which echoes
+    // binding_message — the test asserts the device-auth path which doesn't echo it).
+    OctetKeyPair bindingMessageHostKey = TestKeys.generateEd25519();
     OctetKeyPair bindingMessageAgentKey = TestKeys.generateEd25519();
-    String hostJwt = TestJwts.hostJwtForRegistration(hostKey, bindingMessageAgentKey, issuerUrl());
+    preRegisterHostAsPending(bindingMessageHostKey);
+    String hostJwt = TestJwts.hostJwtForRegistration(bindingMessageHostKey, bindingMessageAgentKey,
+        issuerUrl());
 
     given()
         .baseUri(issuerUrl())
@@ -1543,8 +1567,11 @@ class AgentAuthRegistrationIT extends BaseKeycloakIT {
         .when()
         .post("/agent/request-capability")
         .then()
-        .statusCode(403)
-        .body("error", equalTo("agent_rejected"));
+        // Wave 2 R-F2: request-capability now runs AgentJwtVerifier first; non-active agents
+        // (rejected here) fail verification with 401 invalid_jwt rather than the old
+        // 403 agent_rejected path.
+        .statusCode(401)
+        .body("error", equalTo("invalid_jwt"));
   }
 
   /**

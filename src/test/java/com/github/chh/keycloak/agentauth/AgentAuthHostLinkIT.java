@@ -261,7 +261,13 @@ class AgentAuthHostLinkIT extends BaseKeycloakIT {
   private static String registerAgent(OctetKeyPair hostKey, OctetKeyPair agentKey,
       String capability, String mode) {
     String jwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
-    preRegisterHost(hostKey);
+    // Host-link tests need an UNLINKED host so the subsequent /hosts/{id}/link calls in each test
+    // can drive the link/unlink lifecycle from a clean starting state. After T1 the single-arg
+    // preRegisterHost helper auto-links the host to the master admin user (so other ITs get an
+    // active host), which would short-circuit linkHostRaw calls in this suite with 409
+    // host_already_linked. The pending-state helper preserves the original behavior these tests
+    // were written against.
+    preRegisterHostAsPending(hostKey);
     return given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + jwt)

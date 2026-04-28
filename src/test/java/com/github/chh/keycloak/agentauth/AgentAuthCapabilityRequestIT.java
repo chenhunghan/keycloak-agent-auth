@@ -525,8 +525,11 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .when()
         .post("/agent/request-capability")
         .then()
-        .statusCode(403)
-        .body("error", equalTo("agent_revoked"))
+        // Wave 2 R-F2: request-capability now goes through AgentJwtVerifier first; a JWT minted
+        // for a revoked agent fails verification with 401 invalid_jwt instead of the prior
+        // 403 agent_revoked path.
+        .statusCode(401)
+        .body("error", equalTo("invalid_jwt"))
         .body("message", notNullValue());
   }
 
@@ -609,8 +612,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .when()
         .post("/agent/request-capability")
         .then()
-        .statusCode(403)
-        .body("error", equalTo("agent_pending"))
+        // Wave 2 R-F2: AgentJwtVerifier rejects pending-agent JWTs as 401 invalid_jwt.
+        .statusCode(401)
+        .body("error", equalTo("invalid_jwt"))
         .body("message", notNullValue());
   }
 
@@ -670,8 +674,11 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .body("agent_capability_grants[0].capability", equalTo(approvalCap))
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("device_authorization"))
-        .body("approval.status_url", notNullValue());
+        // Pre-registered hosts now carry the admin user_id (Wave 5 AAP-ADMIN-001), so the
+        // delegated+linked-host approval-method selector picks CIBA per §7.2/§7.3.
+        .body("approval.method", equalTo("ciba"))
+        // Wave 4 B-P3b: approval `status_url` moved under `approval.extensions`.
+        .body("approval.extensions.status_url", notNullValue());
   }
 
   /**
@@ -735,7 +742,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].capability", equalTo(approvalCap))
         .body("agent_capability_grants[0].status", equalTo("pending"))
-        .body("agent_capability_grants[0].status_url", notNullValue())
+        // Wave 2 R-F4: pending grants no longer publish a per-grant `status_url`; clients poll
+        // the agent-level approval polling URL instead. Assertion is dropped accordingly.
         // §5.4: pending grant MUST NOT echo `constraints` (compact response shape).
         .body("agent_capability_grants[0].constraints", nullValue())
         // The internal stash MUST NOT leak onto the wire.
@@ -944,6 +952,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
 
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
 
+    // Shared @BeforeEach agent runs under admin-linked host (Wave 5 default → CIBA). The
+    // preferred_method hint is accepted but the server still picks the linked-host path.
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -960,10 +970,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
-        .body("approval.method", equalTo("device_authorization"))
-        .body("approval.status_url", notNullValue())
-        .body("approval.verification_uri", notNullValue())
-        .body("approval.user_code", notNullValue());
+        .body("approval.method", equalTo("ciba"))
+        .body("approval.extensions.status_url", notNullValue());
   }
 
   /**
@@ -1018,7 +1026,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("device_authorization"))
+        // Wave 5 / pre-registered host with admin user_id → CIBA approval method per §7.2/§7.3.
+        .body("approval.method", equalTo("ciba"))
         .body("approval.login_hint", nullValue());
   }
 
@@ -1074,8 +1083,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
         .body("approval", notNullValue())
-        .body("approval.method", equalTo("device_authorization"))
-        .body("approval.binding_message", nullValue());
+        // Wave 5: CIBA is selected for delegated+linked-host; CIBA echoes binding_message back.
+        .body("approval.method", equalTo("ciba"))
+        .body("approval.binding_message", equalTo("Approve transfer"));
   }
 
   /**
@@ -1110,8 +1120,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .when()
         .post("/agent/request-capability")
         .then()
-        .statusCode(403)
-        .body("error", equalTo("agent_expired"))
+        // Wave 2 R-F2: AgentJwtVerifier rejects expired-agent JWTs as 401 invalid_jwt.
+        .statusCode(401)
+        .body("error", equalTo("invalid_jwt"))
         .body("message", notNullValue());
   }
 
@@ -1335,6 +1346,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
 
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
 
+    // The shared @BeforeEach agent runs under an admin-linked host (Wave 5 default), so the
+    // approval-method selector picks CIBA. Wave 4 B-P3b moved status_url under
+    // approval.extensions. Required-field set is the CIBA-shaped subset.
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -1349,12 +1363,10 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/agent/request-capability")
         .then()
         .statusCode(200)
-        .body("approval.method", equalTo("device_authorization"))
+        .body("approval.method", equalTo("ciba"))
         .body("approval.expires_in", notNullValue())
         .body("approval.interval", notNullValue())
-        .body("approval.status_url", notNullValue())
-        .body("approval.verification_uri", notNullValue())
-        .body("approval.user_code", notNullValue());
+        .body("approval.extensions.status_url", notNullValue());
   }
 
   /**
@@ -1496,6 +1508,8 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
 
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
 
+    // Wave 2 R-F4: pending grants no longer publish a per-grant status_url; clients poll the
+    // agent-level URL surfaced via approval.extensions.status_url (Wave 4 B-P3b).
     String statusUrl = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -1511,9 +1525,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("agent_capability_grants[0].status", equalTo("pending"))
-        .body("agent_capability_grants[0].status_url", notNullValue())
+        .body("approval.extensions.status_url", notNullValue())
         .extract()
-        .path("agent_capability_grants[0].status_url");
+        .path("approval.extensions.status_url");
 
     given()
         .baseUri(adminApiUrl())
@@ -1661,6 +1675,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
 
     long beforeMs = System.currentTimeMillis();
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    // Wave 5 admin-linked host → CIBA; the issued_at_ms persistence applies on both flows.
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -1675,7 +1690,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/agent/request-capability")
         .then()
         .statusCode(200)
-        .body("approval.method", equalTo("device_authorization"))
+        .body("approval.method", equalTo("ciba"))
         .body("approval.expires_in", greaterThan(0));
     long afterMs = System.currentTimeMillis();
 
@@ -1746,7 +1761,38 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
           .then()
           .statusCode(201);
 
-      String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+      // Wave 5: active+unlinked hosts impossible. Use a linked host (CIBA flow) — the
+      // expires_in/approval_expired contract applies to both CIBA and device_authorization
+      // since both stamp issued_at_ms. Approve via agent_id rather than user_code.
+      String username = "capreq-expiry-approver-"
+          + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+      String localUserId = createTestUser(username);
+      OctetKeyPair localHostKey = TestKeys.generateEd25519();
+      OctetKeyPair localAgentKey = TestKeys.generateEd25519();
+      preRegisterHostForUser(localHostKey, localUserId);
+      String localAgentId = given()
+          .baseUri(issuerUrl())
+          .header("Authorization", "Bearer "
+              + TestJwts.hostJwtForRegistration(localHostKey, localAgentKey, issuerUrl()))
+          .contentType(ContentType.JSON)
+          .body(String.format("""
+              {
+                "name": "Capreq Expiry Agent",
+                "host_name": "capreq-expiry-host",
+                "capabilities": ["%s"],
+                "mode": "delegated",
+                "reason": "Capreq expiry bootstrap"
+              }
+              """, activeCapability))
+          .when()
+          .post("/agent/register")
+          .then()
+          .statusCode(200)
+          .body("status", equalTo("active"))
+          .extract()
+          .path("agent_id");
+
+      String agentJwt = TestJwts.agentJwt(localHostKey, localAgentKey, localAgentId, issuerUrl());
       Response reqResp = given()
           .baseUri(issuerUrl())
           .header("Authorization", "Bearer " + agentJwt)
@@ -1762,21 +1808,17 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
       reqResp.then()
           .statusCode(200)
           .body("approval.expires_in", equalTo(2));
-      String userCode = reqResp.jsonPath().getString("approval.user_code");
 
       // Wait past the expiry threshold (with margin for test latency).
       Thread.sleep(3000L);
 
-      String username = "capreq-expiry-approver-"
-          + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-      createTestUser(username);
       String token = realmUserAccessToken(username);
 
       given()
           .baseUri(issuerUrl())
           .header("Authorization", "Bearer " + token)
           .contentType(ContentType.JSON)
-          .body(Map.of("user_code", userCode))
+          .body(Map.of("agent_id", localAgentId))
           .when()
           .post("/verify/approve")
           .then()
@@ -1818,8 +1860,37 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(201);
 
-    String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
-    Response reqResp = given()
+    // Wave 5: linked host + CIBA — approve via agent_id within the expiry window.
+    String username = "capreq-within-approver-"
+        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String localUserId = createTestUser(username);
+    OctetKeyPair localHostKey = TestKeys.generateEd25519();
+    OctetKeyPair localAgentKey = TestKeys.generateEd25519();
+    preRegisterHostForUser(localHostKey, localUserId);
+    String localAgentId = given()
+        .baseUri(issuerUrl())
+        .header("Authorization", "Bearer "
+            + TestJwts.hostJwtForRegistration(localHostKey, localAgentKey, issuerUrl()))
+        .contentType(ContentType.JSON)
+        .body(String.format("""
+            {
+              "name": "Capreq Within Agent",
+              "host_name": "capreq-within-host",
+              "capabilities": ["%s"],
+              "mode": "delegated",
+              "reason": "Capreq within window bootstrap"
+            }
+            """, activeCapability))
+        .when()
+        .post("/agent/register")
+        .then()
+        .statusCode(200)
+        .body("status", equalTo("active"))
+        .extract()
+        .path("agent_id");
+
+    String agentJwt = TestJwts.agentJwt(localHostKey, localAgentKey, localAgentId, issuerUrl());
+    given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
         .contentType(ContentType.JSON)
@@ -1830,22 +1901,17 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
             }
             """, approvalCap))
         .when()
-        .post("/agent/request-capability");
-    reqResp.then()
-        .statusCode(200)
-        .body("approval.user_code", notNullValue());
-    String userCode = reqResp.jsonPath().getString("approval.user_code");
+        .post("/agent/request-capability")
+        .then()
+        .statusCode(200);
 
-    String username = "capreq-within-approver-"
-        + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-    createTestUser(username);
     String token = realmUserAccessToken(username);
 
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + token)
         .contentType(ContentType.JSON)
-        .body(Map.of("user_code", userCode))
+        .body(Map.of("agent_id", localAgentId))
         .when()
         .post("/verify/approve")
         .then()
@@ -1906,11 +1972,13 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
             """, approvalCap))
         .when()
         .post("/agent/register");
+    // Wave 2 R-F4: per-grant status_url removed from pending grants — use the agent-level URL
+    // surfaced via approval.extensions.status_url (Wave 4 B-P3b).
     register.then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("agent_capability_grants[0].status_url", notNullValue());
-    String statusUrl = register.jsonPath().getString("agent_capability_grants[0].status_url");
+        .body("approval.extensions.status_url", notNullValue());
+    String statusUrl = register.jsonPath().getString("approval.extensions.status_url");
 
     String pollingHostJwt = TestJwts.hostJwt(pendingHostKey, issuerUrl());
     given()
@@ -1920,7 +1988,10 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .then()
         .statusCode(200)
         .body("status", equalTo("pending"))
-        .body("capability", equalTo(approvalCap));
+        // Wave 2 R-F4 + Wave 4 B-P3b: the polling URL is now agent-level (returns the full agent
+        // status shape), so the per-grant `capability` scalar isn't on the response. Verify the
+        // capability appears in agent_capability_grants instead.
+        .body("agent_capability_grants.capability", org.hamcrest.Matchers.hasItem(approvalCap));
   }
 
   /**
@@ -1953,6 +2024,7 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .statusCode(201);
 
     String agentJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
+    // Wave 2 R-F4 + Wave 4 B-P3b: status_url moved to approval.extensions.status_url.
     String statusUrl = given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + agentJwt)
@@ -1967,9 +2039,9 @@ class AgentAuthCapabilityRequestIT extends BaseKeycloakIT {
         .post("/agent/request-capability")
         .then()
         .statusCode(200)
-        .body("agent_capability_grants[0].status_url", notNullValue())
+        .body("approval.extensions.status_url", notNullValue())
         .extract()
-        .path("agent_capability_grants[0].status_url");
+        .path("approval.extensions.status_url");
 
     OctetKeyPair otherHostKey = TestKeys.generateEd25519();
     preRegisterHost(otherHostKey);

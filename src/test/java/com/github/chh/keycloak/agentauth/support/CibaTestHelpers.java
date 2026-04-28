@@ -120,13 +120,30 @@ public final class CibaTestHelpers {
 
   public static void preRegisterHost(String authServerUrl, String adminToken, OctetKeyPair hostKey,
       String name) {
+    preRegisterHost(authServerUrl, adminToken, hostKey, name, null);
+  }
+
+  /**
+   * CIBA-flow variant of host pre-registration that lets the caller bind the host to a specific
+   * {@code userId}. Wave-5 requires either {@code user_id} or {@code client_id} for the host to
+   * land {@code active}; this overload is the test-side knob. Pass {@code null} to preserve the
+   * original (now-{@code pending}) behavior — most CIBA tests follow up with
+   * {@link #linkHost(String, String, String, String)} so leaving the host pending is fine, but
+   * tests that expect an immediately-active host should pass the user id here.
+   */
+  public static void preRegisterHost(String authServerUrl, String adminToken, OctetKeyPair hostKey,
+      String name, String userId) {
+    Map<String, Object> body = new java.util.HashMap<>();
+    body.put("host_public_key", hostKey.toPublicJWK().toJSONObject());
+    body.put("name", name);
+    if (userId != null && !userId.isBlank()) {
+      body.put("user_id", userId);
+    }
     given()
         .baseUri(adminApiUrl(authServerUrl))
         .header("Authorization", "Bearer " + adminToken)
         .contentType(ContentType.JSON)
-        .body(Map.of(
-            "host_public_key", hostKey.toPublicJWK().toJSONObject(),
-            "name", name))
+        .body(body)
         .when()
         .post("/hosts")
         .then()

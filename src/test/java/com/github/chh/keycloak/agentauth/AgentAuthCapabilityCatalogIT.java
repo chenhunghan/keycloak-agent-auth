@@ -69,23 +69,15 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
     hostKey = TestKeys.generateEd25519();
     agentKey = TestKeys.generateEd25519();
     String hostJwt = TestJwts.hostJwtForRegistration(hostKey, agentKey, issuerUrl());
-    preRegisterHost(hostKey);
 
-    // Post-2026-04 catalog auth requires the host to be linked to a KC user before host+jwt is
+    // Post-2026-04 catalog auth requires the host be linked to a KC user before host+jwt is
     // accepted as an authenticated catalog principal (§5.2 hardening — unlinked self-signed
-    // hosts can't peek at authenticated-visibility caps). Link the test fixture's host so the
-    // existing host-JWT-returns-metadata tests continue to exercise the authenticated path.
-    String hostId = TestKeys.thumbprint(hostKey);
+    // hosts can't peek at authenticated-visibility caps). After T1, POST /hosts/{id}/link sets
+    // user_id but does NOT flip a pending host to active — a pending host then cascades to
+    // pending agents and breaks the host-JWT auth path the catalog tests need. Pre-register the
+    // host already bound to the fresh user so it comes up active+linked in one call.
     String userId = createTestUser("catalog-fixture-user-" + suffix);
-    given()
-        .baseUri(adminApiUrl())
-        .header("Authorization", "Bearer " + adminAccessToken())
-        .contentType(ContentType.JSON)
-        .body(Map.of("user_id", userId))
-        .when()
-        .post("/hosts/" + hostId + "/link")
-        .then()
-        .statusCode(200);
+    preRegisterHostForUser(hostKey, userId);
 
     agentId = given()
         .baseUri(issuerUrl())
@@ -578,15 +570,18 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
    */
   @Test
   void listCapabilitiesWithMalformedBearerTokenTreatedAsUnauthenticated() {
+    // Post-2026-04 §5.2 hardening: a structurally-malformed Bearer token surfaces 401 invalid_jwt
+    // rather than silently downgrading to the unauthenticated catalog view. The graceful-
+    // degradation behaviour described in this test's original docstring no longer applies — the
+    // strict verifier rejects the token outright.
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer not.a.valid.jwt.token")
         .when()
         .get("/capability/list")
         .then()
-        .statusCode(200)
-        .body("capabilities.name", hasItem(publicCapability))
-        .body("capabilities.name", org.hamcrest.Matchers.not(hasItem(authenticatedCapability)));
+        .statusCode(401)
+        .body("error", equalTo("invalid_jwt"));
   }
 
   /**
@@ -683,7 +678,12 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
     OctetKeyPair freshHostKey = TestKeys.generateEd25519();
     OctetKeyPair freshAgentKey = TestKeys.generateEd25519();
     String regJwt = TestJwts.hostJwtForRegistration(freshHostKey, freshAgentKey, issuerUrl());
-    preRegisterHost(freshHostKey);
+    // After T1 + AAP-ADMIN-001, POST /hosts/{id}/link sets user_id but does not activate a
+    // pending host. Pre-register the host already bound to the fresh listing-test user so it
+    // comes up active+linked, the host-JWT then authenticates against the catalog, and the
+    // assertion below exercises the entitlement gate as intended.
+    String userId = createTestUser("listing-test-user-" + suffix);
+    preRegisterHostForUser(freshHostKey, userId);
     given()
         .baseUri(issuerUrl())
         .header("Authorization", "Bearer " + regJwt)
@@ -699,18 +699,6 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
             """, authenticatedCapability))
         .when()
         .post("/agent/register")
-        .then()
-        .statusCode(200);
-
-    String hostId = TestKeys.thumbprint(freshHostKey);
-    String userId = createTestUser("listing-test-user-" + suffix);
-    given()
-        .baseUri(adminApiUrl())
-        .header("Authorization", "Bearer " + adminAccessToken())
-        .contentType(ContentType.JSON)
-        .body(Map.of("user_id", userId))
-        .when()
-        .post("/hosts/" + hostId + "/link")
         .then()
         .statusCode(200);
 
@@ -859,19 +847,11 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
     OctetKeyPair revokeAgentKey = TestKeys.generateEd25519();
     String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
     String regJwt = TestJwts.hostJwtForRegistration(revokeHostKey, revokeAgentKey, issuerUrl());
-    preRegisterHost(revokeHostKey);
-
-    String revokeHostId = TestKeys.thumbprint(revokeHostKey);
+    // After T1 + AAP-ADMIN-001, POST /hosts/{id}/link sets user_id but does not activate a
+    // pending host. Pre-register the host already bound to the fresh revoke-cascade user so it
+    // comes up active+linked in one call.
     String revokeUserId = createTestUser("revoke-cascade-user-" + suffix);
-    given()
-        .baseUri(adminApiUrl())
-        .header("Authorization", "Bearer " + adminAccessToken())
-        .contentType(ContentType.JSON)
-        .body(Map.of("user_id", revokeUserId))
-        .when()
-        .post("/hosts/" + revokeHostId + "/link")
-        .then()
-        .statusCode(200);
+    preRegisterHostForUser(revokeHostKey, revokeUserId);
 
     String revokeAgentId = given()
         .baseUri(issuerUrl())
@@ -1043,19 +1023,11 @@ class AgentAuthCapabilityCatalogIT extends BaseKeycloakIT {
     OctetKeyPair localAgentKey = TestKeys.generateEd25519();
     String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
     String regJwt = TestJwts.hostJwtForRegistration(localHostKey, localAgentKey, issuerUrl());
-    preRegisterHost(localHostKey);
-
-    String localHostId = TestKeys.thumbprint(localHostKey);
+    // After T1 + AAP-ADMIN-001, POST /hosts/{id}/link sets user_id but does not activate a
+    // pending host. Pre-register the host already bound to the fresh grant-status user so it
+    // comes up active+linked in one call — the agent JWT auth path needs an active host.
     String localUserId = createTestUser("grant-status-user-" + suffix);
-    given()
-        .baseUri(adminApiUrl())
-        .header("Authorization", "Bearer " + adminAccessToken())
-        .contentType(ContentType.JSON)
-        .body(Map.of("user_id", localUserId))
-        .when()
-        .post("/hosts/" + localHostId + "/link")
-        .then()
-        .statusCode(200);
+    preRegisterHostForUser(localHostKey, localUserId);
 
     String localAgentId = given()
         .baseUri(issuerUrl())

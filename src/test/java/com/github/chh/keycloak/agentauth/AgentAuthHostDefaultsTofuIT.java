@@ -85,6 +85,10 @@ class AgentAuthHostDefaultsTofuIT extends BaseKeycloakIT {
     OctetKeyPair hostKey = TestKeys.generateEd25519();
     OctetKeyPair firstAgentKey = TestKeys.generateEd25519();
 
+    // Wave 5 AAP-ADMIN-001: admin grant-approve gate now requires the host be linked. A
+    // dynamic-register host comes up pending without user_id, so admin approve below 400s.
+    // Pre-register the host bound to the master admin so the admin approve passes the gate.
+    preRegisterHost(hostKey);
     Response firstReg = registerDelegatedAgent(hostKey, firstAgentKey, cap);
     String firstAgentId = firstReg.jsonPath().getString("agent_id");
 
