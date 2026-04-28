@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.1](https://github.com/chenhunghan/keycloak-agent-auth/compare/keycloak-agent-auth-v0.4.0...keycloak-agent-auth-v0.4.1) (2026-04-28)
+
+
+### Bug Fixes
+
+* **admin:** gate test-only backdate-clocks endpoint behind agent-auth.test-mode property ([f7d5bd0](https://github.com/chenhunghan/keycloak-agent-auth/commit/f7d5bd07fc5524bdcc5fd6476b7a8be3b3a83a47))
+* **admin:** preserve terminal agent states in expire/reject ([7cdfa43](https://github.com/chenhunghan/keycloak-agent-auth/commit/7cdfa4362aaa311969fad4d20c71ed7767944e8a))
+* **admin:** require description and object input/output on capability create/update; restrict grant approval to pending grants on mutable agents ([c206fa0](https://github.com/chenhunghan/keycloak-agent-auth/commit/c206fa09587f92ead3f0bc5d2239eff9e4b2d3e2))
+* **admin:** tighten admin-created records per AAP audit ([49134da](https://github.com/chenhunghan/keycloak-agent-auth/commit/49134daa1ae3103a65a1c561024bff9a01bd556f))
+* **approval:** persist approval expiry metadata on capability-request flows ([b742fff](https://github.com/chenhunghan/keycloak-agent-auth/commit/b742fff69fdfc7d551dcf4037c3a92f8667a5bce))
+* **catalog:** add WWW-Authenticate challenge, cache headers, hide non-public cap existence ([b225ea6](https://github.com/chenhunghan/keycloak-agent-auth/commit/b225ea6d78c8d3bea9d563f3be30e5af3e766f02))
+* **catalog:** full Agent/Host JWT verification on capability list and describe ([7f129d3](https://github.com/chenhunghan/keycloak-agent-auth/commit/7f129d3b441254ca99bf831db387bd542646d2ba))
+* **catalog:** require capability location at admin time and host+jwt-protect the per-grant status endpoint ([48807ef](https://github.com/chenhunghan/keycloak-agent-auth/commit/48807ef4bbe5573f23c558dc422943d5516d9e4d))
+* **constraints:** enforce exact-value constraints for non-string JSON values ([444e40d](https://github.com/chenhunghan/keycloak-agent-auth/commit/444e40dfcf9151c865160bfb90af22f20136aac9))
+* **grants:** preserve requested constraints through pending approval ([50a37dd](https://github.com/chenhunghan/keycloak-agent-auth/commit/50a37dd01c5e3f88c47d6d8dd75272cca0fc8e6a))
+* **grants:** sanitize agent responses on rotate-key/revoke/reactivate; fix catalog ITs for stricter agent-JWT verifier ([f34b6a6](https://github.com/chenhunghan/keycloak-agent-auth/commit/f34b6a65e52807ff28bf6948128d4cd46e98adfb))
+* **host:** centralize Host JWT verification with JWKS fallback and rotate-key safety ([78a3141](https://github.com/chenhunghan/keycloak-agent-auth/commit/78a31410611fa9f8b8de49f58ff91e66e5fc6ba9))
+* **introspect:** include user_id, scope {capability, arguments} extension to active grants, compact base grants ([9b4c988](https://github.com/chenhunghan/keycloak-agent-auth/commit/9b4c988ebbeb075ff7651c7e815ef7d67acbf595))
+* **jti-ordering:** apply jti replay check after signature verification ([4ee094f](https://github.com/chenhunghan/keycloak-agent-auth/commit/4ee094f40c5428b9156e1d1f5725a02e9728611e))
+* **lifecycle:** centralize lifecycle clock evaluation across status/reactivate/execute/introspect ([e180a9e](https://github.com/chenhunghan/keycloak-agent-auth/commit/e180a9ed0e0072389374efcef2472ded73512e5e))
+* **request-capability:** honor host_default_capabilities for auto-approval consistency with registration ([984c9c6](https://github.com/chenhunghan/keycloak-agent-auth/commit/984c9c62ed75f1351ccfc61326bcccd1d541262a))
+* **spec:** align core endpoints with AAP §5 wire shapes and security gates ([92a3f6f](https://github.com/chenhunghan/keycloak-agent-auth/commit/92a3f6f1e7574f145ffcf5f0e5dcb32dc732f21d))
+* **spec:** align JWT verifiers with AAP §4.5 — agent iss-binding, JWKS rotation fallback, lifecycle clock ([f3c02c0](https://github.com/chenhunghan/keycloak-agent-auth/commit/f3c02c0128d7db2d9b6c8a7446176d47286d8a64))
+
+
+### Documentation
+
+* **audit:** add AAP v1.0-draft endpoint audit reports ([dceac11](https://github.com/chenhunghan/keycloak-agent-auth/commit/dceac116ca167ac98df59eb44b683d3522f07450))
+* **audit:** add AAP v1.0-draft endpoint audit reports ([7ca0437](https://github.com/chenhunghan/keycloak-agent-auth/commit/7ca0437833d54f6b2d136541c8b1647293234732))
+* **readme:** narrow browser-approval auth claim, document name-policy relaxation, gateway-mode extension audience and pass-through ([676adb4](https://github.com/chenhunghan/keycloak-agent-auth/commit/676adb4b852dbab5e92fa719b74921afbb2ca68e))
+
 ## [0.4.0](https://github.com/chenhunghan/keycloak-agent-auth/compare/keycloak-agent-auth-v0.3.1...keycloak-agent-auth-v0.4.0) (2026-04-26)
 
 
