@@ -180,18 +180,12 @@ final class HostJwtVerifier {
       throw fail(401, "invalid_jwt", "Unable to compute key thumbprint");
     }
 
-    // §4.2: when the host carries an inline `host_public_key` claim, the JWK MUST hash to `iss`
-    // (legacy thumbprint identity). When the host registered with `host_jwks_url`, the iss is the
-    // stored thumbprint at registration time; the freshly fetched JWK doesn't have to match `iss`
-    // because the JWKS endpoint is the source of truth and the host may have rotated keys
-    // out-of-band.
-    boolean hadInlineKey;
-    try {
-      hadInlineKey = claims.getJSONObjectClaim("host_public_key") != null;
-    } catch (Exception e) {
-      throw fail(401, "invalid_jwt", "Malformed host_public_key claim");
-    }
-    if (hadInlineKey && !thumbprint.equals(iss)) {
+    // §4.2 / §4.5.1: the host iss MUST be the SHA-256 JWK thumbprint of the signing public key,
+    // regardless of whether the key arrived via inline `host_public_key` or was fetched from
+    // `host_jwks_url`. JWKS fallback (foundByJwksFallback) only relaxes how we LOCATE the host
+    // record (by stable URL when the stored PK has drifted from the JWT's iss); the resolved
+    // signing key's thumbprint must still equal the JWT's iss claim.
+    if (!thumbprint.equals(iss)) {
       throw fail(401, "invalid_jwt", "Issuer does not match host thumbprint");
     }
 

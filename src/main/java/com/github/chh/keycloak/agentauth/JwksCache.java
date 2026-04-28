@@ -65,6 +65,25 @@ final class JwksCache {
     throw new IllegalArgumentException("No matching JWK found for kid");
   }
 
+  /**
+   * Returns every JWK currently published at {@code jwksUrl}, keyed by {@code kid}. Used by the
+   * §4.5 host-rotation fallback in {@link AgentJwtVerifier}: the agent JWT's {@code iss} is the
+   * host-key thumbprint, not the kid, so callers need to scan all published keys looking for a
+   * matching thumbprint rather than indexing by kid. Re-fetches a stale entry on miss.
+   */
+  Map<String, Map<String, Object>> resolveAll(String jwksUrl) {
+    long now = System.currentTimeMillis();
+    Entry entry = entries.get(jwksUrl);
+    if (entry == null || now - entry.fetchedAtMs >= ttlMs) {
+      entry = fetchAndStore(jwksUrl, now, 0);
+    }
+    Map<String, Map<String, Object>> copy = new HashMap<>();
+    for (Map.Entry<String, Map<String, Object>> e : entry.keysByKid.entrySet()) {
+      copy.put(e.getKey(), new HashMap<>(e.getValue()));
+    }
+    return copy;
+  }
+
   void invalidate(String jwksUrl) {
     entries.remove(jwksUrl);
   }

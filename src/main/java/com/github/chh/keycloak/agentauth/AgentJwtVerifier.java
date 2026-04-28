@@ -7,8 +7,10 @@ import com.nimbusds.jose.jwk.OctetKeyPair;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import jakarta.ws.rs.core.Response;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Centralized §4.5 + §4.3 + §4.6 Agent JWT verification. Mirrors {@link HostJwtVerifier} for the
@@ -25,8 +27,16 @@ import java.util.Map;
  * <li>{@code jti}, {@code iat}, {@code exp} presence + freshness with clock skew (§4.5)</li>
  * <li>{@code aud} match against the expected receiver (caller-supplied; for catalog calls this is
  * the issuer URL)</li>
- * <li>Agent lookup by {@code sub}; agent must exist and be {@code active}</li>
- * <li>Owning host lookup by stored {@code host_id}; host must exist and be {@code active}</li>
+ * <li>{@code iss} presence and binding to the agent's parent host. Inline-key hosts MUST match the
+ * stored {@code host_id} exactly; JWKS-served hosts may rotate their key out-of-band, in which case
+ * we accept any {@code iss} that hashes to a key currently published at the host's
+ * {@code host_jwks_url}.</li>
+ * <li>Agent lookup by {@code sub}; lifecycle clocks (§§2.3-2.5) are evaluated lazily before the
+ * status check so a stale {@code active} row is demoted to {@code expired}/{@code revoked} and
+ * persisted before authentication proceeds.</li>
+ * <li>Agent status check — must be {@code active}.</li>
+ * <li>Owning host lookup by stored {@code host_id} with §4.5 JWKS-rotation fallback; host must
+ * exist and be {@code active}</li>
  * <li>Signature verification against the agent's stored {@code agent_public_key} (with
  * {@code agent_jwks_url} fallback)</li>
  * <li>Replay check via the caller-supplied {@code jti} predicate (§4.6)</li>
@@ -65,10 +75,16 @@ final class AgentJwtVerifier {
 
   /**
    * Run the agent-JWT verification pipeline for a bearer token. Pre-signature checks (typ, claims
-   * presence, audience, timestamps) run before any storage lookup; the agent and host status checks
-   * run before the signature so a known-bad principal short-circuits without consuming crypto. The
-   * §4.6 jti replay check is last so a verified-but-replayed JWT still surfaces the replay error
-   * rather than a generic invalid-signature failure.
+   * presence, audience, timestamps, iss presence) run before any storage lookup; the agent and host
+   * status checks run before the signature so a known-bad principal short-circuits without
+   * consuming crypto. The §4.6 jti replay check is last so a verified-but-replayed JWT still
+   * surfaces the replay error rather than a generic invalid-signature failure.
+   *
+   * <p>
+   * Order of checks (per §4.5): parse claims → require iss → resolve agent by sub → apply
+   * {@link LifecycleClock} → check agent status → resolve host (with JWKS fallback for
+   * rotation-capable hosts) → check host status → verify signature → check exp/iat (already
+   * pre-validated) → check jti replay.
    *
    * @param authHeader
    *          the raw {@code Authorization} header value, may be null
@@ -123,6 +139,14 @@ final class AgentJwtVerifier {
       throw fail(401, "invalid_jwt", "Invalid audience");
     }
 
+    // §4.3: iss is the host identifier. We require its presence early so subsequent checks have
+    // something to bind against; the actual iss-vs-stored-host-id comparison happens after the
+    // agent (and therefore the parent host_id) is resolved.
+    String iss = claims.getIssuer();
+    if (iss == null || iss.isBlank()) {
+      throw fail(401, "invalid_jwt", "Missing issuer");
+    }
+
     String sub = claims.getSubject();
     if (sub == null || sub.isBlank()) {
       throw fail(401, "invalid_jwt", "Missing sub");
@@ -131,6 +155,18 @@ final class AgentJwtVerifier {
     Map<String, Object> agentData = storage.getAgent(sub);
     if (agentData == null) {
       throw fail(401, "invalid_jwt", "Unknown agent");
+    }
+
+    // §§2.3-2.5: lazy lifecycle-clock evaluation. A token may arrive while the stored status still
+    // says `active`; the centralised evaluator demotes the row to `expired` or `revoked` before we
+    // honour it. Persist any transition so subsequent flows (status, execute, introspect) see the
+    // new value — same pattern as getAgentStatus / agentExecute / introspect.
+    String statusBeforeClock = (String) agentData.get("status");
+    LifecycleClock.Result clockResult = LifecycleClock.applyExpiry(agentData);
+    if (clockResult != LifecycleClock.Result.ACTIVE
+        && !Objects.equals(statusBeforeClock, agentData.get("status"))) {
+      agentData.put("updated_at", Instant.now().toString());
+      storage.putAgent(sub, agentData);
     }
 
     String agentStatus = (String) agentData.get("status");
@@ -150,6 +186,22 @@ final class AgentJwtVerifier {
     if (hostData == null) {
       throw fail(401, "invalid_jwt", "Unknown host");
     }
+
+    // §4.3 + §4.5 host fallback: the JWT iss MUST identify the agent's parent host. Inline-key
+    // hosts have a fixed thumbprint identity — iss must equal the stored host_id exactly. JWKS-
+    // served hosts may rotate keys out of band, so we additionally accept any iss that matches a
+    // key currently published at the host's host_jwks_url (thumbprint-of-resolved-key == iss).
+    if (!hostId.equals(iss)) {
+      String hostJwksUrl = (String) hostData.get("host_jwks_url");
+      if (hostJwksUrl == null || hostJwksUrl.isBlank()) {
+        // Inline-key host fails closed: no JWKS to consult, no rebind path.
+        throw fail(401, "invalid_jwt", "Issuer does not match host");
+      }
+      if (!issMatchesPublishedJwk(hostJwksUrl, iss)) {
+        throw fail(401, "invalid_jwt", "Issuer does not match host");
+      }
+    }
+
     String hostStatus = (String) hostData.get("status");
     if (!"active".equals(hostStatus)) {
       // Pending host or revoked host invalidates every agent under it for catalog access. Per
@@ -193,6 +245,32 @@ final class AgentJwtVerifier {
     }
 
     return new Result(jwt, jti, sub, agentData, hostId, hostData);
+  }
+
+  /**
+   * Returns true if the given host JWKS endpoint currently publishes a key whose JWK thumbprint
+   * equals {@code expectedIss}. We iterate the cached JWKS keys (re-fetching via the cache's
+   * miss-window if the kid we're looking for isn't present yet) rather than indexing by kid,
+   * because the JWT issuer is the thumbprint, not the kid — different keys may use different kids.
+   */
+  private boolean issMatchesPublishedJwk(String hostJwksUrl, String expectedIss) {
+    Map<String, Map<String, Object>> keysByKid;
+    try {
+      keysByKid = jwksCache.resolveAll(hostJwksUrl);
+    } catch (IllegalArgumentException e) {
+      return false;
+    }
+    for (Map<String, Object> jwk : keysByKid.values()) {
+      try {
+        OctetKeyPair okp = OctetKeyPair.parse(jwk);
+        if (expectedIss.equals(okp.computeThumbprint().toString())) {
+          return true;
+        }
+      } catch (Exception ignored) {
+        // skip malformed or non-OKP entries
+      }
+    }
+    return false;
   }
 
   @SuppressWarnings("unchecked")
