@@ -324,6 +324,7 @@ class AgentAuthErrorResponseIT extends BaseKeycloakIT {
         {
           "name": "%s",
           "description": "Duplicate error shape test",
+          "location": "https://example.test/dup-err",
           "visibility": "public",
           "requires_approval": false
         }
