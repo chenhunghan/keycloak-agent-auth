@@ -371,8 +371,14 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
    */
   @Test
   void introspectAgentJwtWithDefaultLocationAudReturnsActive() {
-    String locationlessCap = "locationless_introspect_cap_"
+    // Audit 04 P1: locationless caps are now rejected at admin registration. To keep this §4.3
+    // audience-fallback assertion meaningful, register a cap whose explicit location IS the
+    // server's default_location (the gateway endpoint). The JWT-aud check still exercises the
+    // same matcher path — agent JWTs minted with aud=<gateway> introspect as active when the
+    // grant's resolved location is the gateway URL.
+    String defaultLocationCap = "default_location_introspect_cap_"
         + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    String defaultLocationUrl = issuerUrl() + "/capability/execute";
     given()
         .baseUri(adminApiUrl())
         .header("Authorization", "Bearer " + adminAccessToken())
@@ -380,13 +386,14 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .body(String.format("""
             {
               "name": "%s",
-              "description": "Location-less cap (falls back to default_location)",
+              "description": "Cap whose location IS default_location",
+              "location": "%s",
               "visibility": "authenticated",
               "requires_approval": false,
               "input": {"type": "object"},
               "output": {"type": "object"}
             }
-            """, locationlessCap))
+            """, defaultLocationCap, defaultLocationUrl))
         .when()
         .post("/capabilities")
         .then()
@@ -408,7 +415,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
               "mode": "delegated",
               "reason": "default_location aud test"
             }
-            """, locationlessCap))
+            """, defaultLocationCap))
         .when()
         .post("/agent/register")
         .then()
@@ -416,8 +423,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .extract()
         .path("agent_id");
 
-    String defaultLocation = issuerUrl() + "/capability/execute";
-    String agentJwt = TestJwts.agentJwt(llHostKey, llAgentKey, llAgentId, defaultLocation);
+    String agentJwt = TestJwts.agentJwt(llHostKey, llAgentKey, llAgentId, defaultLocationUrl);
 
     given()
         .baseUri(issuerUrl())
@@ -434,7 +440,7 @@ class AgentAuthIntrospectIT extends BaseKeycloakIT {
         .statusCode(200)
         .body("active", equalTo(true))
         .body("agent_capability_grants", hasSize(1))
-        .body("agent_capability_grants[0].capability", equalTo(locationlessCap));
+        .body("agent_capability_grants[0].capability", equalTo(defaultLocationCap));
   }
 
   /**

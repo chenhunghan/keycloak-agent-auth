@@ -470,7 +470,12 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
   }
 
   @Test
-  void executeLocationlessCapabilityReturnsMisconfigurationError() {
+  void registerLocationlessCapabilityIsRejectedAtAdminTime() {
+    // Audit 04 P1: this implementation has no backend mechanism to execute locationless caps at
+    // default_location, so admin registration now rejects them up front rather than letting
+    // discovery advertise an unexecutable cap. The pre-2026-04 behavior was to register and
+    // return 500 capability_misconfigured at execute time — this test pins the new behavior
+    // (400 at admin time, cap never reaches the catalog).
     String locationlessCapability = "locationless_execute_"
         + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
 
@@ -489,44 +494,8 @@ class AgentAuthCapabilityExecuteIT extends BaseKeycloakIT {
         .when()
         .post("/capabilities")
         .then()
-        .statusCode(201)
-        .body("location", org.hamcrest.Matchers.nullValue());
-
-    String requestJwt = TestJwts.agentJwt(hostKey, agentKey, agentId, issuerUrl());
-    given()
-        .baseUri(issuerUrl())
-        .header("Authorization", "Bearer " + requestJwt)
-        .contentType(ContentType.JSON)
-        .body(String.format("""
-            {
-              "capabilities": ["%s"],
-              "reason": "Exercise default_location misconfiguration path"
-            }
-            """, locationlessCapability))
-        .when()
-        .post("/agent/request-capability")
-        .then()
-        .statusCode(200)
-        .body("agent_capability_grants[0].status", equalTo("active"));
-
-    // §4.3: cap was registered without `location`, so resolved URL = default_location.
-    String executeJwt = TestJwts.agentJwt(hostKey, agentKey, agentId,
-        issuerUrl() + "/capability/execute");
-    given()
-        .baseUri(issuerUrl())
-        .header("Authorization", "Bearer " + executeJwt)
-        .contentType(ContentType.JSON)
-        .body(String.format("""
-            {
-              "capability": "%s",
-              "arguments": {}
-            }
-            """, locationlessCapability))
-        .when()
-        .post("/capability/execute")
-        .then()
-        .statusCode(500)
-        .body("error", equalTo("capability_misconfigured"));
+        .statusCode(400)
+        .body("error", equalTo("invalid_capability_location"));
   }
 
   /**
