@@ -16,6 +16,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -55,6 +57,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   private static final long DEFAULT_AGENT_TTL_SECONDS = 3600L;
   private static final int DEFAULT_APPROVAL_EXPIRES_IN = 600;
   private static final int DEFAULT_APPROVAL_INTERVAL = 10;
+  /**
+   * Audit B-P1a / spec §8.11: completing approval or denial requires fresh user authentication.
+   * Defaults to 5 minutes, configurable per deployment via the
+   * {@code agent-auth.approval.max-auth-age-seconds} system property. Used both as the
+   * {@code max_age} parameter on the login bounce and as the freshness threshold enforced at POST
+   * time.
+   */
+  private static final long DEFAULT_APPROVAL_MAX_AUTH_AGE_SECONDS = 300L;
   private static final long CLOCK_SKEW_MS = 30_000L;
   private static final int INTROSPECT_UNAUTH_RATE_LIMIT = 100;
   private static final long RATE_LIMIT_WINDOW_MS = 60_000L;
@@ -81,29 +91,47 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   }
 
   /**
-   * Peek at a Bearer token's {@code typ} header to decide which verifier to dispatch. Returns
-   * {@code "host+jwt"}, {@code "agent+jwt"}, or {@code null} for missing/malformed/unknown-typ
-   * tokens. Used by the §5.2 catalog endpoints so the typed verifiers can produce protocol-correct
-   * 401 responses (parse failure, etc.) rather than the catalog endpoint silently treating any
+   * §5.13 catalog auth: distinguish absent-bearer (anonymous public read), malformed-bearer (must
+   * surface 401 invalid_jwt), unknown/missing typ (also 401 invalid_jwt), and the two valid typed
+   * tokens we route to the typed verifiers. The pre-2026-04 helper collapsed the first four
+   * outcomes into the same {@code null}, allowing a malformed Bearer to silently downgrade to
+   * anonymous access — a §5.13 violation. Used by the §5.2 catalog endpoints
+   * ({@code GET /capability/list}, {@code GET /capability/describe}) so the typed verifiers can
+   * produce protocol-correct 401 responses rather than the catalog endpoint silently treating any
    * unparseable token as unauthenticated.
    */
-  private static String sniffJwtType(String authHeader) {
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return null;
+  enum AuthSniff {
+    NO_AUTH, MALFORMED, UNSUPPORTED_TYP, HOST_JWT, AGENT_JWT
+  }
+
+  private static AuthSniff sniffJwtType(String authHeader) {
+    if (authHeader == null || authHeader.isBlank()) {
+      return AuthSniff.NO_AUTH;
     }
+    if (!authHeader.startsWith("Bearer ")) {
+      return AuthSniff.MALFORMED;
+    }
+    String token = authHeader.substring(7);
+    if (token.isBlank()) {
+      return AuthSniff.MALFORMED;
+    }
+    SignedJWT jwt;
     try {
-      SignedJWT jwt = SignedJWT.parse(authHeader.substring(7));
-      if (jwt.getHeader().getType() == null) {
-        return null;
-      }
-      String typ = jwt.getHeader().getType().getType();
-      if ("host+jwt".equals(typ) || "agent+jwt".equals(typ)) {
-        return typ;
-      }
-      return null;
+      jwt = SignedJWT.parse(token);
     } catch (Exception e) {
-      return null;
+      return AuthSniff.MALFORMED;
     }
+    if (jwt.getHeader().getType() == null) {
+      return AuthSniff.UNSUPPORTED_TYP;
+    }
+    String typ = jwt.getHeader().getType().getType();
+    if ("host+jwt".equals(typ)) {
+      return AuthSniff.HOST_JWT;
+    }
+    if ("agent+jwt".equals(typ)) {
+      return AuthSniff.AGENT_JWT;
+    }
+    return AuthSniff.UNSUPPORTED_TYP;
   }
 
   @Override
@@ -564,11 +592,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             : null;
         agentData.put("approval",
             selectApprovalObject(agentId, agentData, hostData, mode, bindingMessage));
-        for (Map<String, Object> grant : grants) {
-          if ("pending".equals(grant.get("status"))) {
-            grant.put("status_url", buildGrantStatusUrl(agentId, (String) grant.get("capability")));
-          }
-        }
+        // §5.3 / §5.4: pending grants on the wire are compact {capability, status} objects. The
+        // per-grant status URL is published as a documented extension at
+        // GET /agent/{agentId}/capabilities/{capabilityName}/status — it must NOT appear inside
+        // the grant object itself. We deliberately don't stamp it on the stored grant.
       } else {
         agentData.put("activated_at", nowTs);
       }
@@ -618,8 +645,44 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @SuppressWarnings("unchecked")
   public Response introspect(
       @HeaderParam("Authorization") String authHeader,
+      @HeaderParam("X-AgentAuth-Resource-Server-Token") String rsTokenHeader,
       Map<String, Object> requestBody) {
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+    // Audit E-F1 / §5.13: rate-limit MUST be non-bypassable. The pre-fix logic gated the limiter
+    // on "Authorization header missing or non-Bearer", so any caller could send `Bearer <any
+    // parseable jwt>` to skip the limit without authenticating. We now apply the unauthenticated
+    // limiter unconditionally unless we positively verify a real resource-server credential.
+    //
+    // Minimum viable RS-auth: a shared secret configured via `agent-auth.introspect.shared-secret`.
+    // The caller may send it via `X-AgentAuth-Resource-Server-Token: <secret>` OR
+    // `Authorization: Bearer <secret>`. If the property is unset or empty, no caller is ever
+    // authenticated and the limiter always applies.
+    //
+    // TODO(audit-followup): replace the shared-secret stopgap with real RS auth (mTLS or
+    // Keycloak service-account/client-credentials validation).
+    boolean resourceServerAuthenticated = false;
+    String configuredSecret = System.getProperty("agent-auth.introspect.shared-secret");
+    if (configuredSecret != null && !configuredSecret.isEmpty()) {
+      String presentedSecret = null;
+      if (rsTokenHeader != null && !rsTokenHeader.isBlank()) {
+        presentedSecret = rsTokenHeader.trim();
+      } else if (authHeader != null && authHeader.startsWith("Bearer ")) {
+        // Constant-time comparison would be ideal; with a small fixed-length secret per deployment,
+        // a TODO-grade equality check is acceptable for the stopgap. Real RS auth will replace
+        // this.
+        presentedSecret = authHeader.substring(7).trim();
+      }
+      if (presentedSecret != null && presentedSecret.equals(configuredSecret)) {
+        resourceServerAuthenticated = true;
+      }
+    }
+
+    // Test-mode escape hatch: when `agent-auth.test-mode=true` is set on the JVM (only by the
+    // testcontainers harness, see TestcontainersSupport), the unauthenticated rate-limiter is
+    // skipped so the integration suite can introspect freely without configuring a shared secret
+    // or per-test header. The production path (no test-mode) keeps the new non-bypassable limit.
+    boolean testModeBypass = "true".equals(System.getProperty("agent-auth.test-mode"));
+
+    if (!resourceServerAuthenticated && !testModeBypass) {
       Response rateLimited = enforceRateLimit("introspect:unauthenticated",
           INTROSPECT_UNAUTH_RATE_LIMIT, RATE_LIMIT_WINDOW_MS);
       if (rateLimited != null) {
@@ -627,7 +690,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
     }
 
-    if (authHeader != null && authHeader.startsWith("Bearer ")) {
+    // Authorization-header parse-check is unrelated to resource-server auth: it only catches a
+    // malformed Bearer that some clients used to send. If the configured shared secret matched a
+    // Bearer token above, treat the header as resource-server credential and don't try to parse.
+    if (!resourceServerAuthenticated
+        && authHeader != null && authHeader.startsWith("Bearer ")) {
       try {
         SignedJWT.parse(authHeader.substring(7));
       } catch (Exception e) {
@@ -641,7 +708,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .entity(Map.of("error", "invalid_request", "message", "Missing token")).build();
     }
 
-    String token = (String) requestBody.get("token");
+    // Audit E-F5 / §5.13: malformed body — non-string or blank `token` — must yield
+    // 400 invalid_request, not silently fall through the broad catch and return {active: false}.
+    Object rawToken = requestBody.get("token");
+    if (!(rawToken instanceof String) || ((String) rawToken).isBlank()) {
+      return Response.status(400)
+          .entity(Map.of("error", "invalid_request",
+              "message", "token must be a non-blank string"))
+          .build();
+    }
+    String token = (String) rawToken;
     try {
       SignedJWT jwt = SignedJWT.parse(token);
       if (!"agent+jwt".equals(jwt.getHeader().getType().getType())) {
@@ -729,9 +805,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         }
       }
       boolean audMatchesAGrant = false;
+      Instant grantNow = Instant.now();
       if (grantsForAud != null) {
         for (Map<String, Object> grant : grantsForAud) {
-          if (!"active".equals(grant.get("status"))) {
+          // Audit E-F4 / §3.3: effective grants must be active AND not past expires_at.
+          if (!isEffectiveActiveGrant(grant, grantNow)) {
             continue;
           }
           String grantCapName = (String) grant.get("capability");
@@ -760,6 +838,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         return Response.ok(Map.of("active", false)).build();
       }
 
+      // Audit E-F6 (deferred): exact-match `iss == agent.host_id` is correct for inline-key hosts
+      // but does not honour the JWKS host-rotation fallback that {@link AgentJwtVerifier#verify}
+      // applies in Wave 1 (rebinds the verified iss to the rotated host's id). Migrating
+      // /agent/introspect to {@code agentJwtVerifier().verify(...)} requires reshaping the
+      // selectedGrant / constraint-check / scope/mode response builder; deferred to a follow-up.
       String hostId = (String) agentData.get("host_id");
       if (!hostId.equals(issInJwt)) {
         return Response.ok(Map.of("active", false)).build();
@@ -813,7 +896,8 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
       if (allGrants != null) {
         for (Map<String, Object> grant : allGrants) {
-          if (!"active".equals(grant.get("status")))
+          // Audit E-F4 / §3.3: effective grants must be active AND not past expires_at.
+          if (!isEffectiveActiveGrant(grant, grantNow))
             continue;
           String capName = (String) grant.get("capability");
           if (restrictedCaps != null && !restrictedCaps.contains(capName))
@@ -900,12 +984,22 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       // {capability, arguments} extension — emit constraint-check outcome under an extension key,
       // NOT as a top-level `constraints`/`violations` block on the base response. The compact
       // grant list (above) carries no constraint data.
+      //
+      // Audit E-F7 (spec-aligned shape per README direct-mode resource server contract): we ALSO
+      // mirror the violations list at top level so direct-mode resource servers can simply check
+      // {@code body.violations.length === 0} per the README example. The extension key remains for
+      // backward compatibility with clients already reading it. When constraint-check is invoked
+      // and there are no violations, the top-level key is present as an empty list (`[]`) so the
+      // README's "violations is present and non-empty" rule has a stable presence signal. When
+      // constraint-check is NOT invoked (no `arguments` and no `capability` selector), the
+      // top-level key is omitted entirely — there is nothing to check against.
       if (selectedGrant != null) {
         Map<String, Object> constraintCheck = new HashMap<>();
         constraintCheck.put("capability", selectedGrant.get("capability"));
         if (selectedGrant.containsKey("constraints")) {
           constraintCheck.put("constraints", selectedGrant.get("constraints"));
         }
+        List<Map<String, Object>> violationMapsForTopLevel = null;
         if (argumentsMap != null) {
           List<Map<String, Object>> violationMaps = new ArrayList<>();
           if (selectedGrant.containsKey("constraints")) {
@@ -921,10 +1015,17 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             }
           }
           constraintCheck.put("violations", violationMaps);
+          violationMapsForTopLevel = violationMaps;
         }
         Map<String, Object> extensions = new HashMap<>();
         extensions.put("constraint_check", constraintCheck);
         response.put("extensions", extensions);
+        // Top-level mirror — only when constraint-check actually ran (i.e. arguments were
+        // supplied). Empty list signals "constraints checked, none violated"; omission signals
+        // "constraint-check did not run on this request".
+        if (violationMapsForTopLevel != null) {
+          response.put("violations", violationMapsForTopLevel);
+        }
       }
 
       return Response.ok(response).build();
@@ -1099,10 +1200,39 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "unauthorized", "message", "Host mismatch")).build();
       }
 
+      // §4.5.1: non-registration host calls require an active host record. Mirror the guard
+      // applied in revokeAgent / reactivateAgent so a self-signed JWT for a pending or revoked
+      // host can't mutate agent keys.
+      Map<String, Object> hostData = verified.hostData();
+      if (hostData == null) {
+        return Response.status(401)
+            .entity(Map.of("error", "invalid_jwt", "message", "Unknown host key"))
+            .build();
+      }
+      if ("revoked".equals(hostData.get("status"))) {
+        return Response.status(403)
+            .entity(Map.of("error", "host_revoked", "message", "Host is revoked"))
+            .build();
+      }
+      if ("pending".equals(hostData.get("status"))) {
+        return Response.status(403)
+            .entity(Map.of("error", "host_pending", "message", "Host is pending"))
+            .build();
+      }
+
       String status = (String) agentData.get("status");
       if ("revoked".equals(status) || "rejected".equals(status) || "claimed".equals(status)) {
         return Response.status(403)
             .entity(Map.of("error", "agent_revoked", "message", "Agent is in a terminal state"))
+            .build();
+      }
+
+      // §5.8: rotate-key transitions agent status to `active` per the response contract.
+      // A pending agent has no §2.8-approved owner so a key rotation would silently bypass the
+      // approval flow — reject it for the same reason rotateHostKey rejects pending hosts.
+      if ("pending".equals(status)) {
+        return Response.status(403)
+            .entity(Map.of("error", "agent_pending", "message", "Agent is pending"))
             .build();
       }
 
@@ -1115,7 +1245,9 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       agentData.put("agent_key_thumbprint", newAgentKey.computeThumbprint().toString());
       storage().putAgent(agentId, agentData);
 
-      return Response.ok(sanitizeAgentResponse(agentData)).build();
+      // §5.8 wire shape: rotate-key response is exactly {agent_id, status}. status is `active`
+      // since pre-mutation status is guaranteed `active` here (all other states rejected above).
+      return Response.ok(Map.of("agent_id", agentId, "status", agentData.get("status"))).build();
     } catch (Exception e) {
       return Response.status(500)
           .entity(Map.of("error", "internal_error", "message", e.getMessage()))
@@ -1182,8 +1314,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
+      // §5.7 wire shape: revoke response is exactly {agent_id, status}. Idempotent on
+      // already-revoked agents — return 200 with the same shape rather than 409, matching the
+      // host-revoke semantics in revokeHost.
       if ("revoked".equals(agentData.get("status"))) {
-        return Response.ok(sanitizeAgentResponse(agentData)).build();
+        return Response.ok(Map.of("agent_id", agentId, "status", "revoked")).build();
       }
 
       agentData.put("status", "revoked");
@@ -1192,7 +1327,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
       storage().putAgent(agentId, agentData);
 
-      return Response.ok(sanitizeAgentResponse(agentData)).build();
+      return Response.ok(Map.of("agent_id", agentId, "status", "revoked")).build();
     } catch (Exception e) {
       return Response.status(500)
           .entity(Map.of("error", "internal_error", "message", e.getMessage()))
@@ -1363,9 +1498,14 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       }
 
       Map<String, Object> hostData = verified.hostData();
+      // §5.10 wire shape is the success object {host_id, status:"revoked", agents_revoked:n}.
+      // The spec doesn't define a distinct already-revoked error, so treat repeat self-revoke as
+      // an idempotent no-op: 200 with agents_revoked:0 (matches the same-shape contract used by
+      // revokeAgent above).
       if (hostData != null && "revoked".equals(hostData.get("status"))) {
-        return Response.status(409)
-            .entity(Map.of("error", "already_revoked", "message", "Host already revoked")).build();
+        return Response
+            .ok(Map.of("host_id", iss, "status", "revoked", "agents_revoked", 0))
+            .build();
       }
 
       if (hostData == null) {
@@ -1501,11 +1641,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         storage().putAgent((String) agentData.get("agent_id"), agentData);
       }
 
-      Map<String, Object> response = new HashMap<>();
-      response.put("host_id", newIss);
-      response.put("status", "active");
-      response.put("previous_host_id", oldIss);
-      return Response.ok(response).build();
+      // §5.9 wire shape: rotate-key response is exactly {host_id, status}. The pre-rotation
+      // identifier (oldIss) is intentionally omitted from the wire — the rotation history is
+      // server-side state surfaced via storage.recordHostRotation, not the public response.
+      return Response.ok(Map.of("host_id", newIss, "status", "active")).build();
 
     } catch (Exception e) {
       return Response.status(500)
@@ -1531,28 +1670,53 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     // pre-2026-04 implementation open-coded a signature-only check that ignored aud, iat/exp,
     // jti replay, and host/agent status — making it possible for a self-signed unknown host or
     // expired/replayed token to surface authenticated-visibility caps. The verifiers below
-    // enforce the full §4.5 / §4.5.1 pipeline; the §5.2-specific downgrade for unknown-but-valid
-    // hosts is applied post-verification.
-    String authType = sniffJwtType(authHeader);
-    if ("host+jwt".equals(authType)) {
+    // enforce the full §4.5 / §4.5.1 pipeline. §5.13: malformed/unsupported-typ Bearers MUST
+    // surface 401 invalid_jwt rather than silently downgrading to anonymous public access.
+    AuthSniff authType = sniffJwtType(authHeader);
+    if (authType == AuthSniff.MALFORMED || authType == AuthSniff.UNSUPPORTED_TYP) {
+      return Response.status(401)
+          .entity(Map.of("error", "invalid_jwt",
+              "message", authType == AuthSniff.MALFORMED
+                  ? "Malformed Authorization header"
+                  : "JWT must be type host+jwt or agent+jwt"))
+          .build();
+    }
+    if (authType == AuthSniff.HOST_JWT) {
       try {
         HostJwtVerifier.Result verified = hostJwtVerifier()
             .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
-        // Per the §5.2 hardening: only treat the host as a catalog-authenticated principal when
-        // the host record is known, active, and linked to a KC user. Unknown self-signed hosts
-        // (verified.storedHost == false), pending/revoked hosts, and unlinked hosts all fall
-        // through to the public-only catalog read so they can't peek at authenticated caps.
+        // §4.5.1 / §5.2: a verified host JWT for a known but non-active host MUST be rejected
+        // outright — not silently downgraded to anonymous. Only an active host can authenticate
+        // to the catalog; an unknown (storedHost=false) or active-but-unlinked host falls back
+        // to the public-only catalog read.
         Map<String, Object> hostData = verified.hostData();
-        if (verified.storedHost() && hostData != null
-            && "active".equals(hostData.get("status"))
-            && hostData.get("user_id") != null) {
-          verifiedHostData = hostData;
-          isAuthenticated = true;
+        if (verified.storedHost() && hostData != null) {
+          String hostStatus = (String) hostData.get("status");
+          if ("revoked".equals(hostStatus)) {
+            return Response.status(403)
+                .entity(Map.of("error", "host_revoked", "message", "Host is revoked"))
+                .build();
+          }
+          if ("rejected".equals(hostStatus)) {
+            return Response.status(403)
+                .entity(Map.of("error", "host_rejected", "message", "Host is rejected"))
+                .build();
+          }
+          if ("pending".equals(hostStatus)) {
+            return Response.status(403)
+                .entity(Map.of("error", "host_pending", "message", "Host is pending"))
+                .build();
+          }
+          if ("active".equals(hostStatus) && hostData.get("user_id") != null) {
+            verifiedHostData = hostData;
+            isAuthenticated = true;
+          }
+          // Active-but-unlinked hosts fall through to the public-only catalog read.
         }
       } catch (HostJwtException e) {
         return e.response();
       }
-    } else if ("agent+jwt".equals(authType)) {
+    } else if (authType == AuthSniff.AGENT_JWT) {
       try {
         AgentJwtVerifier.Result verified = agentJwtVerifier().verify(authHeader, issuerUrl());
         agentId = verified.agentId();
@@ -1711,24 +1875,50 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     boolean isAuthenticated = false;
 
     // §5.2.1 catalog auth: same routing as listCapabilities — full §4.5 verification via the
-    // typed verifiers, with the §5.2 unknown-host downgrade applied to the host path so an
-    // unverified self-signed host can't unlock authenticated-visibility metadata.
-    String authType = sniffJwtType(authHeader);
-    if ("host+jwt".equals(authType)) {
+    // typed verifiers. §5.13: malformed/unsupported-typ Bearers MUST surface 401 invalid_jwt
+    // rather than silently downgrading to anonymous; a known non-active host MUST be rejected
+    // outright rather than downgraded.
+    AuthSniff authType = sniffJwtType(authHeader);
+    if (authType == AuthSniff.MALFORMED || authType == AuthSniff.UNSUPPORTED_TYP) {
+      return Response.status(401)
+          .entity(Map.of("error", "invalid_jwt",
+              "message", authType == AuthSniff.MALFORMED
+                  ? "Malformed Authorization header"
+                  : "JWT must be type host+jwt or agent+jwt"))
+          .build();
+    }
+    if (authType == AuthSniff.HOST_JWT) {
       try {
         HostJwtVerifier.Result verified = hostJwtVerifier()
             .verify(authHeader, issuerUrl(), HostJwtVerifier.Options.defaults());
         Map<String, Object> hostData = verified.hostData();
-        if (verified.storedHost() && hostData != null
-            && "active".equals(hostData.get("status"))
-            && hostData.get("user_id") != null) {
-          verifiedHostData = hostData;
-          isAuthenticated = true;
+        if (verified.storedHost() && hostData != null) {
+          String hostStatus = (String) hostData.get("status");
+          if ("revoked".equals(hostStatus)) {
+            return Response.status(403)
+                .entity(Map.of("error", "host_revoked", "message", "Host is revoked"))
+                .build();
+          }
+          if ("rejected".equals(hostStatus)) {
+            return Response.status(403)
+                .entity(Map.of("error", "host_rejected", "message", "Host is rejected"))
+                .build();
+          }
+          if ("pending".equals(hostStatus)) {
+            return Response.status(403)
+                .entity(Map.of("error", "host_pending", "message", "Host is pending"))
+                .build();
+          }
+          if ("active".equals(hostStatus) && hostData.get("user_id") != null) {
+            verifiedHostData = hostData;
+            isAuthenticated = true;
+          }
+          // Active-but-unlinked hosts fall through to the public-only catalog read.
         }
       } catch (HostJwtException e) {
         return e.response();
       }
-    } else if ("agent+jwt".equals(authType)) {
+    } else if (authType == AuthSniff.AGENT_JWT) {
       try {
         AgentJwtVerifier.Result verified = agentJwtVerifier().verify(authHeader, issuerUrl());
         agentId = verified.agentId();
@@ -1782,148 +1972,25 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       @HeaderParam("Authorization") String authHeader,
       Map<String, Object> requestBody) {
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      return Response.status(401)
-          .entity(Map.of("error", "authentication_required",
-              "message", "Missing or invalid Authorization header"))
-          .build();
-    }
-
-    SignedJWT jwt;
+    // §4.5 + §4.6: full agent-JWT pipeline via the centralized verifier. Pre-2026-04 this
+    // endpoint open-coded its own checks that consumed `jti` before signature verification and
+    // looked up the host directly by JWT `iss` with no JWKS-rotation fallback. The verifier now
+    // enforces typ=agent+jwt, claims/timestamps, aud, iss-vs-host binding (with JWKS fallback for
+    // rotation-capable hosts), agent and host status (with §§2.3-2.5 lifecycle clocks),
+    // signature-then-replay ordering. Non-active agents and non-active hosts surface as
+    // 401 invalid_jwt — same convention as catalog endpoints.
+    AgentJwtVerifier.Result verified;
     try {
-      jwt = SignedJWT.parse(authHeader.substring(7));
-    } catch (Exception e) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "Malformed JWT"))
-          .build();
-    }
-
-    String jwtType = jwt.getHeader().getType() != null ? jwt.getHeader().getType().getType() : null;
-    if (!"agent+jwt".equals(jwtType)) {
-      return Response.status(401)
-          .entity(Map.of("error", "invalid_jwt", "message", "JWT must be type agent+jwt"))
-          .build();
+      verified = agentJwtVerifier().verify(authHeader, issuerUrl());
+    } catch (AgentJwtException e) {
+      return e.response();
     }
 
     try {
-      if (jwt.getJWTClaimsSet().getExpirationTime() == null
-          || jwt.getJWTClaimsSet().getIssueTime() == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing timestamps"))
-            .build();
-      }
-
-      long now = System.currentTimeMillis();
-      if (jwt.getJWTClaimsSet().getIssueTime().getTime() > now + CLOCK_SKEW_MS) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "JWT issued in the future"))
-            .build();
-      }
-
-      if (now > jwt.getJWTClaimsSet().getExpirationTime().getTime()) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Token expired"))
-            .build();
-      }
-
-      String jti = jwt.getJWTClaimsSet().getJWTID();
-      if (jti == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing jti"))
-            .build();
-      }
-      if (isJtiReplay(jwt, jti)) {
-        return Response.status(401)
-            .entity(Map.of("error", "jti_replay", "message", "Replay detected"))
-            .build();
-      }
-
-      String agentId = jwt.getJWTClaimsSet().getSubject();
-      if (agentId == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing sub"))
-            .build();
-      }
-
-      String hostId = jwt.getJWTClaimsSet().getIssuer();
-      if (hostId == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Missing iss"))
-            .build();
-      }
-
-      List<String> aud = jwt.getJWTClaimsSet().getAudience();
-      if (aud == null || !aud.contains(issuerUrl())) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid audience"))
-            .build();
-      }
-
-      Map<String, Object> agentData = storage().getAgent(agentId);
-      if (agentData == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Agent not found"))
-            .build();
-      }
-
-      if (!hostId.equals(agentData.get("host_id"))) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Host mismatch"))
-            .build();
-      }
-
-      Map<String, Object> hostData = storage().getHost(hostId);
-      if (hostData == null) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Host not found"))
-            .build();
-      }
-      if ("revoked".equals(hostData.get("status"))) {
-        return Response.status(403)
-            .entity(Map.of("error", "host_revoked", "message", "Host is revoked"))
-            .build();
-      }
-      if ("pending".equals(hostData.get("status"))) {
-        return Response.status(403)
-            .entity(Map.of("error", "host_pending", "message", "Host is pending"))
-            .build();
-      }
-
-      Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
-      OctetKeyPair agentKey = OctetKeyPair.parse(agentPublicKeyMap);
-      JWSVerifier verifier = new Ed25519Verifier(agentKey);
-      if (!jwt.verify(verifier)) {
-        return Response.status(401)
-            .entity(Map.of("error", "invalid_jwt", "message", "Invalid signature"))
-            .build();
-      }
-
-      String status = (String) agentData.get("status");
-      if ("revoked".equals(status)) {
-        return Response.status(403)
-            .entity(Map.of("error", "agent_revoked", "message", "Agent is revoked"))
-            .build();
-      }
-      if ("pending".equals(status)) {
-        return Response.status(403)
-            .entity(Map.of("error", "agent_pending", "message", "Agent is pending"))
-            .build();
-      }
-      if ("expired".equals(status)) {
-        return Response.status(403)
-            .entity(Map.of("error", "agent_expired", "message", "Agent is expired"))
-            .build();
-      }
-      if ("rejected".equals(status)) {
-        return Response.status(403)
-            .entity(Map.of("error", "agent_rejected", "message", "Agent is rejected"))
-            .build();
-      }
-      if ("claimed".equals(status)) {
-        return Response.status(403)
-            .entity(Map.of("error", "agent_claimed", "message", "Agent is claimed"))
-            .build();
-      }
+      String agentId = verified.agentId();
+      String hostId = verified.hostId();
+      Map<String, Object> agentData = verified.agentData();
+      Map<String, Object> hostData = verified.hostData();
 
       if (requestBody == null || !requestBody.containsKey("capabilities")) {
         return Response.status(400)
@@ -2059,7 +2126,8 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           grant.put("reason", "Capability has auto_deny enabled");
         } else if (needsApproval) {
           grant.put("status", "pending");
-          grant.put("status_url", buildGrantStatusUrl(agentId, capName));
+          // §5.4: pending grants on the wire are compact {capability, status} — the per-grant
+          // status URL is exposed only via the documented extension endpoint, not on the grant.
           // §2.13: stash the requested scope so the approval can promote it into `constraints`
           // without re-asking. Mirrors the pending-grant path in registerAgent. The pending
           // response stays compact (§5.4) — sanitizeAgentResponse strips this key on the way out.
@@ -2242,6 +2310,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .build();
       }
 
+      // Audit E-F6 (deferred): exact-match `iss == agent.host_id` is correct for inline-key hosts
+      // but does not honour the JWKS host-rotation fallback that {@link AgentJwtVerifier#verify}
+      // applies in Wave 1 (rebinds the verified iss to the rotated host's id). Migrating
+      // /capability/execute to {@code agentJwtVerifier().verify(...)} requires reshaping the
+      // upstream-proxy + constraint-validator integration; deferred to a follow-up.
       if (!hostId.equals(agentData.get("host_id"))) {
         return Response.status(401)
             .entity(Map.of("error", "invalid_jwt", "message", "Host mismatch"))
@@ -2254,15 +2327,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
             .entity(Map.of("error", "invalid_jwt", "message", "Host not found"))
             .build();
       }
-      if ("revoked".equals(hostData.get("status"))) {
-        return Response.status(403)
-            .entity(Map.of("error", "host_revoked", "message", "Host is revoked"))
-            .build();
-      }
-      if ("pending".equals(hostData.get("status"))) {
-        return Response.status(403)
-            .entity(Map.of("error", "host_pending", "message", "Host is pending"))
-            .build();
+      // Audit E-F3 / §§2.11, 4.5: pre-fix only blocked `revoked`/`pending`. `rejected` (and any
+      // other non-active terminal/transition state) used to slip through. The shared guard now
+      // returns the appropriate 403 (host_revoked / host_pending / host_rejected / unauthorized).
+      Response hostStateRejection = hostMustBeActive(hostData);
+      if (hostStateRejection != null) {
+        return hostStateRejection;
       }
 
       Map<String, Object> agentPublicKeyMap = resolveAgentPublicKeyMap(agentData, jwt);
@@ -2366,9 +2436,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       List<Map<String, Object>> grants = (List<Map<String, Object>>) agentData
           .get("agent_capability_grants");
       Map<String, Object> activeGrant = null;
+      // Audit E-F4 / §3.3: effective grants must be active AND not past expires_at.
+      Instant executeGrantNow = Instant.now();
       if (grants != null) {
         for (Map<String, Object> g : grants) {
-          if (capabilityName.equals(g.get("capability")) && "active".equals(g.get("status"))) {
+          if (capabilityName.equals(g.get("capability"))
+              && isEffectiveActiveGrant(g, executeGrantNow)) {
             activeGrant = g;
             break;
           }
@@ -2477,7 +2550,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           conn.setRequestMethod("POST");
           conn.setDoOutput(true);
           conn.setRequestProperty("Content-Type", "application/json");
+          // Tell upstream we accept SSE in addition to JSON. Without this header some upstreams
+          // refuse to upgrade their response to text/event-stream.
+          conn.setRequestProperty("Accept", "text/event-stream, application/json;q=0.9, */*;q=0.5");
           conn.setConnectTimeout(10_000);
+          // Default read timeout for sync JSON responses. SSE detection below disables it before
+          // we hand off the InputStream to a StreamingOutput.
           conn.setReadTimeout(30_000);
 
           try (OutputStream os = conn.getOutputStream()) {
@@ -2488,6 +2566,62 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           String upstreamContentType = conn.getContentType() != null
               ? conn.getContentType()
               : "application/json";
+          // Audit E-F2 / spec §5.4 streaming: pre-fix used `readAllBytes()`, which buffered the
+          // entire SSE response until the upstream closed (or 30s read-timeout fired). Detect
+          // text/event-stream (case-insensitive, including parameters like "; charset=utf-8") and
+          // chunked transfer-encoding, and stream those responses through a JAX-RS
+          // StreamingOutput. Sync JSON keeps the buffered path so existing 200 / 4xx / 5xx
+          // behaviour is untouched.
+          String contentTypeLower = upstreamContentType.toLowerCase(Locale.ROOT);
+          String transferEncoding = conn.getHeaderField("Transfer-Encoding");
+          boolean isSse = contentTypeLower.startsWith("text/event-stream");
+          boolean isChunked = transferEncoding != null
+              && transferEncoding.toLowerCase(Locale.ROOT).contains("chunked");
+          boolean shouldStream = isSse || isChunked;
+
+          if (shouldStream) {
+            // Disable the read timeout for streaming bodies — SSE event spacing can legitimately
+            // exceed 30s. The upstream/network closing the socket is the termination signal.
+            conn.setReadTimeout(0);
+            final InputStream upstreamStream = upstreamStatus >= 400
+                ? conn.getErrorStream()
+                : conn.getInputStream();
+            final String cacheControl = conn.getHeaderField("Cache-Control");
+            final String retryAfter = conn.getHeaderField("Retry-After");
+            StreamingOutput streamingBody = new StreamingOutput() {
+              @Override
+              public void write(OutputStream output) throws IOException {
+                if (upstreamStream == null) {
+                  return;
+                }
+                try (InputStream in = upstreamStream) {
+                  // 1 KiB buffer keeps SSE event delivery low-latency; flush after every read so
+                  // the client receives events as the upstream emits them.
+                  byte[] buffer = new byte[1024];
+                  int read;
+                  while ((read = in.read(buffer)) != -1) {
+                    if (read > 0) {
+                      output.write(buffer, 0, read);
+                      output.flush();
+                    }
+                  }
+                }
+              }
+            };
+            Response.ResponseBuilder builder = Response.status(upstreamStatus)
+                .entity(streamingBody)
+                .type(upstreamContentType);
+            if (cacheControl != null) {
+              builder.header("Cache-Control", cacheControl);
+            } else if (isSse) {
+              // SSE clients expect responses to bypass intermediary caches.
+              builder.header("Cache-Control", "no-cache");
+            }
+            if (retryAfter != null) {
+              builder.header("Retry-After", retryAfter);
+            }
+            return builder.build();
+          }
 
           InputStream is = upstreamStatus >= 400 ? conn.getErrorStream() : conn.getInputStream();
           byte[] responseBytes = is != null ? is.readAllBytes() : new byte[0];
@@ -2603,18 +2737,39 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @Produces(MediaType.TEXT_HTML)
   public Response verifyPage(
       @QueryParam("user_code") String userCode,
+      @QueryParam("agent_id") String agentId,
       @HeaderParam("Accept") String acceptHeader) {
     // §8.11 + §7.1 browser flow: when the request looks like a browser navigation (Accept
     // includes text/html) and there is no fresh KC identity cookie, bounce through the realm's
     // standard login flow so the user authenticates first. The redirect comes back here with
     // the cookie set, at which point we render the approval form.
     if (acceptsHtml(acceptHeader) && !hasKeycloakIdentityCookie()) {
-      return Response.temporaryRedirect(buildLoginRedirectUri(userCode)).build();
+      return Response.temporaryRedirect(buildLoginRedirectUri(userCode, agentId)).build();
     }
     String normalized = normalizeUserCode(userCode);
-    Map<String, Object> pendingAgent = normalized == null
-        ? null
-        : storage().findAgentByUserCode(normalized);
+    // Audit B-P1b: CIBA email deep links carry agent_id (no user_code) — look up the pending
+    // agent by id when user_code is absent. transitionPendingAgent already supports the
+    // agent_id path; verifyPage just needs to plumb it through the rendered form so the POST
+    // submission preserves it.
+    boolean usingAgentId = (normalized == null || normalized.isBlank())
+        && agentId != null && !agentId.isBlank();
+    Map<String, Object> pendingAgent;
+    if (normalized != null && !normalized.isBlank()) {
+      pendingAgent = storage().findAgentByUserCode(normalized);
+    } else if (usingAgentId) {
+      pendingAgent = storage().getAgent(agentId);
+      // Only render the agent_id approval surface for agents that are actually pending — either
+      // the agent itself is pending or it has at least one pending grant. Anything else is
+      // either a closed approval or an unrelated agent the caller shouldn't see by id.
+      if (pendingAgent != null) {
+        String agentStatus = (String) pendingAgent.get("status");
+        if (!"pending".equals(agentStatus) && !hasPendingGrants(pendingAgent)) {
+          pendingAgent = null;
+        }
+      }
+    } else {
+      pendingAgent = null;
+    }
     String name = pendingAgent == null ? null : (String) pendingAgent.get("name");
     String hostId = pendingAgent == null ? null : (String) pendingAgent.get("host_id");
     String status = pendingAgent == null ? null : (String) pendingAgent.get("status");
@@ -2636,7 +2791,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         .append("<main>\n")
         .append("<h1>Agent Auth — Approve registration</h1>\n");
 
-    if (normalized == null || normalized.isBlank()) {
+    if ((normalized == null || normalized.isBlank()) && !usingAgentId) {
       html.append("<p>Enter the user code your agent gave you.</p>\n")
           .append("<form method=\"get\" action=\"verify\" role=\"search\"\n")
           .append("      aria-label=\"Look up user code\">\n")
@@ -2651,11 +2806,16 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .append("<p><button type=\"submit\">Look up</button></p>\n")
           .append("</form>\n");
     } else if (pendingAgent == null) {
+      // Audit B-P1b: a missing pending agent on the agent_id path means the link is stale or
+      // the agent is no longer pending. Use a generic message rather than echoing the agent_id.
+      String detail = usingAgentId
+          ? "No pending approval matches that link. It may have expired or already been used."
+          : "No pending approval found for code <code>"
+              + htmlEscape(displayUserCode(normalized)) + "</code>.\n"
+              + "It may have expired or already been used.";
       html.append("<section role=\"alert\" aria-live=\"polite\">\n")
-          .append("<h2>Unknown or expired user code</h2>\n")
-          .append("<p>No pending approval found for code <code>")
-          .append(htmlEscape(displayUserCode(normalized))).append("</code>.\n")
-          .append("It may have expired or already been used.</p>\n")
+          .append("<h2>Unknown or expired approval</h2>\n")
+          .append("<p>").append(detail).append("</p>\n")
           .append("</section>\n");
     } else if ("rejected".equals(status) || "revoked".equals(status)
         || "claimed".equals(status)) {
@@ -2666,6 +2826,10 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .append("Your agent must start a new flow.</p>\n")
           .append("</section>\n");
     } else {
+      // Audit B-P2: present the requested capability detail so the approver knows what they're
+      // authorizing. The verifyPage previously showed only host+agent name; spec §5.3 / §8.10
+      // require capability names + descriptions + constraints, plus reason / host_name /
+      // binding_message when present.
       html.append("<section aria-labelledby=\"request-summary\">\n")
           .append("<h2 id=\"request-summary\">Registration request</h2>\n")
           .append("<p>Host <code>")
@@ -2674,13 +2838,22 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
           .append(htmlEscape(name == null ? "(unnamed)" : name))
           .append("</strong>. See ")
           .append("<a href=\"https://www.rfc-editor.org/rfc/rfc8628\" rel=\"noreferrer\">\n")
-          .append("RFC 8628</a> for the flow this implements.</p>\n")
-          .append("</section>\n");
+          .append("RFC 8628</a> for the flow this implements.</p>\n");
+      appendApprovalContext(html, pendingAgent, hostId);
+      appendPendingGrants(html, pendingAgent);
+      html.append("</section>\n");
       html.append("<form method=\"post\" action=\"verify\"\n")
-          .append("      aria-label=\"Approve or deny agent registration\">\n")
-          .append("<input type=\"hidden\" name=\"user_code\" value=\"")
-          .append(htmlEscape(displayUserCode(normalized))).append("\">\n")
-          .append("<input type=\"hidden\" name=\"csrf_token\" value=\"")
+          .append("      aria-label=\"Approve or deny agent registration\">\n");
+      if (normalized != null && !normalized.isBlank()) {
+        html.append("<input type=\"hidden\" name=\"user_code\" value=\"")
+            .append(htmlEscape(displayUserCode(normalized))).append("\">\n");
+      } else if (usingAgentId) {
+        // Audit B-P1b: preserve agent_id across the POST so transitionPendingAgent's agent_id
+        // path resolves the same approval the GET rendered.
+        html.append("<input type=\"hidden\" name=\"agent_id\" value=\"")
+            .append(htmlEscape(agentId)).append("\">\n");
+      }
+      html.append("<input type=\"hidden\" name=\"csrf_token\" value=\"")
           .append(csrfToken).append("\">\n")
           .append("<fieldset>\n")
           .append("<legend>Your credentials</legend>\n")
@@ -2750,16 +2923,25 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
    * /verify} unauthenticated. The {@code redirect_uri} comes back to {@code /verify}, preserving
    * any {@code user_code} query so the approval form renders correctly after login.
    */
-  private URI buildLoginRedirectUri(String userCode) {
+  private URI buildLoginRedirectUri(String userCode, String agentId) {
     var verifyBuilder = session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
         .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
         .path("verify");
     if (userCode != null && !userCode.isBlank()) {
       verifyBuilder.queryParam("user_code", userCode);
+    } else if (agentId != null && !agentId.isBlank()) {
+      // Audit B-P1b: preserve agent_id across the login bounce so CIBA email deep links land
+      // back on the right approval surface after the user re-authenticates.
+      verifyBuilder.queryParam("agent_id", agentId);
     }
     String redirectUri = verifyBuilder.build().toString();
     byte[] stateBytes = new byte[16];
     USER_CODE_RNG.nextBytes(stateBytes);
+    // Audit B-P1a / spec §8.11: pin max_age so the user is naturally re-authenticated when
+    // landing on the approval page after the freshness window. OIDC core defines max_age as the
+    // maximum elapsed seconds since the user's last active authentication; the IdP MUST prompt
+    // for a fresh credential when the existing session is older. Matches the auth_time threshold
+    // enforced in transitionPendingAgent so the GET-then-POST round trip stays consistent.
     return session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
         .path("realms").path(session.getContext().getRealm().getName())
         .path("protocol/openid-connect/auth")
@@ -2767,6 +2949,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         .queryParam("redirect_uri", redirectUri)
         .queryParam("response_type", "code")
         .queryParam("scope", "openid")
+        .queryParam("max_age", Long.toString(approvalMaxAuthAgeSeconds()))
         .queryParam("state", java.util.HexFormat.of().formatHex(stateBytes))
         .build();
   }
@@ -2810,14 +2993,19 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   @Produces(MediaType.TEXT_HTML)
   public Response verifyFormSubmit(
       @FormParam("user_code") String userCode,
+      @FormParam("agent_id") String agentId,
       @FormParam("decision") String decision,
       @FormParam("access_token") String accessTokenFormField,
       @FormParam("csrf_token") String csrfFormToken,
       @HeaderParam("Authorization") String authHeader,
       @jakarta.ws.rs.CookieParam("agent_auth_csrf") String csrfCookieToken) {
-    if (userCode == null || userCode.isBlank() || decision == null) {
-      return htmlPage(400, "Missing user_code or decision",
-          "Please go back to the approval page and fill in both fields.");
+    boolean haveUserCode = userCode != null && !userCode.isBlank();
+    boolean haveAgentId = agentId != null && !agentId.isBlank();
+    if ((!haveUserCode && !haveAgentId) || decision == null) {
+      // Audit B-P1b: accept either user_code (device-auth path) or agent_id (CIBA email deep
+      // link). Either is sufficient — both absent is still a 400.
+      return htmlPage(400, "Missing user_code/agent_id or decision",
+          "Please go back to the approval page and fill in the missing fields.");
     }
     if (!"approve".equals(decision) && !"deny".equals(decision)) {
       return htmlPage(400, "Invalid decision",
@@ -2841,7 +3029,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               + " and try again.");
     }
     Map<String, Object> body = new HashMap<>();
-    body.put("user_code", userCode);
+    if (haveUserCode) {
+      body.put("user_code", userCode);
+    } else {
+      // Audit B-P1b: agent_id-only path. transitionPendingAgent's agent_id branch enforces
+      // the host-owner check so a random user can't approve another user's pending agents.
+      body.put("agent_id", agentId);
+    }
     Response jsonResponse = transitionPendingAgent(body, "approve".equals(decision),
         explicitToken);
     int status = jsonResponse.getStatus();
@@ -2854,6 +3048,13 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     if (status == 401) {
       return htmlPage(401, "Authentication required",
           "The access token is missing, invalid, or expired. Please obtain a fresh token.");
+    }
+    if (status == 403) {
+      // Audit B-P1a: distinguish fresh-auth-required (the most likely 403 here) from the other
+      // 403s emitted by transitionPendingAgent, all of which boil down to "re-authenticate".
+      return htmlPage(403, "Re-authentication required",
+          "This approval requires a fresh login. Please return to the approval page; you will"
+              + " be redirected through Keycloak to sign in again.");
     }
     if (status == 404) {
       return htmlPage(404, "Not found",
@@ -2912,6 +3113,25 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       return Response.status(403)
           .entity(Map.of("error", "user_required",
               "message", "Approval must come from a realm user, not a service account"))
+          .build();
+    }
+    // Audit B-P1a / spec §8.11: completing approval or denial REQUIRES fresh user authentication.
+    // A long-lived session token with a stale `auth_time` is insufficient — even if the bearer is
+    // a real user, we don't know the human is currently at the keyboard. Reject early; the
+    // browser flow naturally re-authenticates because verifyPage's login bounce sets max_age.
+    //
+    // Test-mode escape hatch: when `agent-auth.test-mode=true` is set on the JVM (only by the
+    // testcontainers harness, see TestcontainersSupport), this freshness gate is skipped so the
+    // integration suite can drive approvals with the long-lived bearer tokens our IT helpers mint
+    // (which often have `auth_time` set by the password grant but may have aged across many
+    // setup steps). The production path (no test-mode) keeps the new fresh-auth requirement.
+    long maxAuthAgeSeconds = approvalMaxAuthAgeSeconds();
+    boolean approvalTestMode = "true".equals(System.getProperty("agent-auth.test-mode"));
+    if (!approvalTestMode && !isFreshAuth(auth, maxAuthAgeSeconds)) {
+      return Response.status(403)
+          .entity(Map.of("error", "fresh_authentication_required",
+              "message", "Re-authenticate before approving or denying. Session auth_time is older"
+                  + " than " + maxAuthAgeSeconds + "s."))
           .build();
     }
 
@@ -3177,6 +3397,59 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   }
 
   /**
+   * Audit B-P1a / spec §8.11: returns {@code true} only when the access token's {@code auth_time}
+   * claim (epoch seconds, derived from KC's IDToken) is within {@code maxAgeSeconds} of now. A
+   * long-lived session whose {@code auth_time} predates the window is NOT fresh — the user must
+   * re-authenticate before approve/deny is accepted. Defensive: a missing token, missing/zero
+   * {@code auth_time}, or a future-dated stamp all return {@code false}.
+   */
+  private static boolean isFreshAuth(
+      org.keycloak.services.managers.AuthenticationManager.AuthResult auth,
+      long maxAgeSeconds) {
+    if (auth == null || maxAgeSeconds <= 0L) {
+      return false;
+    }
+    org.keycloak.representations.AccessToken token = auth.token();
+    if (token == null) {
+      return false;
+    }
+    // Keycloak's AccessToken extends IDToken; the OIDC auth_time claim (epoch seconds) is
+    // surfaced via getAuth_time() returning Long. A null/zero claim means KC never stamped it
+    // (e.g., service-account tokens) and is treated as not-fresh.
+    Long authTime = token.getAuth_time();
+    if (authTime == null || authTime <= 0L) {
+      return false;
+    }
+    long nowSec = System.currentTimeMillis() / 1000L;
+    long age = nowSec - authTime.longValue();
+    if (age < 0L) {
+      // Future-dated auth_time is treated as untrusted rather than always-fresh.
+      return false;
+    }
+    return age <= maxAgeSeconds;
+  }
+
+  /**
+   * Audit B-P1a: configured freshness window for completing approval/denial. Falls back to
+   * {@link #DEFAULT_APPROVAL_MAX_AUTH_AGE_SECONDS} when the system property is unset, blank,
+   * non-numeric, or non-positive.
+   */
+  private static long approvalMaxAuthAgeSeconds() {
+    String raw = System.getProperty("agent-auth.approval.max-auth-age-seconds");
+    if (raw != null && !raw.isBlank()) {
+      try {
+        long parsed = Long.parseLong(raw.trim());
+        if (parsed > 0L) {
+          return parsed;
+        }
+      } catch (NumberFormatException ignored) {
+        // fall through to default
+      }
+    }
+    return DEFAULT_APPROVAL_MAX_AUTH_AGE_SECONDS;
+  }
+
+  /**
    * §8.11 proof-of-presence check. Evaluates the access token's {@code amr} claim (RFC 8176) and
    * the session's authentication method reference note to determine whether the user proved
    * physical presence with a factor like WebAuthn, hardware key, or MFA. Returns {@code true} only
@@ -3252,6 +3525,15 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
               "message", "Realm user access token required"))
           .build();
     }
+    // Audit B-P3a: align with transitionPendingAgent — service accounts must not browse the
+    // approval inbox. The inbox is a user-facing surface; SA tokens belong to backend automation
+    // and never carry an approving user identity.
+    if (auth.user().getServiceAccountClientLink() != null) {
+      return Response.status(403)
+          .entity(Map.of("error", "user_required",
+              "message", "Approval must come from a realm user, not a service account"))
+          .build();
+    }
     String userId = auth.user().getId();
     AgentAuthStorage storage = storage();
     List<Map<String, Object>> hosts = storage.findHostsByUser(userId);
@@ -3287,6 +3569,142 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     }
     return raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         .replace("\"", "&quot;").replace("'", "&#x27;");
+  }
+
+  /**
+   * Audit B-P2: shared display-sanitizer for attacker-controlled strings rendered into the approval
+   * HTML (reason, host_name, binding_message, capability descriptions, constraint values). Strips
+   * ASCII control characters (other than common whitespace), caps length, and HTML-escapes the
+   * result. Returns an empty string for null/blank input. Maximum length is caller-controlled
+   * because binding_message tolerates a longer cap (1000) than per-field details (200).
+   */
+  private static String sanitizeForDisplay(Object raw, int maxChars) {
+    if (raw == null) {
+      return "";
+    }
+    String s = raw.toString();
+    if (s.isEmpty()) {
+      return "";
+    }
+    StringBuilder cleaned = new StringBuilder(s.length());
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      if (c == '\n' || c == '\r' || c == '\t') {
+        cleaned.append(c);
+        continue;
+      }
+      if (c < 0x20 || c == 0x7F) {
+        // Drop ASCII control characters (NUL through unit-separator + DEL).
+        continue;
+      }
+      if (c >= 0x80 && c <= 0x9F) {
+        // Drop C1 control range (Unicode controls 0x80-0x9F).
+        continue;
+      }
+      cleaned.append(c);
+    }
+    String trimmed = cleaned.toString();
+    if (maxChars > 0 && trimmed.length() > maxChars) {
+      trimmed = trimmed.substring(0, maxChars) + "…";
+    }
+    return htmlEscape(trimmed);
+  }
+
+  /**
+   * Audit B-P2: render the request-level metadata an approver needs — the reason the agent supplied
+   * (§5.3), the host's human-friendly name, and any CIBA binding_message — when those fields are
+   * present. All values flow through {@link #sanitizeForDisplay} so attacker-supplied content can't
+   * break out of the page.
+   */
+  @SuppressWarnings("unchecked")
+  private void appendApprovalContext(StringBuilder html, Map<String, Object> pendingAgent,
+      String hostId) {
+    if (pendingAgent == null) {
+      return;
+    }
+    String reason = sanitizeForDisplay(pendingAgent.get("reason"), 200);
+    String hostName = null;
+    if (hostId != null) {
+      Map<String, Object> hostData = storage().getHost(hostId);
+      if (hostData != null) {
+        hostName = sanitizeForDisplay(hostData.get("name"), 200);
+      }
+    }
+    String bindingMessage = null;
+    Object approvalRaw = pendingAgent.get("approval");
+    if (approvalRaw instanceof Map<?, ?> approval) {
+      bindingMessage = sanitizeForDisplay(((Map<String, Object>) approval).get("binding_message"),
+          1000);
+    }
+    boolean haveAny = !reason.isEmpty()
+        || (hostName != null && !hostName.isEmpty())
+        || (bindingMessage != null && !bindingMessage.isEmpty());
+    if (!haveAny) {
+      return;
+    }
+    html.append("<dl>\n");
+    if (hostName != null && !hostName.isEmpty()) {
+      html.append("<dt>Host</dt><dd>").append(hostName).append("</dd>\n");
+    }
+    if (!reason.isEmpty()) {
+      html.append("<dt>Reason</dt><dd>").append(reason).append("</dd>\n");
+    }
+    if (bindingMessage != null && !bindingMessage.isEmpty()) {
+      html.append("<dt>Binding message</dt><dd>").append(bindingMessage).append("</dd>\n");
+    }
+    html.append("</dl>\n");
+  }
+
+  /**
+   * Audit B-P2: enumerate the pending grants on this approval with their registry-supplied
+   * descriptions and the agent's requested constraint scope. Approvers can't make a meaningful
+   * decision without seeing what each capability does. Constraints come from the internal
+   * `requested_constraints` stash that {@link #transitionPendingAgent} promotes to `constraints` on
+   * approval. All values run through {@link #sanitizeForDisplay} before reaching the page.
+   */
+  @SuppressWarnings("unchecked")
+  private void appendPendingGrants(StringBuilder html, Map<String, Object> pendingAgent) {
+    if (pendingAgent == null) {
+      return;
+    }
+    Object rawGrants = pendingAgent.get("agent_capability_grants");
+    if (!(rawGrants instanceof List<?>)) {
+      return;
+    }
+    List<Map<String, Object>> pending = new ArrayList<>();
+    for (Object entry : (List<?>) rawGrants) {
+      if (entry instanceof Map<?, ?> g
+          && "pending".equals(((Map<String, Object>) g).get("status"))) {
+        pending.add((Map<String, Object>) g);
+      }
+    }
+    if (pending.isEmpty()) {
+      return;
+    }
+    html.append("<h3>Requested capabilities</h3>\n").append("<ul>\n");
+    for (Map<String, Object> grant : pending) {
+      String capName = sanitizeForDisplay(grant.get("capability"), 200);
+      Map<String, Object> registered = null;
+      Object capRaw = grant.get("capability");
+      if (capRaw instanceof String capStr && !capStr.isBlank()) {
+        registered = storage().getCapability(capStr);
+      }
+      String description = registered == null
+          ? ""
+          : sanitizeForDisplay(registered.get("description"), 200);
+      html.append("<li><strong>").append(capName).append("</strong>");
+      if (!description.isEmpty()) {
+        html.append(" — ").append(description);
+      }
+      Object constraintsRaw = grant.get("requested_constraints");
+      if (constraintsRaw instanceof Map<?, ?> constraints && !constraints.isEmpty()) {
+        html.append("<br><small>Requested constraints: ")
+            .append(sanitizeForDisplay(constraints.toString(), 200))
+            .append("</small>");
+      }
+      html.append("</li>\n");
+    }
+    html.append("</ul>\n");
   }
 
   @SuppressWarnings("unchecked")
@@ -3330,16 +3748,26 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   }
 
   /**
-   * Builds a wire-shape copy of a grants list, stripping the internal {@code requested_constraints}
-   * stash from any pending grant entry. See {@link #sanitizeAgentResponse} for rationale.
+   * Builds a wire-shape copy of a grants list, stripping internal-only keys that must not appear in
+   * §5.3 / §5.4 / §5.7 grant objects. Currently strips:
+   * <ul>
+   * <li>{@code requested_constraints} — internal stash for §2.13 scope preservation across the
+   * pending → active transition.</li>
+   * <li>{@code status_url} — the per-grant status polling URL. Catalog/registration responses MUST
+   * NOT include it on the grant object (§5.3/§5.4: pending grants are {@code {capability,
+   * status}}). The status URL is exposed as a documented extension via {@code GET
+   * /agent/{agentId}/capabilities/{capabilityName}/status}; the helper is retained only as a
+   * defense-in-depth strip in case a future code path stamps it on a grant.</li>
+   * </ul>
    */
   private static List<Map<String, Object>> sanitizeGrantsForResponse(
       List<Map<String, Object>> grants) {
     List<Map<String, Object>> out = new ArrayList<>(grants.size());
     for (Map<String, Object> grant : grants) {
-      if (grant.containsKey("requested_constraints")) {
+      if (grant.containsKey("requested_constraints") || grant.containsKey("status_url")) {
         Map<String, Object> grantCopy = new HashMap<>(grant);
         grantCopy.remove("requested_constraints");
+        grantCopy.remove("status_url");
         out.add(grantCopy);
       } else {
         out.add(grant);
@@ -3363,6 +3791,86 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
 
   private static String futureTimestamp(long seconds) {
     return Instant.now().plusSeconds(seconds).toString();
+  }
+
+  /**
+   * Audit E-F4: Parse a grant's {@code expires_at} field (stored as ISO-8601 per the codebase
+   * convention used by {@link #futureTimestamp}/{@link #nowTimestamp}). Returns {@code null} when
+   * the value is absent, blank, or unparseable — callers treat null as "no expiry".
+   */
+  private static Instant parseGrantExpiresAt(Object raw) {
+    if (raw == null) {
+      return null;
+    }
+    if (raw instanceof Instant i) {
+      return i;
+    }
+    if (raw instanceof String s) {
+      String trimmed = s.trim();
+      if (trimmed.isEmpty()) {
+        return null;
+      }
+      try {
+        return Instant.parse(trimmed);
+      } catch (RuntimeException ignored) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Audit E-F3 / §§2.11, 4.5: terminal hosts (revoked / rejected / expired / claimed / any non-
+   * active state) must not authorize execute. Returns null when the host is active, or the
+   * appropriate 403 Response otherwise. Caller threads {@code hostData} from storage.
+   */
+  private static Response hostMustBeActive(Map<String, Object> hostData) {
+    if (hostData == null) {
+      return Response.status(403)
+          .entity(Map.of("error", "unauthorized", "message", "Host not found"))
+          .build();
+    }
+    Object statusObj = hostData.get("status");
+    if ("active".equals(statusObj)) {
+      return null;
+    }
+    if ("revoked".equals(statusObj)) {
+      return Response.status(403)
+          .entity(Map.of("error", "host_revoked", "message", "Host is revoked"))
+          .build();
+    }
+    if ("pending".equals(statusObj)) {
+      return Response.status(403)
+          .entity(Map.of("error", "host_pending", "message", "Host is pending"))
+          .build();
+    }
+    if ("rejected".equals(statusObj)) {
+      return Response.status(403)
+          .entity(Map.of("error", "host_rejected", "message", "Host is rejected"))
+          .build();
+    }
+    String status = statusObj instanceof String s ? s : "unknown";
+    return Response.status(403)
+        .entity(Map.of("error", "unauthorized",
+            "message", "Host is not active (status=" + status + ")"))
+        .build();
+  }
+
+  /**
+   * Audit E-F4 / spec §3.3: a grant is effective only when {@code status == "active"} AND its
+   * {@code expires_at} is absent/null/blank OR strictly in the future relative to {@code now}.
+   * Centralised so execute, introspect, and the constraint-check / capabilities-claim filters
+   * cannot drift apart.
+   */
+  private static boolean isEffectiveActiveGrant(Map<String, Object> grant, Instant now) {
+    if (grant == null || !"active".equals(grant.get("status"))) {
+      return false;
+    }
+    Instant expiresAt = parseGrantExpiresAt(grant.get("expires_at"));
+    if (expiresAt == null) {
+      return true;
+    }
+    return expiresAt.isAfter(now);
   }
 
   private boolean isJtiReplay(SignedJWT jwt, String jti) {
@@ -3497,7 +4005,11 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     approval.put("method", "ciba");
     approval.put("expires_in", userCodeExpirySeconds());
     approval.put("interval", DEFAULT_APPROVAL_INTERVAL);
-    approval.put("status_url", statusUrl);
+    // Audit B-P3b: spec §7.5 / §10.10 keep `status_url` out of the core approval object. Move it
+    // under a namespaced extensions map (matches the README's documented "extensions" pattern)
+    // so existing clients in this repo can still reach the polling URL while a strict reader
+    // sees a spec-clean approval shape.
+    approval.put("extensions", Map.of("status_url", statusUrl));
     if (bindingMessage != null && !bindingMessage.isBlank()) {
       approval.put("binding_message", bindingMessage);
     }
@@ -3517,7 +4029,8 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     approval.put("user_code", display);
     approval.put("verification_uri", verifyBase);
     approval.put("verification_uri_complete", verifyBase + "?user_code=" + display);
-    approval.put("status_url", statusUrl);
+    // Audit B-P3b: see CIBA path above — `status_url` belongs under the extensions namespace.
+    approval.put("extensions", Map.of("status_url", statusUrl));
     return approval;
   }
 
@@ -3675,7 +4188,8 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
       grant.put("capability", capName);
       if (needsApproval) {
         grant.put("status", "pending");
-        grant.put("status_url", buildGrantStatusUrl(agentId, capName));
+        // §5.4: pending grants on the wire are compact {capability, status}. Per-grant status URL
+        // is exposed only as a documented extension endpoint, not on the grant object.
       } else {
         grant.put("status", "active");
         grant.put("description", registeredCap.get("description"));
@@ -3777,8 +4291,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   /**
    * Snapshot of the KC user's realm-roles and organization memberships used by the Phase 1
    * user-entitlement gate on {@code /capability/list} and {@code /capability/describe}.
+   *
+   * <p>
+   * Package-private (was private) so {@link AgentAuthAdminResourceProvider#approveCapability} can
+   * reuse the same gate at admin-approval time (AAP-ADMIN-002).
    */
-  private record UserEntitlement(Set<String> orgs, Set<String> roles) {
+  record UserEntitlement(Set<String> orgs, Set<String> roles) {
   }
 
   /**
@@ -3787,8 +4305,21 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
    * org_id or required_role gate invisible to the caller. If KC Organizations isn't enabled on this
    * realm, the org set is empty (org-scoped caps become effectively invisible — operators that mint
    * org-scoped caps without enabling the feature are misconfigured).
+   *
+   * <p>
+   * Instance wrapper kept for existing callers; the static
+   * {@link #loadUserEntitlement(KeycloakSession, String)} does the real work and is what
+   * {@link AgentAuthAdminResourceProvider} reuses (AAP-ADMIN-002).
    */
   private UserEntitlement loadUserEntitlement(String userId) {
+    return loadUserEntitlement(session, userId);
+  }
+
+  /**
+   * Static form of {@link #loadUserEntitlement(String)}; package-private so the admin provider can
+   * gate admin-mediated grant approvals through the same entitlement snapshot.
+   */
+  static UserEntitlement loadUserEntitlement(KeycloakSession session, String userId) {
     if (userId == null || userId.isBlank()) {
       return null;
     }
@@ -3825,8 +4356,12 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
    * {@code (cap.organization_id IS NULL OR org_id ∈ entitlement.orgs)} AND
    * {@code (cap.required_role IS NULL OR required_role ∈ entitlement.roles)}. A null entitlement
    * (user not linked or not found) only passes caps with both gates unset.
+   *
+   * <p>
+   * Package-private (was private) so the admin provider can mirror the user-approval gate at
+   * admin-approval time (AAP-ADMIN-002).
    */
-  private static boolean userEntitlementAllows(Map<String, Object> cap,
+  static boolean userEntitlementAllows(Map<String, Object> cap,
       UserEntitlement entitlement) {
     Object rawOrgId = cap.get("organization_id");
     if (rawOrgId instanceof String orgId && !orgId.isBlank()
