@@ -79,7 +79,7 @@ Base: `/realms/{realm}/agent-auth/`
 
 #### End user (browser approval flow)
 
-Base: `/realms/{realm}/agent-auth/`. All endpoints require an authenticated realm user (Keycloak identity cookie or `Authorization: Bearer <user-access-token>`).
+Base: `/realms/{realm}/agent-auth/`. All endpoints require a bearer access token from a realm user (`Authorization: Bearer <user-access-token>`). The `GET /verify` page bounces unauthenticated browsers through the realm login and renders an HTML form; submission still carries the user's access token in the form body — the identity cookie alone is not sufficient for `POST /verify` / `verify/approve` / `verify/deny`.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -132,8 +132,10 @@ The resource server hosts each capability's business logic at `capability.locati
 
 The agent picks per call:
 
-- **Gateway** — `POST /capability/execute` to Keycloak with `{capability, arguments}`. Keycloak validates the JWT, runs constraint checks, and proxies to `capability.location`. Synchronous, async-pending (`202 + status_url`), and SSE responses all pass through.
+- **Gateway** — `POST /capability/execute` to Keycloak with `{capability, arguments}`. Keycloak validates the JWT, runs constraint checks, and proxies to `capability.location`. Synchronous, async-pending (`202 + status_url`), and SSE responses all pass through verbatim — Keycloak does not reshape upstream payloads, so admin-registered resource servers MUST return spec-conformant `/capability/execute` shapes ([§5.11]).
 - **Direct** — agent `POST`s straight to `capability.location` with the agent JWT in `Authorization`. The resource server verifies the JWT `aud`, calls `POST /agent/introspect` (optionally with `{capability, arguments}` for server-side constraint checks), and rejects when `active` is `false` or `violations` is present and non-empty. Useful when the resource server wants to avoid an extra hop or already has its own auth plumbing.
+
+> **Gateway audience semantics are an extension profile.** Per [§2.15] / [§4.3] the agent JWT `aud` for execution is the resolved location. Strict spec mode would have the agent post to `capability.location` directly with `aud=capability.location`. Keycloak's gateway accepts an agent JWT whose `aud=capability.location` at its own `/capability/execute` URL — Keycloak then proxies upstream. Operators who want strict-spec behavior should disable gateway mode and route agents to `capability.location` directly. The gateway-extension audience accept is intentional for this implementation and is documented here rather than advertised through a discovery flag.
 
 ### Protocol actors
 
@@ -175,7 +177,7 @@ Each capability record carries:
 
 | Field | Description |
 |-------|-------------|
-| `name` | Stable identifier (`check_balance`, `transfer_money`) |
+| `name` | Stable identifier (`check_balance`, `transfer_money`). Admin validation accepts `[a-zA-Z0-9_]+`; the spec recommends lowercase `snake_case` ([§2.14] SHOULD), so this implementation is a documented relaxation — choose lowercase for cross-implementation interoperability. |
 | `description` | Human-readable explanation |
 | `location` | URL where the resource server executes the capability. If omitted, clients fall back to `default_location` from discovery ([§2.15] / [§5.1]). Capabilities without a location appear in discovery and grants but can't be proxied through gateway mode. |
 | `input` / `output` | JSON Schema for arguments and results |
@@ -305,6 +307,8 @@ The Dockerfile is multi-stage. The builder runs `mvn package` against the checke
 [§2.2]: https://agent-auth-protocol.com/specification/v1.0-draft#22-agent-modes
 [§2.3]: https://agent-auth-protocol.com/specification/v1.0-draft#23-agent-states
 [§2.12]: https://agent-auth-protocol.com/specification/v1.0-draft#212-capabilities
+[§2.14]: https://agent-auth-protocol.com/specification/v1.0-draft#214-capability-naming
+[§5.11]: https://agent-auth-protocol.com/specification/v1.0-draft#511-execute-capability
 [§2.21]: https://agent-auth-protocol.com/specification/v1.0-draft#221-delegated-agents
 [§2.22]: https://agent-auth-protocol.com/specification/v1.0-draft#222-autonomous-agents
 [§4.2]: https://agent-auth-protocol.com/specification/v1.0-draft#42-host-jwt
