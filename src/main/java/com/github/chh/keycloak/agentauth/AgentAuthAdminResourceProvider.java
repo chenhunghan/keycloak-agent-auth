@@ -1727,6 +1727,7 @@ public class AgentAuthAdminResourceProvider implements AdminRealmResourceProvide
    * {@code agent-auth.allow-insecure-capability-location} is {@code true}. Returns a 400
    * {@code invalid_capability_location} response on failure, or null when the URL is acceptable.
    */
+  @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
   private static Response validateCapabilityLocationUrl(String location) {
     URI uri;
     try {

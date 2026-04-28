@@ -1440,8 +1440,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
         agentData.put("activated_at", nowTs);
         agentData.put("expires_at", futureTimestamp(DEFAULT_AGENT_TTL_SECONDS));
 
-        List<Map<String, Object>> grants = buildReactivationGrants(hostData,
-            (String) agentData.get("agent_id"));
+        List<Map<String, Object>> grants = buildReactivationGrants(hostData);
         agentData.put("agent_capability_grants", grants);
 
         boolean needsApproval = false;
@@ -4056,13 +4055,6 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
     return userCode.replace("-", "").toUpperCase(Locale.ROOT);
   }
 
-  private String buildGrantStatusUrl(String agentId, String capabilityName) {
-    return session.getContext().getUri(UrlType.FRONTEND).getBaseUriBuilder()
-        .path("realms").path(session.getContext().getRealm().getName()).path("agent-auth")
-        .path("agent").path(agentId).path("capabilities").path(capabilityName).path("status")
-        .build().toString();
-  }
-
   @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
   private List<URI> upstreamCandidateUris(URI uri) {
     String host = uri.getHost();
@@ -4152,8 +4144,7 @@ public class AgentAuthRealmResourceProvider implements RealmResourceProvider {
   }
 
   @SuppressWarnings("unchecked")
-  private List<Map<String, Object>> buildReactivationGrants(Map<String, Object> hostData,
-      String agentId) {
+  private List<Map<String, Object>> buildReactivationGrants(Map<String, Object> hostData) {
     Object rawDefaults = hostData.getOrDefault("default_capability_grants", List.of());
     if (!(rawDefaults instanceof List<?>)) {
       return List.of();
